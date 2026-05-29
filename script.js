@@ -8481,6 +8481,7 @@ function init() {
   renderFCCategories();
   updateFC();
   updateStatsStrip();
+  initGoogleAuth();
   showScreen('home');
 }
 
@@ -9006,3 +9007,108 @@ function confirmResetProgress() {
     }, 2000);
   }
 }
+
+// ─────────────────────────────────────────
+//  GOOGLE SIGN-IN
+// ─────────────────────────────────────────
+
+// !! REPLACE THIS WITH YOUR GOOGLE CLIENT ID !!
+// Get it from console.cloud.google.com → APIs & Services → Credentials
+var GOOGLE_CLIENT_ID = '931875899245-pgent8burrtlbb9trsd5n4p31ita2m5j.apps.googleusercontent.com';
+
+var currentUser = null; // { name, email, picture, sub }
+
+function initGoogleAuth() {
+  // Restore session from localStorage
+  try {
+    var stored = localStorage.getItem('medpath_user');
+    if (stored) {
+      currentUser = JSON.parse(stored);
+      renderAuthUI();
+    }
+  } catch(e) {}
+
+  // Init Google Identity Services once the script loads
+  if (typeof google !== 'undefined' && google.accounts) {
+    setupGoogleClient();
+  } else {
+    // Script loads async — wait for it
+    window.addEventListener('load', function() {
+      if (typeof google !== 'undefined' && google.accounts) setupGoogleClient();
+    });
+  }
+}
+
+function setupGoogleClient() {
+  google.accounts.id.initialize({
+    client_id: GOOGLE_CLIENT_ID,
+    callback: handleGoogleCredential,
+    auto_select: false,
+    cancel_on_tap_outside: true
+  });
+  // Render a hidden button we can trigger
+  google.accounts.id.renderButton(
+    document.getElementById('gsiButtonContainer'),
+    { theme: 'outline', size: 'medium' }
+  );
+}
+
+function triggerGoogleSignIn() {
+  if (typeof google === 'undefined' || !google.accounts) {
+    alert('Google Sign-In is still loading. Please try again in a moment.');
+    return;
+  }
+  google.accounts.id.prompt(function(notification) {
+    // If One Tap was skipped/dismissed, fall back to the button click
+    if (notification.isSkippedMoment() || notification.isDismissedMoment()) {
+      var btn = document.querySelector('#gsiButtonContainer div[role="button"]');
+      if (btn) btn.click();
+    }
+  });
+}
+
+function handleGoogleCredential(response) {
+  // Decode the JWT (no signature verification needed client-side — Google signed it)
+  var parts = response.credential.split('.');
+  var payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+  currentUser = {
+    name:    payload.name,
+    email:   payload.email,
+    picture: payload.picture,
+    sub:     payload.sub   // unique Google user ID
+  };
+  try { localStorage.setItem('medpath_user', JSON.stringify(currentUser)); } catch(e) {}
+  renderAuthUI();
+}
+
+function signOut() {
+  if (typeof google !== 'undefined' && google.accounts) {
+    google.accounts.id.disableAutoSelect();
+  }
+  currentUser = null;
+  try { localStorage.removeItem('medpath_user'); } catch(e) {}
+  renderAuthUI();
+}
+
+function renderAuthUI() {
+  var signInBtn = document.getElementById('navSignInBtn');
+  var userEl    = document.getElementById('navUser');
+  var avatar    = document.getElementById('navAvatar');
+  var username  = document.getElementById('navUsername');
+
+  if (currentUser) {
+    // Show avatar + name, hide sign-in button
+    signInBtn.style.display = 'none';
+    userEl.style.display    = 'flex';
+    avatar.src              = currentUser.picture || '';
+    avatar.alt              = currentUser.name;
+    username.textContent    = currentUser.name.split(' ')[0]; // first name only
+  } else {
+    // Show sign-in button, hide user info
+    signInBtn.style.display = 'flex';
+    userEl.style.display    = 'none';
+  }
+}
+
+// Expose user info for other parts of the app
+function getCurrentUser() { return currentUser; }

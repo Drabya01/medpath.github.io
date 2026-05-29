@@ -102,6 +102,96 @@ body {
 .nav-back:hover { background: var(--sky); border-color: var(--blue); }
 .nav-back.visible { display: block; }
 
+/* ── Nav Auth ────────────────────────────── */
+.nav-auth {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.nav-back.visible ~ .nav-auth,
+.nav-auth { margin-left: auto; }
+
+.nav-signin-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--white);
+  border: 1.5px solid var(--grey-200);
+  border-radius: 20px;
+  padding: 5px 14px 5px 10px;
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--navy);
+  cursor: pointer;
+  transition: border-color .15s, box-shadow .15s;
+  white-space: nowrap;
+}
+.nav-signin-btn:hover {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(26,79,122,.08);
+}
+
+.nav-user {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.nav-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid var(--grey-200);
+}
+.nav-username {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--navy);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav-signout-btn {
+  background: none;
+  border: 1.5px solid var(--grey-200);
+  border-radius: 20px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--grey-600, #4b5563);
+  cursor: pointer;
+  transition: border-color .15s, color .15s;
+  white-space: nowrap;
+}
+.nav-signout-btn:hover { border-color: var(--red); color: var(--red); }
+
+/* Signed-in welcome in hero */
+.hero-welcome {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 30px;
+  padding: 6px 14px 6px 8px;
+  margin-bottom: 12px;
+  width: fit-content;
+}
+.hero-welcome-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.hero-welcome-text {
+  font-size: 13px;
+  font-weight: 500;
+  color: rgba(255,255,255,0.9);
+}
+
 /* ── Screen System ───────────────────────── */
 .screen {
   display: none;
