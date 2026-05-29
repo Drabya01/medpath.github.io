@@ -1,0 +1,815 @@
+
+
+
+
+
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MedPath — Healthcare Education</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Serif+Display:ital@0;1&display=swap" rel="stylesheet" />
+</head>
+<body>
+
+  <!-- DISCLAIMER BANNER -->
+  <div class="disclaimer-bar">
+    ⚕️ Educational only — this app does not provide medical advice, diagnosis, or treatment.
+  </div>
+
+  <!-- NAV -->
+  <nav class="nav" id="mainNav">
+    <div class="nav-logo">MedPath</div>
+    <button class="nav-back" id="navBack" onclick="goHome()">← Home</button>
+  </nav>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!--  HOME SCREEN                                -->
+  <!-- ═══════════════════════════════════════════ -->
+  <section class="screen active" id="screen-home">
+    <div class="hero">
+      <div class="hero-badge">v1.0 · Free &amp; Open</div>
+      <h1 class="hero-title">Learn Healthcare<br/><em>the interactive way.</em></h1>
+      <p class="hero-sub">Built for future healthcare professionals.</p>
+    </div>
+
+    <div class="mode-grid">
+      <button class="mode-card mc--case" onclick="showScreen('case')">
+        <div class="mc-accent"></div>
+        <div class="mc-icon-wrap">🩺</div>
+        <div class="mc-body">
+          <div class="mc-label">Case Mode</div>
+          <div class="mc-desc">Work through real-world clinical scenarios</div>
+        </div>
+        <div class="mc-arrow">→</div>
+      </button>
+      <button class="mode-card mc--anatomy" onclick="showScreen('anatomy')">
+        <div class="mc-accent"></div>
+        <div class="mc-icon-wrap">🫀</div>
+        <div class="mc-body">
+          <div class="mc-label">Anatomy Explorer</div>
+          <div class="mc-desc">Explore body systems and organs</div>
+        </div>
+        <div class="mc-arrow">→</div>
+      </button>
+      <button class="mode-card mc--flash" onclick="showScreen('flashcards')">
+        <div class="mc-accent"></div>
+        <div class="mc-icon-wrap">🗂️</div>
+        <div class="mc-body">
+          <div class="mc-label">Flashcards</div>
+          <div class="mc-desc">Master medical terms and concepts</div>
+        </div>
+        <div class="mc-arrow">→</div>
+      </button>
+      <button class="mode-card mc--quiz" onclick="showScreen('quiz')">
+        <div class="mc-accent"></div>
+        <div class="mc-icon-wrap">📝</div>
+        <div class="mc-body">
+          <div class="mc-label">Quiz Mode</div>
+          <div class="mc-desc">Test your knowledge with scored questions</div>
+        </div>
+        <div class="mc-arrow">→</div>
+      </button>
+      <button class="mode-card mc--hosa" onclick="showScreen('hosa')">
+        <div class="mc-accent"></div>
+        <div class="mc-icon-wrap">🏥</div>
+        <div class="mc-body">
+          <div class="mc-label">HOSA Events</div>
+          <div class="mc-desc">CPR, clinical skills, and competitive prep</div>
+        </div>
+        <div class="mc-arrow">→</div>
+      </button>
+      <button class="mode-card mc--progress" onclick="showScreen('progress')">
+        <div class="mc-accent"></div>
+        <div class="mc-icon-wrap">📊</div>
+        <div class="mc-body">
+          <div class="mc-label">Progress</div>
+          <div class="mc-desc">Track your stats, streaks, and weak spots</div>
+        </div>
+        <div class="mc-arrow">→</div>
+      </button>
+    </div>
+
+    <div class="home-footer">
+      <button class="home-about-link" onclick="showScreen('about')">ℹ️ About MedPath</button>
+    </div>
+
+  </section>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!--  CASE MODE                                  -->
+  <!-- ═══════════════════════════════════════════ -->
+  <section class="screen" id="screen-case">
+    <div class="screen-header">
+      <h2>🩺 Case Mode</h2>
+      <p>Choose your difficulty level — you'll get a random case to work through.</p>
+    </div>
+
+    <!-- Difficulty Picker -->
+    <div id="case-difficulty-picker">
+      <div class="diff-picker-grid">
+        <button class="diff-card diff-card--beginner" onclick="startRandomCase('beginner')">
+          <div class="diff-card-icon">🌱</div>
+          <div class="diff-card-label">Beginner</div>
+          <div class="diff-card-desc">Common presentations with clear, straightforward clues. Great for first-time learners.</div>
+          <div class="diff-card-count" id="diffCount-beginner"></div>
+        </button>
+        <button class="diff-card diff-card--intermediate" onclick="startRandomCase('intermediate')">
+          <div class="diff-card-icon">⚡</div>
+          <div class="diff-card-label">Intermediate</div>
+          <div class="diff-card-desc">Multiple systems involved. Requires connecting symptoms and thinking critically.</div>
+          <div class="diff-card-count" id="diffCount-intermediate"></div>
+        </button>
+        <button class="diff-card diff-card--advanced" onclick="startRandomCase('advanced')">
+          <div class="diff-card-icon">🔬</div>
+          <div class="diff-card-label">Advanced</div>
+          <div class="diff-card-desc">Complex presentations, atypical features, and nuanced differentials. For serious learners.</div>
+          <div class="diff-card-count" id="diffCount-advanced"></div>
+        </button>
+        <button class="diff-card diff-card--expert" onclick="startRandomCase('expert')">
+          <div class="diff-card-icon">🏥</div>
+          <div class="diff-card-label">Expert</div>
+          <div class="diff-card-desc">Rare conditions, overlapping presentations, and high-stakes reasoning. Residency-level thinking.</div>
+          <div class="diff-card-count" id="diffCount-expert"></div>
+        </button>
+      </div>
+    </div>
+
+    <!-- Case Detail -->
+    <div id="case-detail" class="hidden">
+      <div class="case-card">
+        <div class="case-header-row">
+          <div class="case-tag" id="caseTag"></div>
+          <div class="case-diff-badge" id="caseDiffBadge"></div>
+        </div>
+        <h3 id="caseTitle"></h3>
+        <div class="scenario-label">📋 Learning Scenario</div>
+        <div class="case-scenario" id="caseScenario"></div>
+
+        <div class="case-section">
+          <strong>Patient:</strong> <span id="casePatient"></span>
+        </div>
+        <div class="case-section">
+          <strong>Chief Complaint:</strong> <span id="caseComplaint"></span>
+        </div>
+        <div class="case-section">
+          <strong>Background:</strong> <span id="caseBackground"></span>
+        </div>
+
+        <div class="question-label">❓ What is the most likely condition?</div>
+        <div class="choices" id="caseChoices"></div>
+
+        <div class="case-explanation hidden" id="caseExplanation">
+          <div class="exp-header">📖 Explanation</div>
+          <div id="expText"></div>
+          <div class="learn-more" id="learnMore"></div>
+        </div>
+
+        <div class="case-action-row">
+          <button class="btn-secondary" id="nextCaseBtn" onclick="nextRandomCase()" style="display:none;">Another Case →</button>
+          <button class="btn-outline" onclick="backToDiffPicker()">← Change Difficulty</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!--  ANATOMY EXPLORER                           -->
+  <!-- ═══════════════════════════════════════════ -->
+  <section class="screen" id="screen-anatomy">
+    <div class="screen-header">
+      <h2>🫀 Anatomy Explorer</h2>
+      <p>Choose a body system, then click any labelled part to explore it in depth.</p>
+    </div>
+
+    <!-- Level 1: System grid -->
+    <div id="anatomy-list">
+      <div class="system-grid" id="systemGrid"></div>
+    </div>
+
+    <!-- Level 2: System detail — diagram + overview -->
+    <div id="anatomy-system" class="hidden">
+      <div class="anat-system-header">
+        <div>
+          <div class="anat-system-title-row">
+            <span id="anatSysIcon"></span>
+            <h3 id="anatSysTitle"></h3>
+          </div>
+          <p id="anatSysOverview" class="anat-sys-overview"></p>
+        </div>
+      </div>
+
+      <div class="anat-diagram-wrapper">
+        <div class="anat-diagram-hint">👆 Click any labelled part to explore it</div>
+        <div id="anatDiagramContainer"></div>
+      </div>
+
+      <div class="anat-system-meta">
+        <div class="anat-meta-block">
+          <h4>🏥 Medical Specialties</h4>
+          <div class="specialty-tags" id="anatSysSpecialties"></div>
+        </div>
+        <div class="anat-meta-block">
+          <h4>💡 Did You Know?</h4>
+          <p class="did-you-know" id="anatSysFact"></p>
+        </div>
+      </div>
+
+      <button class="btn-outline" onclick="backToAnatomyList()">← All Systems</button>
+    </div>
+
+    <!-- Level 3: Part detail — tabbed -->
+    <div id="anatomy-part" class="hidden">
+      <div class="anat-part-header">
+        <div class="anat-part-title-row">
+          <span class="anat-part-system-badge" id="anatPartBadge"></span>
+          <h3 id="anatPartTitle"></h3>
+        </div>
+        <p id="anatPartSubtitle" class="anat-part-subtitle"></p>
+      </div>
+
+      <div class="anat-tabs">
+        <button class="anat-tab active" onclick="switchAnatTab(this,'overview')">Overview</button>
+        <button class="anat-tab" onclick="switchAnatTab(this,'diseases')">Diseases</button>
+        <button class="anat-tab" onclick="switchAnatTab(this,'procedures')">Procedures</button>
+        <button class="anat-tab" onclick="switchAnatTab(this,'facts')">Key Facts</button>
+      </div>
+
+      <div class="anat-tab-content" id="anatTabOverview"></div>
+      <div class="anat-tab-content hidden" id="anatTabDiseases"></div>
+      <div class="anat-tab-content hidden" id="anatTabProcedures"></div>
+      <div class="anat-tab-content hidden" id="anatTabFacts"></div>
+
+      <div class="anat-part-source" id="anatPartSource"></div>
+
+      <div class="case-action-row" style="margin-top:20px;">
+        <button class="btn-outline" id="anatBackToSystem" onclick="backToSystem()">← Back to System</button>
+        <button class="btn-outline" onclick="backToAnatomyList()">← All Systems</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!--  FLASHCARDS                                 -->
+  <!-- ═══════════════════════════════════════════ -->
+  <section class="screen" id="screen-flashcards">
+    <div class="screen-header">
+      <h2>🗂️ Flashcards</h2>
+      <p>Tap a card to reveal the definition. Use the arrows to navigate.</p>
+    </div>
+
+    <div class="fc-search-wrapper">
+      <span class="fc-search-icon">🔍</span>
+      <input
+        type="text"
+        id="fcSearchInput"
+        class="fc-search-input"
+        placeholder="Search flashcards, terms, or categories..."
+        oninput="searchFC(this.value)"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <button class="fc-search-clear hidden" id="fcSearchClear" onclick="clearFCSearch()" aria-label="Clear search">✕</button>
+    </div>
+
+    <div class="fc-category-row" id="fcCategories"></div>
+
+    <div class="fc-search-results hidden" id="fcSearchResults"></div>
+
+    <div class="fc-wrapper">
+      <div class="fc-progress">
+        <span id="fcProgress">1 / 10</span>
+        <div class="fc-bar"><div class="fc-bar-fill" id="fcBarFill"></div></div>
+      </div>
+
+      <div class="flashcard" id="flashcard" onclick="flipCard()">
+        <div class="fc-inner" id="fcInner">
+          <div class="fc-front">
+            <button class="fc-save-btn" id="fcSaveBtn" onclick="toggleSaveCard(event)" title="Save card">☆</button>
+            <div class="fc-category-tag" id="fcCatTag"></div>
+            <div class="fc-term" id="fcTerm"></div>
+            <div class="fc-hint">Tap to reveal</div>
+          </div>
+          <div class="fc-back">
+            <button class="fc-save-btn fc-save-btn--back" id="fcSaveBtnBack" onclick="toggleSaveCard(event)" title="Save card">☆</button>
+            <div class="fc-def" id="fcDef"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="fc-controls">
+        <button class="fc-btn" onclick="prevCard()">←</button>
+        <button class="fc-btn fc-btn--flip" onclick="flipCard()">Flip</button>
+        <button class="fc-btn" onclick="nextCard()">→</button>
+      </div>
+
+      <!-- SRS Rating Buttons — shown after flip -->
+      <div class="fc-srs-row" id="fcSrsRow">
+        <div class="fc-srs-hint">How well did you know this?</div>
+        <div class="fc-srs-btns">
+          <button class="fc-srs-btn fc-srs-btn--learning" onclick="rateCard('learning')">
+            <span class="fc-srs-icon">😅</span>
+            <span class="fc-srs-label">Still Learning</span>
+            <span class="fc-srs-sub">Review soon</span>
+          </button>
+          <button class="fc-srs-btn fc-srs-btn--know" onclick="rateCard('know')">
+            <span class="fc-srs-icon">✅</span>
+            <span class="fc-srs-label">I Know This</span>
+            <span class="fc-srs-sub">Review later</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Study stats strip -->
+      <div class="fc-stats-strip" id="fcStatsStrip">
+        <div class="fc-stat">
+          <span class="fc-stat-val" id="statKnow">0</span>
+          <span class="fc-stat-lbl">Known</span>
+        </div>
+        <div class="fc-stat-divider"></div>
+        <div class="fc-stat">
+          <span class="fc-stat-val" id="statLearning">0</span>
+          <span class="fc-stat-lbl">Learning</span>
+        </div>
+        <div class="fc-stat-divider"></div>
+        <div class="fc-stat">
+          <span class="fc-stat-val" id="statSaved">0</span>
+          <span class="fc-stat-lbl">Saved</span>
+        </div>
+        <div class="fc-stat-divider"></div>
+        <div class="fc-stat">
+          <span class="fc-stat-val" id="statUnseen">0</span>
+          <span class="fc-stat-lbl">Unseen</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!--  QUIZ MODE                                  -->
+  <!-- ═══════════════════════════════════════════ -->
+  <section class="screen" id="screen-quiz">
+    <div class="screen-header">
+      <h2>📝 Quiz Mode</h2>
+      <p>10 multiple-choice questions. Take your time — explanations follow each answer.</p>
+    </div>
+
+    <div id="quiz-start">
+      <div class="quiz-start-card">
+        <div class="quiz-start-icon">🧠</div>
+        <h3>Ready to test your knowledge?</h3>
+        <p>You'll get 10 randomly selected questions covering anatomy, medical terminology, and pathophysiology. Your score appears at the end.</p>
+        <button class="btn-primary" onclick="startQuiz()">Start Quiz</button>
+      </div>
+    </div>
+
+    <div id="quiz-question" class="hidden">
+      <div class="quiz-meta">
+        <span id="quizQNum"></span>
+        <span class="quiz-score-live">Score: <strong id="quizScoreLive">0</strong></span>
+      </div>
+      <div class="quiz-progress-bar"><div class="quiz-progress-fill" id="quizProgressFill"></div></div>
+      <div class="quiz-card">
+        <div class="quiz-q" id="quizQ"></div>
+        <div class="quiz-choices" id="quizChoices"></div>
+        <div class="quiz-feedback hidden" id="quizFeedback"></div>
+        <button class="btn-primary hidden" id="quizNextBtn" onclick="nextQuizQ()">Next →</button>
+      </div>
+    </div>
+
+    <div id="quiz-result" class="hidden">
+      <div class="result-card">
+        <div class="result-icon" id="resultIcon"></div>
+        <h3 id="resultTitle"></h3>
+        <div class="result-score" id="resultScore"></div>
+        <p id="resultMsg"></p>
+        <div class="result-breakdown" id="resultBreakdown"></div>
+        <button class="btn-primary" onclick="restartQuiz()">Try Again</button>
+        <button class="btn-outline" onclick="goHome()">Home</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!--  HOSA EVENTS                                -->
+  <!-- ═══════════════════════════════════════════ -->
+  <section class="screen" id="screen-hosa">
+    <div class="screen-header">
+      <h2>🏥 HOSA Competitive Events</h2>
+      <p>Secondary (High School) and Post-Secondary (University/College) — 2025–2026</p>
+    </div>
+
+    <div class="hosa-notice">
+      <span class="hosa-notice-icon">📋</span>
+      <p>Guidelines for the 2025–2026 HOSA Canada year. The 2026–2027 guidelines will be updated by October 2026.</p>
+    </div>
+
+    <!-- HEALTH SCIENCE -->
+    <div class="hosa-category">
+      <div class="hosa-cat-header hosa-cat--purple">
+        <span class="hosa-cat-icon">🔬</span>
+        <h3>Health Science Events</h3>
+      </div>
+      <div class="hosa-events-grid">
+        <button class="hosa-event-card" onclick="showHosaEvent('behavioral-health','Behavioral Health')">Behavioral Health</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('human-growth','Human Growth &amp; Development')">Human Growth &amp; Development</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('medical-law','Medical Law and Ethics')">Medical Law and Ethics</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('medical-math','Medical Math')">Medical Math</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('medical-spelling','Medical Spelling')">Medical Spelling</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('medical-terminology','Medical Terminology')">Medical Terminology</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('nutrition','Nutrition')">Nutrition</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('pathophysiology','Pathophysiology')">Pathophysiology</button>
+      </div>
+    </div>
+
+    <!-- TEAMWORK -->
+    <div class="hosa-category">
+      <div class="hosa-cat-header hosa-cat--teal">
+        <span class="hosa-cat-icon">🤝</span>
+        <h3>Teamwork Events</h3>
+      </div>
+      <div class="hosa-events-grid">
+        <button class="hosa-event-card" onclick="showHosaEvent('biomedical-debate','Biomedical Debate')">Biomedical Debate</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('community-awareness','Community Awareness')">Community Awareness</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('creative-problem','Creative Problem Solving')">Creative Problem Solving</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('forensic-science','Forensic Science')">Forensic Science</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('hosa-bowl','HOSA Bowl')">HOSA Bowl</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('medical-innovation','Medical Innovation')">Medical Innovation</button>
+      </div>
+    </div>
+
+    <!-- HEALTH PROFESSIONS -->
+    <div class="hosa-category">
+      <div class="hosa-cat-header hosa-cat--red">
+        <span class="hosa-cat-icon">⚕️</span>
+        <h3>Health Professions Events</h3>
+      </div>
+      <div class="hosa-events-grid">
+        <button class="hosa-event-card" onclick="showHosaEvent('biotechnology','Biotechnology')">Biotechnology <span class="hosa-new-badge">NEW</span></button>
+        <button class="hosa-event-card" onclick="showHosaEvent('clinical-lab','Clinical Laboratory Science')">Clinical Laboratory Science</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('clinical-nursing','Clinical Nursing')">Clinical Nursing</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('clinical-specialty','Clinical Specialty')">Clinical Specialty</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('dental-science','Dental Science')">Dental Science</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('pharmacy-science','Pharmacy Science')">Pharmacy Science</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('physical-therapy','Physical Therapy')">Physical Therapy</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('sports-medicine','Sports Medicine')">Sports Medicine</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('veterinary-science','Veterinary Science')">Veterinary Science</button>
+      </div>
+    </div>
+
+    <!-- EMERGENCY PREPAREDNESS -->
+    <div class="hosa-category">
+      <div class="hosa-cat-header hosa-cat--blue">
+        <span class="hosa-cat-icon">🚑</span>
+        <h3>Emergency Preparedness Events</h3>
+      </div>
+      <div class="hosa-events-grid">
+        <button class="hosa-event-card hosa-event-card--active" onclick="showHosaEvent('cpr','CPR / First Aid')">
+          CPR / First Aid
+          <span class="hosa-content-badge">Content Available</span>
+        </button>
+        <button class="hosa-event-card" onclick="showHosaEvent('emt','Emergency Medical Technician')">Emergency Medical Technician</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('epidemiology','Epidemiology')">Epidemiology</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('mental-health','Mental Health Promotion')">Mental Health Promotion</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('public-health','Public Health')">Public Health</button>
+      </div>
+    </div>
+
+    <!-- LEADERSHIP -->
+    <div class="hosa-category">
+      <div class="hosa-cat-header hosa-cat--amber">
+        <span class="hosa-cat-icon">🎤</span>
+        <h3>Leadership Events</h3>
+      </div>
+      <div class="hosa-events-grid">
+        <button class="hosa-event-card" onclick="showHosaEvent('persuasive-speaking','Researched Persuasive Speaking')">Researched Persuasive Speaking</button>
+        <button class="hosa-event-card" onclick="showHosaEvent('research-poster','Research Poster')">Research Poster</button>
+      </div>
+    </div>
+
+    <!-- CPR DETAIL PANEL -->
+    <div class="hosa-event-panel hidden" id="hosa-panel-cpr">
+      <div class="hosa-panel-header">
+        <div class="hosa-panel-title-row">
+          <span class="hosa-panel-icon">❤️</span>
+          <div>
+            <h3>CPR / First Aid</h3>
+            <p>Emergency Preparedness Event</p>
+          </div>
+        </div>
+        <button class="hosa-close-btn" onclick="closeHosaPanel()">✕ Close</button>
+      </div>
+      <!-- TABS -->
+      <div class="cpr-tabs">
+        <button class="cpr-tab active" id="tab-btn-flashcards" onclick="switchCprTab('flashcards',this)">🗂️ Flashcards</button>
+        <button class="cpr-tab" id="tab-btn-skills" onclick="switchCprTab('skills',this)">🤲 Skills Checklists</button>
+      </div>
+
+      <!-- ── FLASHCARDS TAB ── -->
+      <div id="cpr-tab-flashcards" class="cpr-tab-content">
+        <div class="cpr-deck-bar">
+          <span class="cpr-deck-label">Deck:</span>
+          <button class="cpr-deck-btn active" onclick="loadCprDeck('all',this)">All (73)</button>
+          <button class="cpr-deck-btn" onclick="loadCprDeck('bls',this)">BLS / CPR</button>
+          <button class="cpr-deck-btn" onclick="loadCprDeck('medical',this)">Medical Emergencies</button>
+          <button class="cpr-deck-btn" onclick="loadCprDeck('injury',this)">Injury Emergencies</button>
+          <button class="cpr-deck-btn" onclick="loadCprDeck('environmental',this)">Environmental</button>
+          <button class="cpr-deck-btn" onclick="loadCprDeck('basics',this)">First Aid Basics</button>
+        </div>
+        <div class="cpr-fc-progress-row">
+          <span class="cpr-fc-count" id="cprFcCount">Card 1 of 73</span>
+          <div class="cpr-fc-bar"><div class="cpr-fc-bar-fill" id="cprFcBarFill" style="width:1%"></div></div>
+          <span class="cpr-fc-score" id="cprFcScore">⭐ 0 known</span>
+        </div>
+        <div class="cpr-flashcard" id="cprFlashcard" onclick="flipCprCard()">
+          <div class="cpr-flashcard-inner" id="cprFlashcardInner">
+            <div class="cpr-flashcard-front">
+              <span class="cpr-fc-deck-tag" id="cprFcDeckTag">BLS / CPR</span>
+              <p class="cpr-fc-question" id="cprFcQuestion">Click a deck above, then tap the card to begin!</p>
+              <span class="cpr-fc-hint">Tap card to reveal answer</span>
+            </div>
+            <div class="cpr-flashcard-back">
+              <span class="cpr-fc-deck-tag" id="cprFcDeckTagBack">BLS / CPR</span>
+              <p class="cpr-fc-answer" id="cprFcAnswer"></p>
+            </div>
+          </div>
+        </div>
+        <div class="cpr-fc-rating hidden" id="cprFcRating">
+          <button class="cpr-rate-btn cpr-rate--no" onclick="rateCprCard(false)">✗ Still learning</button>
+          <button class="cpr-rate-btn cpr-rate--yes" onclick="rateCprCard(true)">✓ Got it!</button>
+        </div>
+        <div class="cpr-fc-nav">
+          <button class="cpr-fc-nav-btn" onclick="prevCprCard()">← Prev</button>
+          <button class="cpr-fc-nav-btn" onclick="shuffleCprDeck()">🔀 Shuffle</button>
+          <button class="cpr-fc-nav-btn" onclick="nextCprCard()">Next →</button>
+        </div>
+      </div>
+
+      <!-- ── SKILLS CHECKLISTS TAB ── -->
+      <div id="cpr-tab-skills" class="cpr-tab-content hidden">
+        <div class="cpr-skills-grid">
+          <div class="cpr-skill-card">
+            <div class="cpr-skill-header">Skill I — Adult BLS / CPR</div>
+            <ol class="cpr-skill-steps">
+              <li>Ensure scene safety — check surroundings for hazards</li>
+              <li>Check responsiveness — tap shoulders, shout "Are you okay?"</li>
+              <li>Shout for help; direct someone to call 911 and get AED</li>
+              <li>Check for breathing and carotid pulse (no more than 10 seconds)</li>
+              <li>If no pulse: begin CPR — 30 compressions : 2 breaths</li>
+              <li>Compression depth: at least 5 cm; rate: 100–120 per minute</li>
+              <li>Allow full chest recoil between compressions</li>
+              <li>Head tilt–chin lift to open airway; give 2 rescue breaths (1 sec each, visible chest rise)</li>
+              <li>Continue until AED arrives, trained rescuer takes over, or victim recovers</li>
+            </ol>
+          </div>
+          <div class="cpr-skill-card">
+            <div class="cpr-skill-header">Skill II — Adult BLS with AED</div>
+            <ol class="cpr-skill-steps">
+              <li>Follow all steps of Adult BLS / CPR (Skill I)</li>
+              <li>Power on AED as soon as it arrives — do NOT stop CPR until AED is ready</li>
+              <li>Attach pads: one below right collarbone, one below left armpit</li>
+              <li>Plug in connector and let AED analyze rhythm — stand clear, no touching</li>
+              <li>If shock advised: ensure no one is touching patient, press shock button</li>
+              <li>Immediately resume CPR for 2 minutes after shock</li>
+              <li>If no shock advised: continue CPR and follow AED prompts</li>
+            </ol>
+          </div>
+          <div class="cpr-skill-card">
+            <div class="cpr-skill-header">Skill III — Infant BLS / CPR</div>
+            <ol class="cpr-skill-steps">
+              <li>Check scene safety; check responsiveness (flick foot sole)</li>
+              <li>Send someone to call 911; if alone, give 5 cycles of CPR first</li>
+              <li>Check brachial or femoral pulse (no more than 10 seconds)</li>
+              <li>If no pulse: place 2 fingers (middle and ring) just below the nipple line on the sternum</li>
+              <li>Compress at least 4 cm deep; rate 100–120 per minute</li>
+              <li>30:2 ratio (1 rescuer) or 15:2 (2 rescuers)</li>
+              <li>Neutral head position to open airway; give gentle puffs (watch for chest rise)</li>
+            </ol>
+          </div>
+          <div class="cpr-skill-card">
+            <div class="cpr-skill-header">Skill IV — Severe Bleeding &amp; Shock</div>
+            <ol class="cpr-skill-steps">
+              <li>Don gloves (PPE) before touching blood or bodily fluids</li>
+              <li>Apply dressings over the wound; press firmly with heel of hand</li>
+              <li>Stack second hand on top — maintain constant, firm pressure</li>
+              <li>Do NOT remove dressings — add more on top if soaking through</li>
+              <li>If limb: apply tourniquet 5–8 cm above wound (not on a joint); note time</li>
+              <li>Watch for shock signs: pale/cool/clammy skin, rapid weak pulse, confusion</li>
+              <li>Have victim lie down, keep warm, call 911</li>
+            </ol>
+          </div>
+          <div class="cpr-skill-card">
+            <div class="cpr-skill-header">Skill V — Choking (Adult / Child)</div>
+            <ol class="cpr-skill-steps">
+              <li>Confirm severe airway block: unable to speak, cough, or breathe</li>
+              <li>Ask "Are you choking? Can I help?" — if yes, say "I'm going to help you"</li>
+              <li>Stand or kneel firmly behind the victim</li>
+              <li>Make a fist — place thumb side just above navel, well below breastbone</li>
+              <li>Grasp fist with other hand; give quick, firm upward thrusts</li>
+              <li>Continue until object is expelled or victim becomes unresponsive</li>
+              <li>If unresponsive: lower to floor, begin CPR; look in mouth before each breath</li>
+            </ol>
+          </div>
+          <div class="cpr-skill-card">
+            <div class="cpr-skill-header">Skill VI — Open Fracture &amp; Splinting</div>
+            <ol class="cpr-skill-steps">
+              <li>Call 911; keep victim still — do NOT try to straighten the bone</li>
+              <li>Cover any open wound / protruding bone with a clean dressing</li>
+              <li>Immobilize using a splint extending beyond the joints above and below the fracture</li>
+              <li>Pad the splint for comfort; secure with bandages — not too tight</li>
+              <li>Check circulation, sensation, and movement below the injury before and after splinting</li>
+              <li>Elevate the limb if possible to reduce swelling</li>
+              <li>Apply ice wrapped in cloth to reduce swelling (not directly on skin)</li>
+            </ol>
+          </div>
+          <div class="cpr-skill-card">
+            <div class="cpr-skill-header">Skill VII — Severe Burns</div>
+            <ol class="cpr-skill-steps">
+              <li>Ensure safety; if person is on fire: Stop, Drop, and Roll</li>
+              <li>Cover with a wet blanket to extinguish flames</li>
+              <li>Call 911 for large or severe burns</li>
+              <li>Cool the burn immediately with cold (not ice-cold) running water for at least 10 minutes</li>
+              <li>Remove jewelry and clothing that is NOT stuck to the skin</li>
+              <li>Cover with dry, non-stick, sterile dressings</li>
+              <li>Cover victim with dry blanket; monitor for shock</li>
+            </ol>
+          </div>
+          <div class="cpr-skill-card">
+            <div class="cpr-skill-header">Skill VIII — Heat-Related Emergency</div>
+            <ol class="cpr-skill-steps">
+              <li>Move victim to a cool place; call 911 if heat stroke suspected</li>
+              <li>Remove excess clothing</li>
+              <li>Cool immediately: cool water spray, cool damp cloths on forehead, neck, armpits, groin</li>
+              <li>Immerse in cool water up to neck if available (for heat stroke)</li>
+              <li>If responsive and able to swallow: give fluids with sugar and electrolytes</li>
+              <li>Stop cooling when victim behaves normally (to prevent hypothermia)</li>
+              <li>If unresponsive and not breathing normally: begin CPR</li>
+            </ol>
+          </div>
+          <div class="cpr-skill-card">
+            <div class="cpr-skill-header">Skill IX — Administer Epinephrine Pen</div>
+            <ol class="cpr-skill-steps">
+              <li>Confirm signs of anaphylaxis: hives, swelling, difficulty breathing, low BP</li>
+              <li>Call 911 immediately</li>
+              <li>Remove epinephrine pen from case; remove safety cap</li>
+              <li>Grip firmly in dominant hand</li>
+              <li>Press tip firmly against outer mid-thigh (can be given through clothing)</li>
+              <li>Push down until a click is heard; hold in place for 10 seconds</li>
+              <li>Remove, massage the area, note time of injection; dispose in sharps container</li>
+            </ol>
+          </div>
+          <div class="cpr-skill-card">
+            <div class="cpr-skill-header">Skill X — Administer Naloxone (NARCAN)</div>
+            <ol class="cpr-skill-steps">
+              <li>Recognize signs of opioid overdose: unresponsive, slow/absent breathing, blue lips</li>
+              <li>Call 911; ensure scene is safe</li>
+              <li>Check for breathing — if not breathing normally, begin CPR</li>
+              <li>Peel back foil packaging; hold device with thumb on bottom, two fingers on nozzle</li>
+              <li>Tilt head back; support neck; insert nozzle into one nostril</li>
+              <li>Press thumb firmly to release full dose</li>
+              <li>If no response after 2–3 minutes, give second dose in other nostril; continue CPR as needed</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- EMPTY STATE PANEL (all other events) -->
+    <div class="hosa-event-panel hidden" id="hosa-panel-empty">
+      <div class="hosa-panel-header">
+        <div class="hosa-panel-title-row">
+          <span class="hosa-panel-icon">📚</span>
+          <div>
+            <h3 id="hosa-empty-title">Event Name</h3>
+            <p>HOSA Competitive Event</p>
+          </div>
+        </div>
+        <button class="hosa-close-btn" onclick="closeHosaPanel()">✕ Close</button>
+      </div>
+      <div class="hosa-empty-state hosa-empty-state--solo">
+        <div class="hosa-empty-icon">🔒</div>
+        <p>Content for this event hasn't been added yet.<br/>Check back soon!</p>
+        <span class="hosa-empty-label">This section will be filled in later</span>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!--  PROGRESS DASHBOARD                         -->
+  <!-- ═══════════════════════════════════════════ -->
+  <section class="screen" id="screen-progress">
+    <div class="screen-header">
+      <h2>📊 Progress Dashboard</h2>
+      <p>Your learning stats across all MedPath modes.</p>
+    </div>
+    <div class="pd-streak-banner">
+      <div class="pd-streak-left">
+        <span class="pd-streak-fire">🔥</span>
+        <div>
+          <div class="pd-streak-num" id="pdStreak">0</div>
+          <div class="pd-streak-lbl">day streak</div>
+        </div>
+      </div>
+      <div class="pd-streak-right">
+        <div class="pd-streak-best-label">Longest streak</div>
+        <div class="pd-streak-best-val"><span id="pdLongestStreak">0</span> days</div>
+      </div>
+    </div>
+    <div class="pd-section">
+      <div class="pd-section-header"><span class="pd-section-icon">🩺</span><span class="pd-section-title">Clinical Cases</span></div>
+      <div class="pd-stat-row">
+        <div class="pd-stat-card"><div class="pd-stat-val" id="pdCasesTotal">0</div><div class="pd-stat-lbl">Attempts</div></div>
+        <div class="pd-stat-card pd-stat-card--green"><div class="pd-stat-val" id="pdCasesPct">—</div><div class="pd-stat-lbl">Accuracy</div></div>
+        <div class="pd-stat-card pd-stat-card--navy"><div class="pd-stat-val" id="pdUniqueCases">0</div><div class="pd-stat-lbl">Unique Cases</div></div>
+      </div>
+      <div class="pd-bar-track"><div class="pd-bar-fill pd-bar--green" id="pdCasesBar" style="width:0%"></div></div>
+      <div class="pd-diff-grid">
+        <div class="pd-diff-row" id="pdDiff_beginner"><span class="pd-diff-dot pd-dot--beginner"></span><span class="pd-diff-name">Beginner</span><span class="pd-diff-empty">No attempts yet</span></div>
+        <div class="pd-diff-row" id="pdDiff_intermediate"><span class="pd-diff-dot pd-dot--intermediate"></span><span class="pd-diff-name">Intermediate</span><span class="pd-diff-empty">No attempts yet</span></div>
+        <div class="pd-diff-row" id="pdDiff_advanced"><span class="pd-diff-dot pd-dot--advanced"></span><span class="pd-diff-name">Advanced</span><span class="pd-diff-empty">No attempts yet</span></div>
+        <div class="pd-diff-row" id="pdDiff_expert"><span class="pd-diff-dot pd-dot--expert"></span><span class="pd-diff-name">Expert</span><span class="pd-diff-empty">No attempts yet</span></div>
+      </div>
+      <div class="pd-insights">
+        <div class="pd-insight pd-insight--good">✅ Best topic: <strong id="pdBestTag">—</strong></div>
+        <div class="pd-insight pd-insight--warn">⚠️ Needs work: <strong id="pdWorstTag">—</strong></div>
+      </div>
+    </div>
+    <div class="pd-section">
+      <div class="pd-section-header"><span class="pd-section-icon">🗂️</span><span class="pd-section-title">Flashcards</span></div>
+      <div class="pd-stat-row">
+        <div class="pd-stat-card"><div class="pd-stat-val" id="pdFCStudied">0</div><div class="pd-stat-lbl">Studied</div></div>
+        <div class="pd-stat-card pd-stat-card--teal"><div class="pd-stat-val" id="pdFCMastered">0</div><div class="pd-stat-lbl">Mastered</div></div>
+        <div class="pd-stat-card pd-stat-card--red"><div class="pd-stat-val" id="pdFCWeak">0</div><div class="pd-stat-lbl">Weak</div></div>
+        <div class="pd-stat-card pd-stat-card--amber"><div class="pd-stat-val" id="pdFCSaved">0</div><div class="pd-stat-lbl">Saved ⭐</div></div>
+      </div>
+      <div class="pd-bar-track"><div class="pd-bar-fill pd-bar--teal" id="pdFCBar" style="width:0%"></div></div>
+      <div class="pd-bar-legend">Mastery progress — <span id="pdFCPct">0%</span> of all cards</div>
+      <div class="pd-insights">
+        <div class="pd-insight pd-insight--good">✅ Strongest category: <strong id="pdFCBestCat">—</strong></div>
+        <div class="pd-insight pd-insight--warn">⚠️ Weakest category: <strong id="pdFCWorstCat">—</strong></div>
+      </div>
+    </div>
+    <div class="pd-section">
+      <div class="pd-section-header"><span class="pd-section-icon">📝</span><span class="pd-section-title">Quiz Mode</span></div>
+      <div class="pd-stat-row">
+        <div class="pd-stat-card"><div class="pd-stat-val" id="pdQuizDone">0</div><div class="pd-stat-lbl">Quizzes Done</div></div>
+        <div class="pd-stat-card pd-stat-card--green"><div class="pd-stat-val" id="pdQuizAvg">—</div><div class="pd-stat-lbl">Avg Score</div></div>
+        <div class="pd-stat-card pd-stat-card--amber"><div class="pd-stat-val" id="pdQuizBest">—</div><div class="pd-stat-lbl">Best Score</div></div>
+      </div>
+      <div class="pd-bar-track"><div class="pd-bar-fill pd-bar--green" id="pdQuizBar" style="width:0%"></div></div>
+    </div>
+    <div class="pd-reset-row">
+      <button class="pd-reset-btn" onclick="confirmResetProgress()">🗑️ Reset All Progress Data</button>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!--  ABOUT                                      -->
+  <!-- ═══════════════════════════════════════════ -->
+  <section class="screen" id="screen-about">
+    <div class="screen-header">
+      <h2>ℹ️ About MedPath</h2>
+    </div>
+    <div class="about-card">
+      <div class="about-section">
+        <h3>What is MedPath?</h3>
+        <p>MedPath is a free educational app that helps students and curious learners explore healthcare concepts — including anatomy, clinical reasoning, medical terminology, and pathophysiology.</p>
+      </div>
+      <div class="about-section">
+        <h3>Who is it for?</h3>
+        <ul>
+          <li>High school students exploring a future in healthcare</li>
+          <li>SHSM / HOSA students preparing for programs and competitions</li>
+          <li>Pre-med and future nursing students</li>
+          <li>Anyone curious about how the human body works</li>
+        </ul>
+      </div>
+      <div class="about-section">
+        <h3>What can I learn?</h3>
+        <ul>
+          <li><strong>Case Mode</strong> — clinical reasoning through patient scenarios</li>
+          <li><strong>Anatomy Explorer</strong> — body systems, organs, and conditions</li>
+          <li><strong>Flashcards</strong> — medical vocabulary and key concepts</li>
+          <li><strong>Quiz Mode</strong> — scored practice with feedback</li>
+        </ul>
+      </div>
+      <div class="disclaimer-box">
+        <strong>⚕️ Important Disclaimer</strong>
+        <p>This app is for <strong>Educational purposes only.</strong> It does not provide medical advice, diagnosis, or treatment. If you or someone you know has a health concern, please consult a qualified healthcare professional. Nothing in this app should be used to make real medical decisions.</p>
+      </div>
+      <div class="about-section">
+        <h3>Version</h3>
+        <p>MedPath v1.0 — MVP release. More cases, systems, and features coming soon.</p>
+      </div>
+    </div>
+  </section>
+
+  <script src="script.js"></script>
+</body>
+</html>
