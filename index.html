@@ -6,6 +6,7 @@
 
 
 
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -100,6 +101,15 @@
         <div class="mc-body">
           <div class="mc-label">HOSA Events</div>
           <div class="mc-desc">CPR, clinical skills, and competitive prep</div>
+        </div>
+        <div class="mc-arrow">→</div>
+      </button>
+      <button class="mode-card mc--ai" onclick="showScreen('aipatient')">
+        <div class="mc-accent"></div>
+        <div class="mc-icon-wrap">🤖</div>
+        <div class="mc-body">
+          <div class="mc-label">AI Patient <span class="mc-new-badge">NEW</span></div>
+          <div class="mc-desc">Consult a virtual patient and make your diagnosis</div>
         </div>
         <div class="mc-arrow">→</div>
       </button>
@@ -786,6 +796,106 @@
     <div class="pd-reset-row">
       <button class="pd-reset-btn" onclick="confirmResetProgress()">🗑️ Reset All Progress Data</button>
     </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!--  AI PATIENT CONSULTATION                    -->
+  <!-- ═══════════════════════════════════════════ -->
+  <section class="screen" id="screen-aipatient">
+
+    <!-- LOBBY: pick difficulty -->
+    <div id="aip-lobby">
+      <div class="aip-lobby-header">
+        <div class="aip-lobby-icon">🏥</div>
+        <h2 class="aip-lobby-title">AI Patient Consultation</h2>
+        <p class="aip-lobby-sub">You are the doctor. The patient will answer your questions in character.<br>Take a history, request examinations, then submit your diagnosis.</p>
+      </div>
+      <div class="aip-how">
+        <div class="aip-how-step"><span class="aip-how-num">1</span><span>Choose a difficulty — a random patient case is generated</span></div>
+        <div class="aip-how-step"><span class="aip-how-num">2</span><span>Ask the patient anything — where it hurts, how long, lifestyle</span></div>
+        <div class="aip-how-step"><span class="aip-how-num">3</span><span>Request examinations — "check BP", "listen to their chest"</span></div>
+        <div class="aip-how-step"><span class="aip-how-num">4</span><span>Submit your diagnosis and get detailed AI feedback</span></div>
+      </div>
+      <div class="aip-diff-grid">
+        <button class="aip-diff-btn" onclick="startAIConsultation('beginner')">
+          <span class="aip-diff-icon">🌱</span>
+          <span class="aip-diff-name">Beginner</span>
+          <span class="aip-diff-hint">Common, clear presentations</span>
+        </button>
+        <button class="aip-diff-btn" onclick="startAIConsultation('intermediate')">
+          <span class="aip-diff-icon">⚡</span>
+          <span class="aip-diff-name">Intermediate</span>
+          <span class="aip-diff-hint">Requires careful questioning</span>
+        </button>
+        <button class="aip-diff-btn" onclick="startAIConsultation('advanced')">
+          <span class="aip-diff-icon">🔬</span>
+          <span class="aip-diff-name">Advanced</span>
+          <span class="aip-diff-hint">Complex, overlapping symptoms</span>
+        </button>
+        <button class="aip-diff-btn" onclick="startAIConsultation('expert')">
+          <span class="aip-diff-icon">💀</span>
+          <span class="aip-diff-name">Expert</span>
+          <span class="aip-diff-hint">Rare and easily missed</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- CONSULTATION ROOM -->
+    <div id="aip-room" style="display:none">
+      <div class="aip-patient-card">
+        <div class="aip-patient-avatar" id="aipAvatar">👤</div>
+        <div class="aip-patient-info">
+          <div class="aip-patient-name" id="aipPatientName">Patient</div>
+          <div class="aip-patient-meta" id="aipPatientMeta"></div>
+        </div>
+        <div class="aip-status-pill">Consultation in progress</div>
+      </div>
+      <div class="aip-chat" id="aipChat"></div>
+      <div class="aip-input-area">
+        <div class="aip-suggestions">
+          <button class="aip-sug-btn" onclick="useAISuggestion(this)">Where exactly is the pain?</button>
+          <button class="aip-sug-btn" onclick="useAISuggestion(this)">When did this start?</button>
+          <button class="aip-sug-btn" onclick="useAISuggestion(this)">Any other symptoms?</button>
+          <button class="aip-sug-btn" onclick="useAISuggestion(this)">Check vital signs</button>
+          <button class="aip-sug-btn" onclick="useAISuggestion(this)">Any relevant medical history?</button>
+          <button class="aip-sug-btn" onclick="useAISuggestion(this)">Listen to their chest</button>
+          <button class="aip-sug-btn" onclick="useAISuggestion(this)">Examine the abdomen</button>
+          <button class="aip-sug-btn" onclick="useAISuggestion(this)">Any current medications?</button>
+        </div>
+        <div class="aip-input-row">
+          <textarea class="aip-textarea" id="aipInput" placeholder="Ask the patient a question or request an examination…" rows="2" onkeydown="aipKeydown(event)"></textarea>
+          <button class="aip-send-btn" id="aipSendBtn" onclick="sendAIPatientMessage()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+          </button>
+        </div>
+      </div>
+      <div class="aip-diag-panel">
+        <div class="aip-diag-hint">💡 Ready to make your diagnosis?</div>
+        <input class="aip-diag-input" id="aipDiagInput" type="text" placeholder="e.g. Acute appendicitis, STEMI, Pneumonia…" />
+        <button class="aip-diag-submit" onclick="submitAIDiagnosis()">Submit Diagnosis →</button>
+      </div>
+    </div>
+
+    <!-- FEEDBACK PANEL -->
+    <div id="aip-feedback" style="display:none">
+      <div class="aip-feedback-card">
+        <div class="aip-feedback-verdict" id="aipVerdict"></div>
+        <div class="aip-feedback-correct">
+          <span class="aip-feedback-label">Correct diagnosis:</span>
+          <span class="aip-feedback-answer" id="aipCorrectDx"></span>
+        </div>
+        <div class="aip-feedback-body" id="aipFeedbackBody"></div>
+        <div class="aip-feedback-history">
+          <div class="aip-feedback-hist-title">📋 Questions you asked</div>
+          <div id="aipHistorySummary"></div>
+        </div>
+        <div class="aip-feedback-actions">
+          <button class="btn-primary" onclick="startAIConsultation(window._aipLastDiff)">Try Another Case</button>
+          <button class="btn-outline" onclick="showAIPLobby()">Change Difficulty</button>
+        </div>
+      </div>
+    </div>
+
   </section>
 
   <!-- ═══════════════════════════════════════════ -->

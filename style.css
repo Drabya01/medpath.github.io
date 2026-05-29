@@ -2124,3 +2124,450 @@ body {
   transition: border-color .15s, color .15s;
 }
 .pd-reset-btn:hover { border-color: var(--red); color: var(--red); }
+
+/* ══════════════════════════════════════════
+   AI PATIENT CONSULTATION
+══════════════════════════════════════════ */
+
+/* Home card accent */
+.mc--ai .mc-accent       { background: #7c3aed; }
+.mc--ai .mc-icon-wrap    { background: #f5f3ff; }
+.mc--ai:hover            { border-color: #7c3aed; }
+.mc-new-badge {
+  display: inline-block;
+  background: #7c3aed;
+  color: white;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 20px;
+  margin-left: 6px;
+  vertical-align: middle;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ── Lobby ─────────────────────────────── */
+#aip-lobby {
+  max-width: 680px;
+  margin: 0 auto;
+  padding-bottom: 40px;
+}
+.aip-lobby-header {
+  text-align: center;
+  padding: 32px 0 24px;
+}
+.aip-lobby-icon  { font-size: 3rem; margin-bottom: 12px; }
+.aip-lobby-title {
+  font-family: var(--font-display);
+  font-size: 1.9rem;
+  color: var(--navy);
+  margin-bottom: 8px;
+}
+.aip-lobby-sub {
+  font-size: 14px;
+  color: var(--grey-600);
+  line-height: 1.6;
+}
+
+.aip-how {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--white);
+  border: 1.5px solid var(--grey-100);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  margin: 0 0 24px;
+  box-shadow: var(--shadow-sm);
+}
+.aip-how-step {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--grey-600);
+}
+.aip-how-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #7c3aed;
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.aip-diff-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.aip-diff-btn {
+  background: var(--white);
+  border: 1.5px solid var(--grey-100);
+  border-radius: var(--radius);
+  padding: 18px 16px;
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  box-shadow: var(--shadow-sm);
+  transition: transform .18s, box-shadow .18s, border-color .18s;
+}
+.aip-diff-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(124,58,237,.12);
+  border-color: #7c3aed;
+}
+.aip-diff-icon { font-size: 1.6rem; margin-bottom: 4px; }
+.aip-diff-name { font-size: 15px; font-weight: 700; color: var(--navy); }
+.aip-diff-hint { font-size: 12px; color: var(--grey-400); }
+
+/* ── Consultation Room ─────────────────── */
+#aip-room {
+  max-width: 680px;
+  margin: 0 auto;
+  padding-bottom: 40px;
+}
+
+.aip-patient-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--white);
+  border: 1.5px solid var(--grey-100);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow-sm);
+}
+.aip-patient-avatar {
+  font-size: 2.2rem;
+  width: 52px;
+  height: 52px;
+  background: #f5f3ff;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.aip-patient-info { flex: 1; }
+.aip-patient-name { font-size: 16px; font-weight: 700; color: var(--navy); }
+.aip-patient-meta { font-size: 12px; color: var(--grey-600); margin-top: 2px; }
+.aip-status-pill {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #166534;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+/* Chat */
+.aip-chat {
+  background: var(--white);
+  border: 1.5px solid var(--grey-100);
+  border-radius: var(--radius);
+  padding: 16px;
+  min-height: 320px;
+  max-height: 420px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 12px;
+  box-shadow: var(--shadow-sm);
+  scroll-behavior: smooth;
+}
+
+.aip-msg {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  animation: aipMsgIn .2s ease;
+}
+@keyframes aipMsgIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.aip-msg--doctor { flex-direction: row-reverse; }
+
+.aip-msg-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+.aip-msg--patient .aip-msg-avatar { background: #f5f3ff; }
+.aip-msg--doctor  .aip-msg-avatar { background: #eff6ff; }
+
+.aip-msg-bubble {
+  max-width: 78%;
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+.aip-msg--patient .aip-msg-bubble {
+  background: var(--grey-50);
+  border: 1.5px solid var(--grey-100);
+  color: var(--grey-800);
+  border-top-left-radius: 4px;
+}
+.aip-msg--doctor .aip-msg-bubble {
+  background: #7c3aed;
+  color: white;
+  border-top-right-radius: 4px;
+}
+
+.aip-msg--typing .aip-msg-bubble {
+  background: var(--grey-50);
+  border: 1.5px solid var(--grey-100);
+}
+.aip-typing-dots {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  padding: 2px 0;
+}
+.aip-typing-dots span {
+  width: 7px;
+  height: 7px;
+  background: var(--grey-400);
+  border-radius: 50%;
+  animation: aipDot 1.2s ease-in-out infinite;
+}
+.aip-typing-dots span:nth-child(2) { animation-delay: .2s; }
+.aip-typing-dots span:nth-child(3) { animation-delay: .4s; }
+@keyframes aipDot {
+  0%, 60%, 100% { transform: translateY(0); opacity: .4; }
+  30%           { transform: translateY(-5px); opacity: 1; }
+}
+
+/* Input area */
+.aip-input-area {
+  background: var(--white);
+  border: 1.5px solid var(--grey-100);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  box-shadow: var(--shadow-sm);
+}
+
+.aip-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.aip-sug-btn {
+  background: var(--grey-50);
+  border: 1px solid var(--grey-200);
+  border-radius: 20px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  color: var(--grey-600);
+  cursor: pointer;
+  transition: background .15s, border-color .15s, color .15s;
+  white-space: nowrap;
+}
+.aip-sug-btn:hover {
+  background: #f5f3ff;
+  border-color: #7c3aed;
+  color: #7c3aed;
+}
+
+.aip-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+.aip-textarea {
+  flex: 1;
+  border: 1.5px solid var(--grey-200);
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  color: var(--grey-800);
+  resize: none;
+  background: var(--grey-50);
+  transition: border-color .15s;
+  line-height: 1.45;
+}
+.aip-textarea:focus {
+  outline: none;
+  border-color: #7c3aed;
+  background: var(--white);
+}
+.aip-send-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: #7c3aed;
+  border: none;
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background .15s, transform .1s;
+}
+.aip-send-btn:hover   { background: #6d28d9; }
+.aip-send-btn:active  { transform: scale(.95); }
+.aip-send-btn:disabled { background: var(--grey-200); cursor: not-allowed; }
+
+/* Diagnosis panel */
+.aip-diag-panel {
+  background: linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%);
+  border: 1.5px solid #c4b5fd;
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.aip-diag-hint {
+  font-size: 13px;
+  font-weight: 600;
+  color: #5b21b6;
+  width: 100%;
+}
+.aip-diag-input {
+  flex: 1;
+  min-width: 200px;
+  border: 1.5px solid #c4b5fd;
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  background: var(--white);
+  color: var(--navy);
+  transition: border-color .15s;
+}
+.aip-diag-input:focus { outline: none; border-color: #7c3aed; }
+.aip-diag-submit {
+  background: #7c3aed;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 9px 18px;
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s;
+  white-space: nowrap;
+}
+.aip-diag-submit:hover { background: #6d28d9; }
+
+/* ── Feedback ─────────────────────────── */
+#aip-feedback {
+  max-width: 680px;
+  margin: 0 auto;
+  padding-bottom: 40px;
+}
+.aip-feedback-card {
+  background: var(--white);
+  border: 1.5px solid var(--grey-100);
+  border-radius: var(--radius);
+  padding: 28px 24px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.aip-feedback-verdict {
+  font-size: 2.2rem;
+  font-family: var(--font-display);
+  color: var(--navy);
+  text-align: center;
+}
+.aip-feedback-correct {
+  background: #f0fdf4;
+  border: 1.5px solid #bbf7d0;
+  border-radius: 10px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.aip-feedback-label { font-size: 12px; font-weight: 700; color: #166534; text-transform: uppercase; }
+.aip-feedback-answer { font-size: 15px; font-weight: 700; color: #166534; }
+
+.aip-feedback-body {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--grey-600);
+  white-space: pre-wrap;
+}
+
+.aip-feedback-history {
+  background: var(--grey-50);
+  border: 1.5px solid var(--grey-100);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.aip-feedback-hist-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--navy);
+  margin-bottom: 8px;
+}
+#aipHistorySummary {
+  font-size: 12.5px;
+  color: var(--grey-600);
+  line-height: 1.7;
+}
+
+.aip-feedback-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ── Loading state ─────────────────────── */
+.aip-loading-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 0;
+  gap: 16px;
+}
+.aip-loading-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--grey-100);
+  border-top-color: #7c3aed;
+  border-radius: 50%;
+  animation: aipSpin .8s linear infinite;
+}
+@keyframes aipSpin { to { transform: rotate(360deg); } }
+.aip-loading-text {
+  font-size: 14px;
+  color: var(--grey-400);
+  font-weight: 500;
+}
+
+@media (max-width: 540px) {
+  .aip-diff-grid { grid-template-columns: 1fr; }
+  .aip-diag-panel { flex-direction: column; align-items: stretch; }
+  .aip-msg-bubble { max-width: 88%; }
+}
