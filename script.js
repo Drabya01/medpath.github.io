@@ -9,23 +9,60 @@
 //  ROUTING
 // ─────────────────────────────────────────
 function showScreen(id) {
-  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  const target = document.getElementById('screen-' + id);
-  if (target) {
-    target.classList.add('active');
-    target.style.animation = 'none';
-    void target.offsetWidth;
-    target.style.animation = '';
+  var incoming = document.getElementById('screen-' + id);
+  if (!incoming) return;
+
+  // Find the currently visible screen
+  var current = document.querySelector('.screen.active');
+
+  // Show/hide back button immediately
+  var backBtn = document.getElementById('navBack');
+  if (id === 'home') backBtn.classList.remove('visible');
+  else               backBtn.classList.add('visible');
+
+  // If same screen, do nothing
+  if (current && current.id === 'screen-' + id) return;
+
+  // Instant swap if nothing is active yet (first load)
+  if (!current) {
+    incoming.classList.add('active');
+    _afterShowScreen(id);
+    return;
   }
-  // Show/hide back button
-  const backBtn = document.getElementById('navBack');
-  if (id === 'home') {
-    backBtn.classList.remove('visible');
-  } else {
-    backBtn.classList.add('visible');
-  }
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+
+  // Exit current, then enter new
+  current.classList.add('screen--exit');
+  setTimeout(function() {
+    current.classList.remove('active', 'screen--exit');
+    incoming.classList.add('active');
+    window.scrollTo({ top: 0, behavior: 'instant' });
+    _afterShowScreen(id);
+  }, 120);
+}
+
+function _afterShowScreen(id) {
   if (id === 'progress') renderProgressDashboard();
+  if (id === 'quiz')     resetQuizToStart();
+  if (id === 'settings') renderSettingsScreen();
+  if (id === 'home')     updateResumeBanner();
+}
+
+function resetQuizToStart() {
+  // Always return to the mode picker when entering quiz from outside
+  const picker   = document.getElementById('quiz-picker');
+  const question = document.getElementById('quiz-question');
+  const result   = document.getElementById('quiz-result');
+  if (picker)   picker.classList.remove('hidden');
+  if (question) question.classList.add('hidden');
+  if (result)   result.classList.add('hidden');
+  // Reset SA input
+  const sa = document.getElementById('quizSAInput');
+  if (sa) { sa.value = ''; sa.style.borderColor = ''; sa.style.background = ''; }
+}
+
+function exitQuiz() {
+  // Snap back to picker without saving score
+  resetQuizToStart();
 }
 
 function goHome() {
@@ -7422,71 +7459,262 @@ let fcIndex = 0;
 let fcFlipped = false;
 let fcActiveCategory = 'All';
 
-// ── SRS Data ──────────────────────────────
-// srsData[term] = { status: 'unseen'|'learning'|'know', interval: N, nextReview: timestamp, saveCount: N }
-// savedCards: Set of terms
-let srsData = {};
+// ══════════════════════════════════════════════════════════════
+//  ANKI SM-2 ENGINE  — used by ALL flashcard types in the app
+// ══════════════════════════════════════════════════════════════
+//
+//  Card ratings (matches Anki exactly):
+//    1 = Again  — complete failure, reset to learning
+//    2 = Hard   — remembered with significant difficulty
+//    3 = Good   — correct with some effort (most common)
+//    4 = Easy   — effortless, skip learning steps
+//
+//  Card states: 'new' | 'learning' | 'relearning' | 'review'
+//
+//  Learning steps: [1 min, 10 min]   (same as Anki defaults)
+//  Graduating interval: 1 day
+//  Easy interval: 4 days
+//  Ease factor: starts at 2.5, min 1.3
+// ══════════════════════════════════════════════════════════════
+
+const SM2 = {
+  LEARN_STEPS_MS:   [60000, 600000],   // 1 min, 10 min
+  RELEARN_STEPS_MS: [600000],          // 10 min
+  GRAD_INTERVAL:    1,                 // days
+  EASY_INTERVAL:    4,                 // days
+  START_EASE:       2.5,
+  MIN_EASE:         1.3,
+  EASY_BONUS:       1.3,
+  HARD_FACTOR:      1.2,
+  AGAIN_EASE_DELTA: -0.2,
+  HARD_EASE_DELTA:  -0.15,
+  EASY_EASE_DELTA:  +0.15,
+};
+
+// Storage key — kept separate from old srsData so we don't break existing data
+const SM2_KEY = 'medpath_sm2';
+let sm2Data = {};       // { cardId: CardState }
 let savedCards = new Set();
 
-function srsKey(term) { return 'srs_' + term; }
-
-function loadSRS() {
+function sm2Load() {
   try {
-    const raw = localStorage.getItem('medpath_srs');
-    if (raw) srsData = JSON.parse(raw);
+    const raw = localStorage.getItem(SM2_KEY);
+    if (raw) sm2Data = JSON.parse(raw);
+    // Also migrate old srsData so users don't lose 'know' progress
+    const oldRaw = localStorage.getItem('medpath_srs');
+    if (oldRaw) {
+      const old = JSON.parse(oldRaw);
+      Object.keys(old).forEach(function(term) {
+        const key = 'fc:' + term;
+        if (!sm2Data[key]) {
+          const od = old[term];
+          sm2Data[key] = od.status === 'know' ? {
+            state:'review', ease:2.5, interval:Math.max(od.interval||1,1),
+            step:0, lapses:0, due: od.nextReview||0, reps: od.reps||1
+          } : {
+            state:'new', ease:2.5, interval:0, step:0, lapses:0, due:0, reps:0
+          };
+        }
+      });
+    }
     const rawSaved = localStorage.getItem('medpath_saved');
     if (rawSaved) savedCards = new Set(JSON.parse(rawSaved));
-  } catch(e) { srsData = {}; savedCards = new Set(); }
+  } catch(e) { sm2Data = {}; savedCards = new Set(); }
 }
 
-function saveSRS() {
+function sm2Save() {
   try {
-    localStorage.setItem('medpath_srs', JSON.stringify(srsData));
+    localStorage.setItem(SM2_KEY, JSON.stringify(sm2Data));
     localStorage.setItem('medpath_saved', JSON.stringify([...savedCards]));
   } catch(e) {}
 }
 
-function getCardData(term) {
-  return srsData[term] || { status: 'unseen', interval: 1, nextReview: 0, reps: 0 };
+// Backward-compat aliases used elsewhere in the code
+function loadSRS()  { sm2Load(); }
+function saveSRS()  { sm2Save(); }
+function srsKey(t)  { return 'fc:' + t; }
+
+// ── Get card state (returns default for new card) ─────────────
+function sm2Get(id) {
+  return sm2Data[id] || { state:'new', ease:SM2.START_EASE, interval:0, step:0, lapses:0, due:0, reps:0 };
 }
 
-// SM-2-inspired: "know" doubles interval (capped at 60 days), "learning" resets to 1 day
+// ── Schedule a card given a rating 1-4 ───────────────────────
+function sm2Schedule(id, rating) {
+  const now  = Date.now();
+  const card = sm2Get(id);
+  const c    = Object.assign({}, card);  // clone
+
+  switch (c.state) {
+
+    case 'new':
+    case 'learning':
+      if (rating === 1) {                            // Again → step 0
+        c.state = 'learning'; c.step = 0;
+        c.due   = now + SM2.LEARN_STEPS_MS[0];
+      } else if (rating === 2) {                     // Hard → repeat this step, 5 min
+        c.state = 'learning';
+        c.due   = now + 5 * 60000;
+      } else if (rating === 3) {                     // Good → advance step
+        const nextStep = (c.step || 0) + 1;
+        if (nextStep >= SM2.LEARN_STEPS_MS.length) { // Graduate to review
+          c.state    = 'review';
+          c.interval = SM2.GRAD_INTERVAL;
+          c.due      = now + SM2.GRAD_INTERVAL * 86400000;
+        } else {
+          c.state = 'learning'; c.step = nextStep;
+          c.due   = now + SM2.LEARN_STEPS_MS[nextStep];
+        }
+      } else {                                       // Easy → graduate immediately
+        c.state    = 'review';
+        c.ease     = Math.min(c.ease + SM2.EASY_EASE_DELTA, 4.0);
+        c.interval = SM2.EASY_INTERVAL;
+        c.due      = now + SM2.EASY_INTERVAL * 86400000;
+      }
+      c.reps = (c.reps || 0) + 1;
+      break;
+
+    case 'relearning':
+      if (rating === 1) {                            // Again → stay in relearning
+        c.step = 0;
+        c.due  = now + SM2.RELEARN_STEPS_MS[0];
+      } else {                                       // Hard/Good/Easy → back to review
+        c.state    = 'review';
+        c.interval = Math.max(1, Math.round(c.interval * (rating === 4 ? 1.3 : 1.0)));
+        c.due      = now + c.interval * 86400000;
+      }
+      c.reps = (c.reps || 0) + 1;
+      break;
+
+    case 'review':
+      if (rating === 1) {                            // Again → relearning
+        c.state  = 'relearning'; c.step = 0;
+        c.ease   = Math.max(SM2.MIN_EASE, c.ease + SM2.AGAIN_EASE_DELTA);
+        c.lapses = (c.lapses || 0) + 1;
+        c.due    = now + SM2.RELEARN_STEPS_MS[0];
+      } else {
+        let factor = c.ease;
+        let newInterval;
+        if (rating === 2) {                          // Hard
+          factor       = SM2.HARD_FACTOR;
+          c.ease       = Math.max(SM2.MIN_EASE, c.ease + SM2.HARD_EASE_DELTA);
+          newInterval  = Math.max(c.interval + 1, Math.round(c.interval * factor));
+        } else if (rating === 3) {                   // Good
+          newInterval  = Math.max(c.interval + 1, Math.round(c.interval * c.ease));
+        } else {                                     // Easy
+          c.ease       = Math.min(c.ease + SM2.EASY_EASE_DELTA, 4.0);
+          newInterval  = Math.max(c.interval + 1, Math.round(c.interval * c.ease * SM2.EASY_BONUS));
+        }
+        // Fuzz interval ±5% to spread reviews
+        const fuzz   = Math.max(1, Math.round(newInterval * 0.05));
+        newInterval  = newInterval + Math.floor(Math.random() * (fuzz * 2 + 1)) - fuzz;
+        c.interval   = Math.max(1, newInterval);
+        c.state      = 'review';
+        c.due        = now + c.interval * 86400000;
+        c.reps       = (c.reps || 0) + 1;
+      }
+      break;
+  }
+
+  sm2Data[id] = c;
+  sm2Save();
+  return c;
+}
+
+// ── Format an interval for button preview display ─────────────
+function sm2FormatInterval(ms) {
+  const min = Math.round(ms / 60000);
+  if (min < 60)   return min + 'm';
+  const hr = Math.round(ms / 3600000);
+  if (hr < 24)    return hr + 'h';
+  const days = Math.round(ms / 86400000);
+  if (days < 31)  return days + 'd';
+  const mo = Math.round(days / 30);
+  return mo + 'mo';
+}
+
+// ── Preview what each button will schedule (for display on btn) ─
+function sm2Preview(id) {
+  const c   = sm2Get(id);
+  const now = Date.now();
+
+  if (c.state === 'new' || c.state === 'learning') {
+    const step0 = SM2.LEARN_STEPS_MS[0];
+    const step1 = SM2.LEARN_STEPS_MS[1];
+    const lastStep = (c.step || 0) >= SM2.LEARN_STEPS_MS.length - 1;
+    return {
+      1: sm2FormatInterval(step0),
+      2: sm2FormatInterval(5 * 60000),
+      3: lastStep ? SM2.GRAD_INTERVAL + 'd' : sm2FormatInterval(step1),
+      4: SM2.EASY_INTERVAL + 'd',
+    };
+  }
+
+  if (c.state === 'relearning') {
+    return {
+      1: sm2FormatInterval(SM2.RELEARN_STEPS_MS[0]),
+      2: Math.max(1, c.interval) + 'd',
+      3: Math.max(1, c.interval) + 'd',
+      4: Math.max(1, Math.round(c.interval * 1.3)) + 'd',
+    };
+  }
+
+  // review
+  const hardInt = Math.max(c.interval + 1, Math.round(c.interval * SM2.HARD_FACTOR));
+  const goodInt = Math.max(c.interval + 1, Math.round(c.interval * c.ease));
+  const easyInt = Math.max(c.interval + 1, Math.round(c.interval * c.ease * SM2.EASY_BONUS));
+  return {
+    1: sm2FormatInterval(SM2.RELEARN_STEPS_MS[0]),
+    2: hardInt + 'd',
+    3: goodInt + 'd',
+    4: easyInt + 'd',
+  };
+}
+
+// ── Stats: count cards by state for the main flashcard deck ───
+function sm2Stats() {
+  let review = 0, learning = 0, newCards = 0;
+  const now = Date.now();
+  flashcards.forEach(function(f) {
+    const c = sm2Get('fc:' + f.term);
+    if (c.state === 'new')                           newCards++;
+    else if (c.state === 'learning' || c.state === 'relearning') learning++;
+    else if (c.state === 'review')                   review++;
+  });
+  const due = flashcards.filter(function(f) {
+    const c = sm2Get('fc:' + f.term);
+    return c.due <= now && c.state !== 'new';
+  }).length;
+  return { review, learning, newCards, due };
+}
+
+// ── Backward-compatible getCardData (used by updateFC/stats) ─
+function getCardData(term) {
+  const c = sm2Get('fc:' + term);
+  // Map SM-2 states to old status labels for existing UI code
+  const status = c.state === 'new' ? 'unseen'
+               : c.state === 'review' ? 'know'
+               : 'learning';
+  return { status, interval: c.interval, nextReview: c.due, reps: c.reps };
+}
+
+// ── Main rateCard — now accepts 1/2/3/4 ──────────────────────
 function rateCard(rating) {
   const card = fcFiltered[fcIndex];
   if (!card) return;
-  const data = getCardData(card.term);
-  const now = Date.now();
-
-  if (rating === 'know') {
-    data.status = 'know';
-    data.reps = (data.reps || 0) + 1;
-    // Interval doubles each correct answer: 1 → 2 → 4 → 8 … capped at 60
-    data.interval = Math.min((data.interval || 1) * 2, 60);
-    data.nextReview = now + data.interval * 86400000;
-  } else {
-    data.status = 'learning';
-    data.reps = 0;
-    data.interval = 1; // back to 1 day
-    data.nextReview = now + 86400000;
-  }
-
-  srsData[card.term] = data;
-  saveSRS();
+  const id = 'fc:' + card.term;
+  sm2Schedule(id, rating);
   updateStatsStrip();
 
-  // Auto-advance: "know" skips ahead immediately; "learning" keeps it in rotation
-  if (rating === 'know') {
-    // Brief green flash then advance
-    const srsRow = document.getElementById('fcSrsRow');
-    srsRow.classList.add('fc-srs-rated');
-    setTimeout(() => {
-      srsRow.classList.remove('fc-srs-rated');
-      nextCard();
-    }, 400);
+  const srsRow = document.getElementById('fcSrsRow');
+  if (appSettings && !appSettings.autoAdvance) {
+    if (srsRow) { srsRow.classList.add('fc-srs-rated'); setTimeout(function() { srsRow.classList.remove('fc-srs-rated'); }, 350); }
   } else {
-    nextCard();
+    if (srsRow) { srsRow.classList.add('fc-srs-rated'); setTimeout(function() { srsRow.classList.remove('fc-srs-rated'); nextCard(); }, 350); }
   }
 }
+
+// ── Saved Cards (unchanged) ───────────────────────────────────
 
 // ── Saved Cards ───────────────────────────
 function toggleSaveCard(e) {
@@ -7537,39 +7765,37 @@ function updateSaveBtnUI() {
 }
 
 // ── SRS-aware next card selection ─────────
-// When in "All" or any non-Saved category: prioritise 'learning' cards that are due
+// SM-2 next card: prioritise due learning/relearning cards, then due review, then new
 function getNextSRSIndex(currentIndex) {
   const now = Date.now();
-  // Find due 'learning' cards first (excluding current)
-  const dueIndices = fcFiltered
-    .map((f, i) => ({ i, data: getCardData(f.term) }))
-    .filter(({ i, data }) => i !== currentIndex && data.status === 'learning' && data.nextReview <= now)
+  // Find any due learning or relearning cards (they have short intervals — minutes)
+  const dueLearning = fcFiltered
+    .map((f, i) => ({ i, c: sm2Get('fc:' + f.term) }))
+    .filter(({ i, c }) => i !== currentIndex && (c.state === 'learning' || c.state === 'relearning') && c.due <= now)
     .map(({ i }) => i);
+  if (dueLearning.length > 0) return dueLearning[0];
 
-  if (dueIndices.length > 0) {
-    // Pick the most overdue
-    return dueIndices[Math.floor(Math.random() * Math.min(dueIndices.length, 3))];
-  }
-
-  // Otherwise just go to next sequentially
+  // Otherwise advance sequentially
   if (currentIndex < fcFiltered.length - 1) return currentIndex + 1;
   return 0;
 }
 
 // ── Stats Strip ───────────────────────────
 function updateStatsStrip() {
-  const allTerms = flashcards.map(f => f.term);
-  let know = 0, learning = 0, unseen = 0;
-  allTerms.forEach(term => {
-    const d = getCardData(term);
-    if (d.status === 'know') know++;
-    else if (d.status === 'learning') learning++;
-    else unseen++;
+  const now = Date.now();
+  let review = 0, learning = 0, newCards = 0, due = 0;
+  flashcards.forEach(function(f) {
+    const c = sm2Get('fc:' + f.term);
+    if (c.state === 'new')                               newCards++;
+    else if (c.state === 'learning' || c.state === 'relearning') learning++;
+    else if (c.state === 'review')                       review++;
+    if (c.due <= now && c.state !== 'new')               due++;
   });
-  document.getElementById('statKnow').textContent = know;
-  document.getElementById('statLearning').textContent = learning;
-  document.getElementById('statSaved').textContent = savedCards.size;
-  document.getElementById('statUnseen').textContent = unseen;
+  const setEl = function(id, v) { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setEl('statKnow',     review);
+  setEl('statLearning', learning);
+  setEl('statSaved',    savedCards.size);
+  setEl('statUnseen',   newCards);
 }
 
 // ── Rendering ────────────────────────────
@@ -7599,12 +7825,15 @@ function filterFC(cat) {
       fcFiltered = [{ term: 'No saved cards yet!', def: 'Tap the ☆ star on any flashcard to save it here for quick review.', cat: 'Saved ⭐' }];
     }
   } else if (cat === 'All') {
-    // SRS-aware ordering: put due 'learning' cards first
+    // SM-2 queue ordering: due review/relearning → due learning → new → not-yet-due
     const now = Date.now();
-    const due    = flashcards.filter(f => { const d = getCardData(f.term); return d.status === 'learning' && d.nextReview <= now; });
-    const unseen = flashcards.filter(f => getCardData(f.term).status === 'unseen');
-    const rest   = flashcards.filter(f => { const d = getCardData(f.term); return d.status === 'know' || (d.status === 'learning' && d.nextReview > now); });
-    fcFiltered = [...due, ...unseen, ...rest];
+    const dueReview   = flashcards.filter(f => { const c = sm2Get('fc:'+f.term); return (c.state==='review'||c.state==='relearning') && c.due <= now; });
+    const dueLearning = flashcards.filter(f => { const c = sm2Get('fc:'+f.term); return c.state==='learning' && c.due <= now; });
+    const newCards    = flashcards.filter(f => sm2Get('fc:'+f.term).state==='new');
+    const notDue      = flashcards.filter(f => { const c = sm2Get('fc:'+f.term); return c.state!=='new' && c.due > now; });
+    // Sort due review by most overdue first
+    dueReview.sort((a,b) => sm2Get('fc:'+a.term).due - sm2Get('fc:'+b.term).due);
+    fcFiltered = [...dueReview, ...dueLearning, ...newCards, ...notDue];
   } else {
     fcFiltered = flashcards.filter(f => f.cat === cat);
   }
@@ -7633,12 +7862,19 @@ function updateFC() {
   const srsRow = document.getElementById('fcSrsRow');
   srsRow.classList.remove('visible');
 
-  // Update status indicator on card
-  const data = getCardData(card.term);
+  // Update interval previews on the 4 buttons
+  const prev = sm2Preview('fc:' + card.term);
+  [1,2,3,4].forEach(function(r) {
+    const el = document.getElementById('fcSrsPreview' + r);
+    if (el) el.textContent = prev[r];
+  });
+
+  // Update progress bar colour based on SM-2 state
+  const c = sm2Get('fc:' + card.term);
   const progressBar = document.getElementById('fcBarFill');
   progressBar.className = 'fc-bar-fill';
-  if (data.status === 'know') progressBar.classList.add('fc-bar-fill--know');
-  else if (data.status === 'learning') progressBar.classList.add('fc-bar-fill--learning');
+  if (c.state === 'review')                            progressBar.classList.add('fc-bar-fill--know');
+  else if (c.state === 'learning' || c.state === 'relearning') progressBar.classList.add('fc-bar-fill--learning');
 
   updateSaveBtnUI();
   updateStatsStrip();
@@ -7650,6 +7886,8 @@ function flipCard() {
   // Show SRS buttons once the card has been flipped at least once
   if (fcFlipped) {
     document.getElementById('fcSrsRow').classList.add('visible');
+    // Show keyboard hint on very first flip (laptop users only)
+    if (typeof _maybeShowKbdHintFlipped === 'function') _maybeShowKbdHintFlipped();
   }
 }
 
@@ -8369,18 +8607,76 @@ const allQuestions = [
   }
 ];
 
-let quizQuestions = [];
-let quizIndex = 0;
-let quizScore = 0;
-let quizAnswered = false;
-const QUIZ_LENGTH = 10;
+// ─────────────────────────────────────────
+//  QUIZ ENGINE — Multi-mode (MC / Short Answer / Matching / Mix)
+// ─────────────────────────────────────────
 
-function startQuiz() {
-  // Shuffle and pick QUIZ_LENGTH questions
-  quizQuestions = shuffle([...allQuestions]).slice(0, QUIZ_LENGTH);
+let quizQuestions   = [];
+let quizIndex       = 0;
+let quizScore       = 0;
+let quizAnswered    = false;
+let quizMode        = 'multiple';  // 'multiple' | 'short' | 'matching' | 'mix'
+let quizLength      = 10;
+let matchState      = { selected: null, pairs: [], matched: new Set(), wrong: new Set() };
+
+// ── Question pool ─────────────────────────────────────────────────────────────
+// Combines allQuestions (MC only) + flashcard-derived questions (all modes)
+function buildQuizPool(mode) {
+  // From allQuestions (MC format) — usable for MC and mix
+  const mcPool = allQuestions.map(q => ({ type: 'mc', ...q }));
+
+  // From flashcards (term → def) — usable for short answer, matching, mix
+  const saPool = flashcards.map(fc => ({
+    type: 'short',
+    q: `What is the definition of: "${fc.term}"?`,
+    term: fc.term,
+    answer: fc.def,
+    cat: fc.cat
+  }));
+
+  if (mode === 'multiple') {
+    return shuffle([...mcPool]);
+  }
+  if (mode === 'short') {
+    return shuffle([...saPool]);
+  }
+  if (mode === 'matching') {
+    // Matching packs 6 pairs per round, so each "question" is a set of 6
+    const pairs = shuffle([...flashcards]);
+    const rounds = [];
+    for (let i = 0; i < pairs.length - 5; i += 6) {
+      rounds.push({ type: 'matching', pairs: pairs.slice(i, i + 6) });
+    }
+    return rounds;
+  }
+  if (mode === 'mix') {
+    const mixed = [];
+    // 50% MC, 30% short, 20% matching
+    const mcItems = shuffle([...mcPool]).slice(0, 20).map(q => ({ ...q, type: 'mc' }));
+    const saItems = shuffle([...saPool]).slice(0, 15).map(q => ({ ...q, type: 'short' }));
+    const fcPairs = shuffle([...flashcards]);
+    for (let i = 0; i < Math.min(fcPairs.length - 5, 10); i += 6) {
+      mixed.push({ type: 'matching', pairs: fcPairs.slice(i, i + 6) });
+    }
+    return shuffle([...mcItems, ...saItems, ...mixed]);
+  }
+  return shuffle([...mcPool]);
+}
+
+function setQuizLength(btn, len) {
+  quizLength = len;
+  document.querySelectorAll('.qz-len-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+function beginQuiz(mode) {
+  quizMode = mode;
+  const pool = buildQuizPool(mode);
+  quizQuestions = pool.slice(0, quizLength);
   quizIndex = 0;
   quizScore = 0;
-  document.getElementById('quiz-start').classList.add('hidden');
+
+  document.getElementById('quiz-picker').classList.add('hidden');
   document.getElementById('quiz-result').classList.add('hidden');
   document.getElementById('quiz-question').classList.remove('hidden');
   renderQuizQuestion();
@@ -8389,17 +8685,39 @@ function startQuiz() {
 function renderQuizQuestion() {
   quizAnswered = false;
   const q = quizQuestions[quizIndex];
-  document.getElementById('quizQNum').textContent = `Question ${quizIndex + 1} of ${QUIZ_LENGTH}`;
+
+  // Progress
+  document.getElementById('quizQNum').textContent = `${quizIndex + 1} / ${quizQuestions.length}`;
   document.getElementById('quizScoreLive').textContent = quizScore;
-  document.getElementById('quizProgressFill').style.width = `${(quizIndex / QUIZ_LENGTH) * 100}%`;
-  document.getElementById('quizQ').textContent = q.q;
-
-  document.getElementById('quizChoices').innerHTML = q.choices.map((ch, ci) => `
-    <button class="quiz-choice" onclick="selectQuizAnswer(this, ${ci})">${ch}</button>
-  `).join('');
-
-  document.getElementById('quizFeedback').classList.add('hidden');
+  document.getElementById('quizProgressFill').style.width = `${(quizIndex / quizQuestions.length) * 100}%`;
   document.getElementById('quizNextBtn').classList.add('hidden');
+
+  // Hide all cards
+  ['quizCardMC', 'quizCardSA', 'quizCardMatch'].forEach(id => {
+    document.getElementById(id).classList.add('hidden');
+    document.getElementById(id).classList.remove('visible');
+  });
+  ['quizFeedbackMC', 'quizFeedbackSA', 'quizFeedbackMatch'].forEach(id => {
+    document.getElementById(id).classList.add('hidden');
+  });
+
+  const typeLabels = { mc: 'Multiple Choice', short: 'Short Answer', matching: 'Matching' };
+  const typePill = document.getElementById('quizTypePill');
+  typePill.textContent = typeLabels[q.type] || '';
+  typePill.className = 'quiz-type-pill qz-pill--' + (q.type || 'mc');
+
+  if (q.type === 'mc') renderMCQuestion(q);
+  else if (q.type === 'short') renderSAQuestion(q);
+  else if (q.type === 'matching') renderMatchingQuestion(q);
+}
+
+// ── Multiple Choice ───────────────────────────────────────────────────────────
+function renderMCQuestion(q) {
+  document.getElementById('quizCardMC').classList.remove('hidden');
+  document.getElementById('quizQMC').textContent = q.q;
+  document.getElementById('quizChoices').innerHTML = q.choices.map((ch, ci) => `
+    <button class="quiz-choice" onclick="selectQuizAnswer(this,${ci})">${ch}</button>
+  `).join('');
 }
 
 function selectQuizAnswer(btn, choiceIdx) {
@@ -8407,25 +8725,176 @@ function selectQuizAnswer(btn, choiceIdx) {
   quizAnswered = true;
   const q = quizQuestions[quizIndex];
   const isCorrect = choiceIdx === q.correct;
-
   if (isCorrect) quizScore++;
 
-  const btns = document.querySelectorAll('.quiz-choice');
-  btns.forEach((b, i) => {
+  document.querySelectorAll('.quiz-choice').forEach((b, i) => {
     b.disabled = true;
     if (i === q.correct) b.classList.add('correct');
   });
   if (!isCorrect) btn.classList.add('incorrect');
 
-  const feedback = document.getElementById('quizFeedback');
-  feedback.textContent = (isCorrect ? '✅ Correct! ' : '❌ Not quite. ') + q.explanation;
-  feedback.classList.remove('hidden');
+  showFeedback('quizFeedbackMC', isCorrect, q.explanation);
   document.getElementById('quizNextBtn').classList.remove('hidden');
 }
 
+// ── Short Answer ─────────────────────────────────────────────────────────────
+function renderSAQuestion(q) {
+  document.getElementById('quizCardSA').classList.remove('hidden');
+  document.getElementById('quizQSA').textContent = q.q;
+  const input = document.getElementById('quizSAInput');
+  input.value = '';
+  input.disabled = false;
+  document.getElementById('quizSABtn').disabled = false;
+  document.getElementById('quizSABtn').textContent = 'Check →';
+  setTimeout(() => input.focus(), 50);
+}
+
+function quizSAKeydown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitShortAnswer(); }
+}
+
+function submitShortAnswer() {
+  if (quizAnswered) return;
+  const q = quizQuestions[quizIndex];
+  const input = document.getElementById('quizSAInput');
+  const userAns = input.value.trim();
+  if (!userAns) { input.style.borderColor = 'var(--red)'; setTimeout(() => input.style.borderColor = '', 800); return; }
+
+  quizAnswered = true;
+  input.disabled = true;
+  document.getElementById('quizSABtn').disabled = true;
+
+  const isCorrect = fuzzyMatch(userAns, q.answer, q.term);
+  if (isCorrect) quizScore++;
+
+  input.style.borderColor = isCorrect ? 'var(--green)' : 'var(--red)';
+  input.style.background   = isCorrect ? 'rgba(52,211,153,.07)' : 'rgba(248,113,113,.07)';
+
+  const correctText = `✅ Correct answer: ${q.answer.length > 120 ? q.answer.slice(0, 120) + '…' : q.answer}`;
+  showFeedback('quizFeedbackSA', isCorrect, isCorrect ? 'Great answer!' : correctText);
+  document.getElementById('quizNextBtn').classList.remove('hidden');
+}
+
+// Fuzzy matching — passes if user answer contains key words from correct answer
+function fuzzyMatch(userInput, correctAnswer, term) {
+  const user = userInput.toLowerCase().replace(/[^a-z0-9\s]/g, '');
+  const correct = correctAnswer.toLowerCase().replace(/[^a-z0-9\s]/g, '');
+  const termLow = (term || '').toLowerCase();
+
+  // Direct term match
+  if (term && user.includes(termLow)) return true;
+
+  // Word overlap method — extract significant words (>3 chars) from the answer
+  const stopwords = new Set(['that','this','with','from','have','been','were','will','would','their','they','there','which','when','what','also','into','more','than','then','some','such','each','most','other','about','after','very','just','like','only','well','used','both','said','these','those','does','your','word','make','time','long','look','come','made','down','over','many','take','than','even','much','last','great','still','own','good','part','know','same','left','put','place','does']);
+
+  const getWords = s => s.split(/\s+/).filter(w => w.length > 3 && !stopwords.has(w));
+  const correctWords = getWords(correct);
+  const userWords = getWords(user);
+
+  if (!correctWords.length) return user.length > 4;
+
+  let matches = 0;
+  for (const cw of correctWords) {
+    if (userWords.some(uw => uw.includes(cw) || cw.includes(uw))) matches++;
+  }
+
+  const threshold = correctWords.length <= 4 ? 0.4 : 0.3;
+  return (matches / correctWords.length) >= threshold;
+}
+
+// ── Matching ──────────────────────────────────────────────────────────────────
+function renderMatchingQuestion(q) {
+  document.getElementById('quizCardMatch').classList.remove('hidden');
+  matchState = { selected: null, pairs: q.pairs, matched: new Set(), wrong: new Set(), score: 0 };
+
+  const termsCol = document.getElementById('matchTerms');
+  const defsCol  = document.getElementById('matchDefs');
+
+  const shuffledDefs = shuffle([...q.pairs]);
+
+  termsCol.innerHTML = q.pairs.map((p, i) => `
+    <button class="qz-match-tile qz-match-term" data-idx="${i}" data-type="term" onclick="selectMatchTile(this)">
+      ${escapeHtml(p.term)}
+    </button>`).join('');
+
+  defsCol.innerHTML = shuffledDefs.map((p, i) => `
+    <button class="qz-match-tile qz-match-def" data-term="${escapeHtml(p.term)}" data-type="def" onclick="selectMatchTile(this)">
+      ${escapeHtml(p.def.length > 80 ? p.def.slice(0,80)+'…' : p.def)}
+    </button>`).join('');
+}
+
+function selectMatchTile(tile) {
+  if (tile.classList.contains('qz-matched') || tile.classList.contains('qz-wrong')) return;
+  const type = tile.dataset.type;
+
+  // If clicking same tile, deselect
+  if (matchState.selected === tile) {
+    tile.classList.remove('qz-selected');
+    matchState.selected = null;
+    return;
+  }
+
+  // If no selection yet, or selecting same type — replace selection of same type
+  if (!matchState.selected || matchState.selected.dataset.type === type) {
+    if (matchState.selected) matchState.selected.classList.remove('qz-selected');
+    matchState.selected = tile;
+    tile.classList.add('qz-selected');
+    return;
+  }
+
+  // We have a term and a def — check match
+  const termTile = type === 'def' ? matchState.selected : tile;
+  const defTile  = type === 'def' ? tile : matchState.selected;
+  const termIdx  = parseInt(termTile.dataset.idx);
+  const correctTerm = matchState.pairs[termIdx].term;
+  const isMatch = defTile.dataset.term === correctTerm;
+
+  termTile.classList.remove('qz-selected');
+  defTile.classList.remove('qz-selected');
+  matchState.selected = null;
+
+  if (isMatch) {
+    termTile.classList.add('qz-matched');
+    defTile.classList.add('qz-matched');
+    termTile.disabled = true;
+    defTile.disabled  = true;
+    matchState.score = (matchState.score || 0) + 1;
+
+    // All matched?
+    if (matchState.score === matchState.pairs.length) {
+      quizAnswered = true;
+      quizScore++;
+      showFeedback('quizFeedbackMatch', true, `Perfect! All ${matchState.pairs.length} pairs matched correctly.`);
+      document.getElementById('quizNextBtn').classList.remove('hidden');
+    }
+  } else {
+    // Flash wrong
+    termTile.classList.add('qz-wrong');
+    defTile.classList.add('qz-wrong');
+    setTimeout(() => {
+      termTile.classList.remove('qz-wrong');
+      defTile.classList.remove('qz-wrong');
+    }, 700);
+  }
+}
+
+// ── Shared ────────────────────────────────────────────────────────────────────
+function showFeedback(elId, isCorrect, text) {
+  const el = document.getElementById(elId);
+  el.innerHTML = `<span class="qz-fb-icon">${isCorrect ? '✅' : '❌'}</span><span class="qz-fb-text">${escapeHtml(text)}</span>`;
+  el.className = `quiz-feedback qz-feedback--${isCorrect ? 'correct' : 'wrong'}`;
+  el.classList.remove('hidden');
+}
+
 function nextQuizQ() {
+  // Reset SA input styles
+  const saInput = document.getElementById('quizSAInput');
+  saInput.style.borderColor = '';
+  saInput.style.background  = '';
+  saInput.value = '';
+
   quizIndex++;
-  if (quizIndex >= QUIZ_LENGTH) {
+  if (quizIndex >= quizQuestions.length) {
     showQuizResult();
   } else {
     renderQuizQuestion();
@@ -8436,27 +8905,37 @@ function showQuizResult() {
   document.getElementById('quiz-question').classList.add('hidden');
   document.getElementById('quiz-result').classList.remove('hidden');
 
-  const pct = Math.round((quizScore / QUIZ_LENGTH) * 100);
+  const total = quizQuestions.length;
+  const pct = Math.round((quizScore / total) * 100);
   let icon, title, msg;
-  if (pct >= 90) { icon = '🏆'; title = 'Outstanding!'; msg = 'Excellent work — you have a strong grasp of these healthcare fundamentals.'; }
-  else if (pct >= 70) { icon = '🎯'; title = 'Well done!'; msg = 'Good performance. Review the topics you missed and try again to master them.'; }
-  else if (pct >= 50) { icon = '📚'; title = 'Keep studying!'; msg = 'A decent start. Healthcare has a lot to learn — use the Flashcards and Case Mode to strengthen your knowledge.'; }
-  else { icon = '💪'; title = 'Keep going!'; msg = 'Every expert was once a beginner. Use the other learning modes and try the quiz again.'; }
+  if (pct >= 90)      { icon='🏆'; title='Outstanding!';   msg='Excellent work — you have a strong grasp of the material.'; }
+  else if (pct >= 70) { icon='🎯'; title='Well done!';     msg='Good performance. Review the topics you missed and try again.'; }
+  else if (pct >= 50) { icon='📚'; title='Keep studying!'; msg='Decent start. Use Flashcards and Case Mode to strengthen your knowledge.'; }
+  else                { icon='💪'; title='Keep going!';    msg='Every expert was once a beginner. Keep at it — you\'ll get there.'; }
 
   document.getElementById('resultIcon').textContent = icon;
   document.getElementById('resultTitle').textContent = title;
-  document.getElementById('resultScore').textContent = `${quizScore} / ${QUIZ_LENGTH}`;
+  document.getElementById('resultScore').textContent = `${quizScore} / ${total}`;
   document.getElementById('resultMsg').textContent = msg;
-  document.getElementById('resultBreakdown').textContent = `${pct}% — ${quizScore} correct, ${QUIZ_LENGTH - quizScore} incorrect`;
-
+  document.getElementById('resultBreakdown').textContent = `${pct}% — ${quizScore} correct, ${total - quizScore} incorrect`;
   document.getElementById('quizProgressFill').style.width = '100%';
-  recordQuizComplete(quizScore, QUIZ_LENGTH);
+  recordQuizComplete(quizScore, total);
 }
 
 function restartQuiz() {
   document.getElementById('quiz-result').classList.add('hidden');
-  document.getElementById('quiz-start').classList.remove('hidden');
+  document.getElementById('quiz-picker').classList.remove('hidden');
+  // Reset SA input
+  const saInput = document.getElementById('quizSAInput');
+  if (saInput) { saInput.value=''; saInput.style.borderColor=''; saInput.style.background=''; }
 }
+
+function escapeHtml(str) {
+  return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// Legacy: startQuiz used by any old references
+function startQuiz() { beginQuiz('multiple'); }
 
 // ─────────────────────────────────────────
 //  UTILITY
@@ -8473,7 +8952,7 @@ function shuffle(arr) {
 //  INIT
 // ─────────────────────────────────────────
 function init() {
-  loadSRS();
+  sm2Load();
   loadProgressData();
   updateStreak();
   initDiffCounts();
@@ -8482,7 +8961,11 @@ function init() {
   updateFC();
   updateStatsStrip();
   initGoogleAuth();
+  initSettings();
+  loadCustomCards();
   showScreen('home');
+  // Inject My Cards tabs after DOM is ready
+  requestAnimationFrame(initCustomCardsTabs);
 }
 
 document.addEventListener('DOMContentLoaded', init);
@@ -8494,20 +8977,77 @@ document.addEventListener('DOMContentLoaded', init);
 function showHosaEvent(id, name) {
   // Hide all panels
   document.querySelectorAll('.hosa-event-panel').forEach(p => p.classList.add('hidden'));
-  // Remove active highlight from all event cards
   document.querySelectorAll('.hosa-event-card').forEach(c => c.classList.remove('hosa-card--selected'));
 
-  if (id === 'cpr') {
-    const panel = document.getElementById('hosa-panel-cpr');
-    panel.classList.remove('hidden');
-    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  } else {
-    const panel = document.getElementById('hosa-panel-empty');
-    const title = document.getElementById('hosa-empty-title');
-    if (title) title.textContent = name || id;
-    panel.classList.remove('hidden');
-    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  // Map event ids to panel ids
+  const panelMap = {
+    'cpr':                  'hosa-panel-cpr',
+    'emt':                  'hosa-panel-emt',
+    'sports-medicine':      'hosa-panel-sports-medicine',
+    'pharmacy-science':     'hosa-panel-pharmacy-science',
+    'physical-therapy':     'hosa-panel-physical-therapy',
+    'clinical-lab':         'hosa-panel-clinical-lab',
+    'dental-science':       'hosa-panel-dental-science',
+    'veterinary-science':   'hosa-panel-veterinary-science',
+    'biotechnology':        'hosa-panel-biotechnology',
+    'medical-terminology':  'hosa-panel-medical-terminology',
+    'pathophysiology':      'hosa-panel-pathophysiology',
+    'medical-math':         'hosa-panel-medical-math',
+    'forensic-science':     'hosa-panel-forensic-science',
+    'behavioral-health':    'hosa-panel-behavioral-health',
+    'medical-spelling':     'hosa-panel-medical-spelling',
+    'human-growth':         'hosa-panel-human-growth',
+    'medical-law':          'hosa-panel-medical-law',
+    'clinical-nursing':     'hosa-panel-clinical-nursing',
+    'epidemiology':         'hosa-panel-epidemiology',
+    'nutrition':            'hosa-panel-nutrition',
+    'creative-problem':     'hosa-panel-creative-problem',
+    'hosa-bowl':            'hosa-panel-hosa-bowl',
+    'biomedical-debate':    'hosa-panel-biomedical-debate',
+    'community-awareness':  'hosa-panel-community-awareness',
+    'medical-innovation':   'hosa-panel-medical-innovation',
+    'clinical-specialty':   'hosa-panel-clinical-specialty',
+    'mental-health':        'hosa-panel-mental-health',
+    'public-health':        'hosa-panel-public-health',
+    'persuasive-speaking':  'hosa-panel-persuasive-speaking',
+    'research-poster':      'hosa-panel-research-poster',
+  };
+
+  var panelId = panelMap[id];
+  if (panelId) {
+    var panel = document.getElementById(panelId);
+    if (panel) {
+      panel.classList.remove('hidden');
+      panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
   }
+
+  // Fallback: empty panel
+  var emptyPanel = document.getElementById('hosa-panel-empty');
+  var titleEl = document.getElementById('hosa-empty-title');
+  if (titleEl) titleEl.textContent = name || id;
+  if (emptyPanel) {
+    emptyPanel.classList.remove('hidden');
+    emptyPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+function switchHosaTab(eventId, tab, btn) {
+  // Hide all tab contents for this event
+  var prefix = eventId + '-tab-';
+  ['flashcards', 'skills'].forEach(function(t) {
+    var el = document.getElementById(prefix + t);
+    if (el) el.classList.add('hidden');
+  });
+  // Deactivate all tabs in this panel
+  if (btn) {
+    var panel = btn.closest('.hosa-event-panel');
+    if (panel) panel.querySelectorAll('.cpr-tab').forEach(function(b) { b.classList.remove('active'); });
+    btn.classList.add('active');
+  }
+  var target = document.getElementById(prefix + tab);
+  if (target) target.classList.remove('hidden');
 }
 
 function closeHosaPanel() {
@@ -8743,7 +9283,8 @@ function loadCprDeck(key, btn) {
   cprDeckKey = key;
   cprCurrentDeck = cprDecks[key].map(c => ({...c}));
   cprIndex = 0; cprKnown = 0; cprFlipped = false;
-  document.querySelectorAll('.cpr-deck-btn').forEach(b => b.classList.remove('active'));
+  const cprPanel = document.getElementById('hosa-panel-cpr');
+  if (cprPanel) cprPanel.querySelectorAll('.cpr-deck-btn').forEach(b => b.classList.remove('active'));
   if (btn) btn.classList.add('active');
   renderCprCard();
 }
@@ -8763,6 +9304,9 @@ function renderCprCard() {
   fc.classList.remove('flipped');
   cprFlipped = false;
   document.getElementById('cprFcRating').classList.add('hidden');
+  const cid = 'cpr:' + _sm2CardHash(card.q);
+  const prev = sm2Preview(cid);
+  [1,2,3,4].forEach(function(r) { const el = document.getElementById('cprSrs' + r); if (el) el.textContent = prev[r]; });
 }
 
 function flipCprCard() {
@@ -8772,8 +9316,12 @@ function flipCprCard() {
   document.getElementById('cprFcRating').classList.remove('hidden');
 }
 
-function rateCprCard(knew) {
-  if (knew) cprKnown++;
+function rateCprCard(rating) {
+  const card = cprCurrentDeck[cprIndex];
+  if (!card) return;
+  const cid = 'cpr:' + _sm2CardHash(card.q);
+  if (rating >= 3) cprKnown++;
+  sm2Schedule(cid, rating);
   nextCprCard();
 }
 
@@ -8797,12 +9345,17 @@ function shuffleCprDeck() {
 }
 
 function switchCprTab(tab, btn) {
-  document.querySelectorAll('.cpr-tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.cpr-tab-content').forEach(c => c.classList.add('hidden'));
-  document.getElementById('cpr-tab-' + tab).classList.remove('hidden');
+  const cprPanel = document.getElementById('hosa-panel-cpr');
+  if (cprPanel) {
+    cprPanel.querySelectorAll('.cpr-tab').forEach(t => t.classList.remove('active'));
+    cprPanel.querySelectorAll('.cpr-tab-content').forEach(c => c.classList.add('hidden'));
+  }
+  const cprTabEl = document.getElementById('cpr-tab-' + tab);
+  if (cprTabEl) cprTabEl.classList.remove('hidden');
   if (btn) btn.classList.add('active');
   if (tab === 'flashcards' && !cprCurrentDeck.length) {
-    loadCprDeck('all', document.querySelector('.cpr-deck-btn'));
+    const firstCprBtn = cprPanel ? cprPanel.querySelector('.cpr-deck-btn') : null;
+    loadCprDeck('all', firstCprBtn);
   }
 }
 
@@ -8811,7 +9364,9 @@ const _origShowHosaEvent = showHosaEvent;
 showHosaEvent = function(id, name) {
   _origShowHosaEvent(id, name);
   if (id === 'cpr' && !cprCurrentDeck.length) {
-    setTimeout(() => loadCprDeck('all', document.querySelector('.cpr-deck-btn')), 50);
+    const cprPanel = document.getElementById('hosa-panel-cpr');
+    const firstCprBtn = cprPanel ? cprPanel.querySelector('.cpr-deck-btn') : null;
+    loadCprDeck('all', firstCprBtn);
   }
 };
 
@@ -8844,6 +9399,44 @@ function saveProgressData() {
     localStorage.setItem('medpath_quiz_stats',  JSON.stringify(progressQuizStats));
     localStorage.setItem('medpath_streak',       JSON.stringify(progressStreak));
   } catch(e) {}
+}
+
+// ─────────────────────────────────────────
+//  STUDY LOG  — tracks activity per day for heatmap
+// ─────────────────────────────────────────
+var STUDY_LOG_KEY = 'medpath_study_log';
+var studyLog = {}; // { 'YYYY-MM-DD': { pts:N, cards:N, cases:N, quizzes:N } }
+
+function _loadStudyLog() {
+  try {
+    var raw = localStorage.getItem(STUDY_LOG_KEY);
+    if (raw) studyLog = JSON.parse(raw);
+  } catch(e) { studyLog = {}; }
+}
+
+function _saveStudyLog() {
+  try { localStorage.setItem(STUDY_LOG_KEY, JSON.stringify(studyLog)); } catch(e) {}
+}
+
+// Call this whenever the user does something that counts as "studying"
+// type: 'card' (1 pt), 'case' (3 pts), 'quiz' (5 pts)
+function logStudyActivity(type) {
+  var today = new Date().toISOString().split('T')[0];
+  if (!studyLog[today]) studyLog[today] = { pts: 0, cards: 0, cases: 0, quizzes: 0 };
+  var pts = type === 'card' ? 1 : type === 'case' ? 3 : type === 'quiz' ? 5 : 1;
+  studyLog[today].pts   += pts;
+  if (type === 'card')  studyLog[today].cards++;
+  if (type === 'case')  studyLog[today].cases++;
+  if (type === 'quiz')  studyLog[today].quizzes++;
+  _saveStudyLog();
+}
+
+// Reset study log (called from confirmResetProgress)
+function _resetStudyLog() {
+  studyLog = {};
+  localStorage.removeItem(STUDY_LOG_KEY);
+  // Seed today so the heatmap immediately shows a dot after reset
+  logStudyActivity('card');
 }
 
 function updateStreak() {
@@ -8972,10 +9565,154 @@ function renderProgressDashboard() {
     ? qd.bestScore + '/10' : '—';
   var quizPct = qd.totalQ ? Math.round((qd.totalCorrect / qd.totalQ) * 100) : 0;
   document.getElementById('pdQuizBar').style.width  = quizPct + '%';
+
+  // ── HEATMAP ───────────────────────────────────────────────────────
+  renderStudyHeatmap();
+}
+
+// ─────────────────────────────────────────
+//  STUDY HEATMAP RENDERER
+// ─────────────────────────────────────────
+function renderStudyHeatmap() {
+  var container = document.getElementById('pdHeatmap');
+  if (!container) return;
+
+  var WEEKS = 53;
+  var today = new Date();
+  today.setHours(0, 0, 0, 0);
+  var todayStr = today.toISOString().split('T')[0];
+
+  // Start from the Sunday that is exactly WEEKS*7 days before the end of the current week
+  var startDate = new Date(today);
+  var dayOfWeek = startDate.getDay(); // 0=Sun
+  startDate.setDate(startDate.getDate() - dayOfWeek - (WEEKS - 1) * 7);
+
+  // Count total active days in visible range
+  var activeDays = 0;
+  var totalPts = 0;
+  var d = new Date(startDate);
+  for (var i = 0; i < WEEKS * 7; i++) {
+    var ds = d.toISOString().split('T')[0];
+    if (studyLog[ds] && studyLog[ds].pts > 0) { activeDays++; totalPts += studyLog[ds].pts; }
+    d.setDate(d.getDate() + 1);
+  }
+
+  // Update meta subtitle
+  var meta = document.getElementById('pdHeatmapMeta');
+  if (meta) {
+    if (activeDays === 0) {
+      meta.textContent = 'No activity recorded yet';
+    } else {
+      meta.textContent = activeDays + ' active day' + (activeDays !== 1 ? 's' : '') + ' this year';
+    }
+  }
+
+  var MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var DAY_LABELS  = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+  // Build week columns
+  var weekCols = [];
+  var lastMonthSeen = -1;
+  var weekDate = new Date(startDate);
+
+  for (var wi = 0; wi < WEEKS; wi++) {
+    var cells = [];
+    var monthLabel = '';
+
+    // Check if the first day of this week starts a new month
+    var wMonth = weekDate.getMonth();
+    if (wMonth !== lastMonthSeen) {
+      // Only label if we're not in the very first partial week AND first day of month falls in this column
+      // Find if any day in this week is the 1st
+      var tempD = new Date(weekDate);
+      for (var td = 0; td < 7; td++) {
+        if (tempD.getDate() === 1) { monthLabel = MONTH_NAMES[tempD.getMonth()]; break; }
+        tempD.setDate(tempD.getDate() + 1);
+      }
+      if (!monthLabel && wi === 0) monthLabel = MONTH_NAMES[wMonth]; // always label first column
+      lastMonthSeen = wMonth;
+    }
+
+    for (var di = 0; di < 7; di++) {
+      var cellDate = new Date(weekDate);
+      cellDate.setDate(weekDate.getDate() + di);
+      var dateStr = cellDate.toISOString().split('T')[0];
+      var entry = studyLog[dateStr] || { pts: 0, cards: 0, cases: 0, quizzes: 0 };
+      var isFuture = cellDate > today;
+      var isToday  = (dateStr === todayStr);
+
+      var level = 0;
+      if (!isFuture) {
+        if (entry.pts >= 1)  level = 1;
+        if (entry.pts >= 8)  level = 2;
+        if (entry.pts >= 20) level = 3;
+        if (entry.pts >= 40) level = 4;
+      }
+
+      var title = '';
+      if (!isFuture) {
+        var dLabel = cellDate.toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+        if (entry.pts > 0) {
+          var parts = [];
+          if (entry.cards)   parts.push(entry.cards + ' card' + (entry.cards !== 1 ? 's' : ''));
+          if (entry.cases)   parts.push(entry.cases + ' case' + (entry.cases !== 1 ? 's' : ''));
+          if (entry.quizzes) parts.push(entry.quizzes + ' quiz' + (entry.quizzes !== 1 ? 'zes' : ''));
+          title = dLabel + ' — ' + parts.join(', ');
+        } else {
+          title = dLabel + ' — No activity';
+        }
+      }
+
+      cells.push({ level: level, isFuture: isFuture, isToday: isToday, title: title, dayLabel: DAY_LABELS[di] });
+    }
+
+    weekCols.push({ cells: cells, monthLabel: monthLabel });
+    weekDate.setDate(weekDate.getDate() + 7);
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────
+  var html = '<div class="hm-scroll-wrap"><div class="hm-grid">';
+
+  // Day labels column
+  html += '<div class="hm-days">';
+  // We show 7 slots; only label Mon, Wed, Fri (indices 1,3,5)
+  var dayLabelsFull = ['','Mon','','Wed','','Fri',''];
+  for (var dl = 0; dl < 7; dl++) {
+    html += '<span>' + (dayLabelsFull[dl] || '') + '</span>';
+  }
+  html += '</div>';
+
+  // Week columns
+  for (var wj = 0; wj < weekCols.length; wj++) {
+    var col = weekCols[wj];
+    html += '<div class="hm-week">';
+    // Month label (or spacer)
+    html += '<div class="hm-week-label">' + (col.monthLabel ? col.monthLabel : '') + '</div>';
+    // Day cells
+    for (var cj = 0; cj < col.cells.length; cj++) {
+      var cell = col.cells[cj];
+      var cls  = 'hm-cell hm-cell--' + cell.level;
+      if (cell.isFuture) cls += ' hm-cell--future';
+      if (cell.isToday)  cls += ' hm-cell--today';
+      html += '<div class="' + cls + '"' + (cell.title ? ' title="' + cell.title.replace(/"/g, '&quot;') + '"' : '') + '></div>';
+    }
+    html += '</div>';
+  }
+
+  html += '</div></div>';
+
+  // Legend
+  html += '<div class="hm-legend"><span class="hm-legend-label">Less</span>';
+  for (var li = 0; li <= 4; li++) {
+    html += '<div class="hm-cell hm-cell--' + li + ' hm-cell--legend"></div>';
+  }
+  html += '<span class="hm-legend-label">More</span></div>';
+
+  container.innerHTML = html;
 }
 
 function confirmResetProgress() {
-  if (!confirm('Reset ALL progress data?\n\nThis clears case stats, quiz history, and streak.\nFlashcard study progress is kept.\n\nThis cannot be undone.')) return;
+  if (!confirm('Reset ALL progress data?\n\nThis clears case stats, quiz history, streak, and study activity log.\nFlashcard study progress is kept.\n\nThis cannot be undone.')) return;
 
   // 1. Clear localStorage directly
   localStorage.removeItem('medpath_case_stats');
@@ -8987,10 +9724,13 @@ function confirmResetProgress() {
   progressQuizStats = { quizzesDone: 0, totalQ: 0, totalCorrect: 0, bestScore: 0 };
   progressStreak    = { lastVisit: null, currentStreak: 0, longestStreak: 0 };
 
-  // 3. Re-run streak so today counts as day 1
+  // 3. Reset study log
+  _resetStudyLog();
+
+  // 4. Re-run streak so today counts as day 1
   updateStreak();
 
-  // 4. Re-render the dashboard
+  // 5. Re-render the dashboard
   renderProgressDashboard();
 
   // 5. Visual confirmation
@@ -9112,3 +9852,4656 @@ function renderAuthUI() {
 
 // Expose user info for other parts of the app
 function getCurrentUser() { return currentUser; }
+
+// ─────────────────────────────────────────
+//  DARK MODE
+// ─────────────────────────────────────────
+function initDarkMode() { /* handled by initSettings */ }
+
+function toggleDarkMode() {
+  // Quick nav toggle — flip between light/dark (not system)
+  var isDark = document.documentElement.classList.toggle('dark');
+  appSettings.theme = isDark ? 'dark' : 'light';
+  saveSettings();
+  renderSettingsScreen();
+}
+
+// ─────────────────────────────────────────
+//  SETTINGS ENGINE
+// ─────────────────────────────────────────
+
+// Default settings object — all keys live here
+var appSettings = {
+  theme:            'system',   // 'light' | 'dark' | 'system'
+  textSize:         'medium',   // 'small' | 'medium' | 'large'
+  reduceMotion:     false,
+  cardsPerSession:  '25',
+  showCategory:     true,
+  autoAdvance:      true,
+  rememberDiff:     false,
+  showTag:          true,
+  defaultQuizMode:  'multiple',
+  defaultQuizLen:   '10',
+  _lastDiff:        null
+};
+
+// ── Persistence ──────────────────────────
+function saveSettings() {
+  try { localStorage.setItem('medpath_settings', JSON.stringify(appSettings)); } catch(e) {}
+}
+function loadSettings() {
+  try {
+    var raw = localStorage.getItem('medpath_settings');
+    if (raw) {
+      var saved = JSON.parse(raw);
+      // Merge saved into defaults so new keys always exist
+      Object.keys(saved).forEach(function(k) { appSettings[k] = saved[k]; });
+    }
+  } catch(e) {}
+}
+
+// ── Init: load → apply → render ──────────
+function initSettings() {
+  loadSettings();
+  applyTheme();
+  applyTextSize();
+  applyMotion();
+  applyQuizDefaults();
+  applyCategoryLabel();
+}
+
+// ── Apply helpers ─────────────────────────
+function applyTheme() {
+  var t = appSettings.theme;
+  if (t === 'dark') {
+    document.documentElement.classList.add('dark');
+  } else if (t === 'light') {
+    document.documentElement.classList.remove('dark');
+  } else {
+    // system
+    var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.classList.toggle('dark', dark);
+  }
+}
+
+function applyTextSize() {
+  document.documentElement.classList.remove('sz-small','sz-medium','sz-large');
+  document.documentElement.classList.add('sz-' + appSettings.textSize);
+}
+
+function applyMotion() {
+  document.body.classList.toggle('no-motion', appSettings.reduceMotion);
+}
+
+function applyQuizDefaults() {
+  quizLength = parseInt(appSettings.defaultQuizLen) || 10;
+  // Update quiz picker length buttons if they exist
+  var lenBtns = document.querySelectorAll('.qz-len-btn');
+  lenBtns.forEach(function(b) {
+    b.classList.toggle('active', b.dataset.len === appSettings.defaultQuizLen);
+  });
+}
+
+function applyCategoryLabel() {
+  var el = document.getElementById('fcCatTag');
+  if (el) el.style.visibility = appSettings.showCategory ? 'visible' : 'hidden';
+}
+
+// ── Render settings screen UI ─────────────
+function renderSettingsScreen() {
+  // Theme buttons
+  var themeBtns = document.querySelectorAll('#stThemeSeg .st-theme-btn');
+  themeBtns.forEach(function(b) {
+    b.classList.toggle('on', b.dataset.val === appSettings.theme);
+  });
+
+  // Text size
+  syncSeg('stTextSizeSeg', appSettings.textSize);
+
+  // Toggles
+  syncToggle('togReduceMotion', appSettings.reduceMotion);
+  syncToggle('togShowCategory', appSettings.showCategory);
+  syncToggle('togAutoAdvance',  appSettings.autoAdvance);
+  syncToggle('togRememberDiff', appSettings.rememberDiff);
+  syncToggle('togShowTag',      appSettings.showTag);
+
+  // Cards per session
+  syncSeg('stCardsSeg', appSettings.cardsPerSession);
+
+  // Quiz
+  var modeEl = document.getElementById('stQuizMode');
+  if (modeEl) modeEl.value = appSettings.defaultQuizMode;
+  syncSeg('stQuizLenSeg', appSettings.defaultQuizLen);
+}
+
+function syncSeg(containerId, val) {
+  var container = document.getElementById(containerId);
+  if (!container) return;
+  container.querySelectorAll('.st-seg-btn').forEach(function(b) {
+    b.classList.toggle('on', b.dataset.val === String(val));
+  });
+}
+
+function syncToggle(id, isOn) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.classList.toggle('on', isOn);
+  el.setAttribute('aria-checked', isOn ? 'true' : 'false');
+}
+
+// ── Setting change handlers ───────────────
+function setTheme(t) {
+  appSettings.theme = t;
+  saveSettings();
+  applyTheme();
+  renderSettingsScreen();
+  showSettingsToast('Theme: ' + t.charAt(0).toUpperCase() + t.slice(1));
+}
+
+function setTextSize(s) {
+  appSettings.textSize = s;
+  saveSettings();
+  applyTextSize();
+  syncSeg('stTextSizeSeg', s);
+  showSettingsToast('Text size: ' + s.charAt(0).toUpperCase() + s.slice(1));
+}
+
+function togglePref(key) {
+  appSettings[key] = !appSettings[key];
+  saveSettings();
+
+  // Side effects
+  if (key === 'reduceMotion') applyMotion();
+  if (key === 'showCategory') applyCategoryLabel();
+
+  var idMap = {
+    reduceMotion: 'togReduceMotion',
+    showCategory: 'togShowCategory',
+    autoAdvance:  'togAutoAdvance',
+    rememberDiff: 'togRememberDiff',
+    showTag:      'togShowTag'
+  };
+  syncToggle(idMap[key], appSettings[key]);
+  showSettingsToast(appSettings[key] ? '✓ Enabled' : 'Disabled');
+}
+
+function setPref(key, val) {
+  appSettings[key] = val;
+  saveSettings();
+
+  if (key === 'defaultQuizLen') {
+    quizLength = parseInt(val) || 10;
+    // Sync quiz picker if open
+    var lenBtns = document.querySelectorAll('.qz-len-btn');
+    lenBtns.forEach(function(b) {
+      b.classList.toggle('active', b.dataset.len === val);
+    });
+  }
+
+  var segMap = {
+    cardsPerSession: 'stCardsSeg',
+    defaultQuizLen:  'stQuizLenSeg'
+  };
+  if (segMap[key]) syncSeg(segMap[key], val);
+  showSettingsToast('Saved');
+}
+
+// ── Data reset ────────────────────────────
+function resetSection(type) {
+  var labels = {
+    cases:  'Reset all case progress? This cannot be undone.',
+    srs:    'Reset all flashcard SRS data? All cards return to unseen.',
+    quiz:   'Reset all quiz stats and scores?',
+    streak: 'Reset your study streak to zero?',
+    all:    '⚠️ Reset EVERYTHING — all progress, saved cards, and settings?\n\nThis truly cannot be undone.'
+  };
+  if (!confirm(labels[type] || 'Reset?')) return;
+
+  if (type === 'cases' || type === 'all') {
+    progressCaseStats = { byId:{}, byTag:{}, byDiff:{} };
+    localStorage.removeItem('medpath_case_stats');
+  }
+  if (type === 'srs' || type === 'all') {
+    sm2Data    = {};
+    savedCards = new Set();
+    sm2Save();
+    updateFC();
+    updateStatsStrip();
+  }
+  if (type === 'quiz' || type === 'all') {
+    progressQuizStats = { quizzesDone:0, totalQ:0, totalCorrect:0, bestScore:0 };
+    localStorage.removeItem('medpath_quiz_stats');
+  }
+  if (type === 'streak' || type === 'all') {
+    progressStreak = { lastVisit:null, currentStreak:0, longestStreak:0 };
+    localStorage.removeItem('medpath_streak');
+    updateStreak();
+  }
+  if (type === 'all') {
+    appSettings = {
+      theme:'system', textSize:'medium', reduceMotion:false,
+      cardsPerSession:'25', showCategory:true, autoAdvance:true,
+      rememberDiff:false, showTag:true,
+      defaultQuizMode:'multiple', defaultQuizLen:'10', _lastDiff:null
+    };
+    saveSettings();
+    localStorage.removeItem('medpath_theme');
+    applyTheme(); applyTextSize(); applyMotion(); applyCategoryLabel();
+    // Clear custom cards too
+    _customCards = {};
+    saveCustomCards();
+    document.querySelectorAll('[data-cc-list]').forEach(function(el) { renderCustomCardsList(el.getAttribute('data-cc-list')); });
+  }
+
+  saveProgressData();
+  renderSettingsScreen();
+  showSettingsToast('✓ Reset complete');
+}
+
+// ── Toast ─────────────────────────────────
+var _stToastTimer = null;
+function showSettingsToast(msg) {
+  var el = document.getElementById('st-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'st-toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.classList.add('visible');
+  if (_stToastTimer) clearTimeout(_stToastTimer);
+  _stToastTimer = setTimeout(function() { el.classList.remove('visible'); }, 2200);
+}
+
+// ── Hook: rateCard — respect autoAdvance setting ──
+// (rateCard already handles both modes — this hook is now a no-op passthrough)
+(function() {
+  // autoAdvance logic is now baked into rateCard directly
+})();
+
+// ── Hook: startRandomCase — respect showTag + rememberDiff ──
+(function() {
+  var _orig = startRandomCase;
+  startRandomCase = function(diff) {
+    _orig(diff);
+    // Tag visibility
+    var tagEl = document.getElementById('caseTag');
+    if (tagEl) tagEl.style.display = appSettings.showTag ? '' : 'none';
+    // Remember last diff
+    if (appSettings.rememberDiff) {
+      appSettings._lastDiff = diff;
+      saveSettings();
+    }
+  };
+})();
+
+// ── Hook: showScreen('case') — skip picker if rememberDiff ──
+(function() {
+  var _origShow = showScreen;
+  showScreen = function(id) {
+    _origShow(id);
+    if (id === 'case' && appSettings.rememberDiff && appSettings._lastDiff) {
+      // Small delay so the screen fade-in renders first
+      setTimeout(function() {
+        startRandomCase(appSettings._lastDiff);
+      }, 60);
+    }
+  };
+})();
+
+
+// ─────────────────────────────────────────
+//  HOSA EVENT FLASHCARD ENGINE
+// ─────────────────────────────────────────
+
+const _hosaState = {};
+
+const _hosaLabels = {
+  assessment:'Patient Assessment', pharmacology:'EMT Pharmacology',
+  medical:'Medical Emergencies', environmental:'Environmental & Paediatrics',
+  anatomy:'Anatomy & Assessment', injuries:'Injury Types',
+  taping:'Taping & Wrapping', prevention:'Prevention & Conditioning',
+  law:'Pharmacy Law & Ethics', dosage:'Dosage Forms & Routes',
+  compounding:'Compounding & Sterile Prep',
+  fundamentals:'PT Fundamentals', musculoskeletal:'Musculoskeletal',
+  neuromuscular:'Neuromuscular & Cardiopulmonary',
+  instruments:'Instruments & Equipment', haematology:'Haematology',
+  microbiology:'Microbiology', immunology:'Immunology & Urinalysis',
+  procedures:'Procedures & Techniques', breeds:'Animal Breeds & Species',
+  molecular:'Molecular Biology', techniques:'Lab Techniques',
+  applications:'Biotech Applications', all:'All Cards'
+};
+
+// Map panel id → engine id
+const _panelToEid = {
+  'emt':'emt','sports-medicine':'sm','pharmacy-science':'rx',
+  'physical-therapy':'pt','clinical-lab':'cl','dental-science':'ds',
+  'veterinary-science':'vs','biotechnology':'bt'
+};
+
+function loadHosaDeck(eid, deckKey, btn) {
+  if (!window._hosaDecks || !_hosaDecks[eid] || !_hosaDecks[eid][deckKey]) return;
+  if (!_hosaState[eid]) _hosaState[eid] = {};
+  const s = _hosaState[eid];
+  s.deckKey = deckKey;
+  s.cards   = _hosaDecks[eid][deckKey].map(c => ({q:c.q, a:c.a, dk:c.deck||deckKey}));
+  s.index   = 0;
+  s.known   = 0;
+  s.flipped = false;
+  // Scope deck-btn active state to this panel only — use btn's closest panel, or scan all panels
+  if (btn) {
+    const panel = btn.closest('.hosa-event-panel');
+    if (panel) panel.querySelectorAll('.cpr-deck-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  }
+  _renderHCard(eid);
+}
+
+function _renderHCard(eid) {
+  const s = _hosaState[eid];
+  if (!s || !s.cards || !s.cards.length) return;
+  const card = s.cards[s.index];
+  const label = _hosaLabels[card.dk] || card.dk;
+  const el = id => document.getElementById(id);
+  const set = (id, v) => { const e = el(id); if (e) e.textContent = v; };
+  set(eid+'FcQuestion',    card.q);
+  set(eid+'FcAnswer',      card.a);
+  set(eid+'FcDeckTag',     label);
+  set(eid+'FcDeckTagBack', label);
+  set(eid+'FcCount',       'Card '+(s.index+1)+' of '+s.cards.length);
+  set(eid+'FcScore',       '⭐ '+s.known+' known');
+  const bar = el(eid+'FcBarFill');
+  if (bar) bar.style.width = Math.max((s.index/s.cards.length)*100,1)+'%';
+  const fc2    = el(eid+'Flashcard');
+  const rating = el(eid+'FcRating');
+  if (fc2)    fc2.classList.remove('flipped');
+  if (rating) rating.classList.add('hidden');
+  s.flipped = false;
+  // SM-2 interval previews
+  const cid  = 'hosa:' + eid + ':' + _sm2CardHash(card.q);
+  const prev = sm2Preview(cid);
+  [1,2,3,4].forEach(function(r) { const e2 = el(eid+'Srs'+r); if (e2) e2.textContent = prev[r]; });
+}
+
+function flipHosaCard(eid) {
+  const s = _hosaState[eid];
+  if (!s || s.flipped) return;
+  const card   = document.getElementById(eid+'Flashcard');
+  const rating = document.getElementById(eid+'FcRating');
+  if (card)   card.classList.add('flipped');
+  if (rating) rating.classList.remove('hidden');
+  s.flipped = true;
+}
+
+function rateHosaCard(eid, rating) {
+  const s = _hosaState[eid];
+  if (!s || !s.cards) return;
+  const card = s.cards[s.index];
+  if (!card) return;
+  if (rating >= 3) s.known++;
+  const cid = 'hosa:' + eid + ':' + _sm2CardHash(card.q);
+  sm2Schedule(cid, rating);
+  nextHosaCard(eid);
+}
+
+function nextHosaCard(eid) {
+  const s = _hosaState[eid];
+  if (!s || !s.cards) return;
+  s.index = (s.index + 1) % s.cards.length;
+  _renderHCard(eid);
+}
+
+function prevHosaCard(eid) {
+  const s = _hosaState[eid];
+  if (!s || !s.cards) return;
+  s.index = (s.index - 1 + s.cards.length) % s.cards.length;
+  _renderHCard(eid);
+}
+
+function shuffleHosaDeck(eid) {
+  const s = _hosaState[eid];
+  if (!s || !s.cards) return;
+  for (let i = s.cards.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [s.cards[i], s.cards[j]] = [s.cards[j], s.cards[i]];
+  }
+  s.index = 0; s.known = 0;
+  _renderHCard(eid);
+}
+
+// Auto-load 'all' deck when a panel opens for the first time; restore last-used tab
+const _origShowHosaEvent2 = showHosaEvent;
+
+// Track last-used tab per event panel
+const _hosaLastTab = {};
+
+showHosaEvent = function(id, name) {
+  _origShowHosaEvent2(id, name);
+  const eid = _panelToEid[id];
+  if (!eid) return;
+
+  const panel = document.getElementById('hosa-panel-' + id);
+
+  // Load 'all' deck synchronously on first open (no setTimeout — avoids placeholder flash)
+  if (!_hosaState[eid] || !_hosaState[eid].cards) {
+    const firstBtn = panel ? panel.querySelector('.cpr-deck-btn') : null;
+    loadHosaDeck(eid, 'all', firstBtn);
+  }
+
+  // Restore the last active tab; default to flashcards (or overview for info panels)
+  var isInfoPanel = panel && !!panel.querySelector('.ei-body') && !panel.querySelector('.cpr-deck-bar');
+  var defaultTab  = isInfoPanel ? 'overview' : 'flashcards';
+  const lastTab = _hosaLastTab[id] || defaultTab;
+  if (panel) {
+    panel.querySelectorAll('.cpr-tab').forEach(t => t.classList.remove('active'));
+    panel.querySelectorAll('.cpr-tab-content').forEach(c => c.classList.add('hidden'));
+    // For overview tab the id pattern is different
+    var tabElId = lastTab === 'overview' ? (id + '-tab-overview') : (id + '-tab-' + lastTab);
+    const tabEl = document.getElementById(tabElId);
+    if (tabEl) tabEl.classList.remove('hidden');
+    // Activate the correct tab button
+    panel.querySelectorAll('.cpr-tab').forEach(t => {
+      const _txt = t.textContent.toLowerCase();
+      if (lastTab === 'flashcards' && _txt.includes('flashcard')) t.classList.add('active');
+      else if (lastTab === 'overview' && (_txt.includes('event guide') || _txt.includes('overview'))) t.classList.add('active');
+      else if (lastTab === 'skills' && _txt.includes('skill') && !_txt.includes('my card')) t.classList.add('active');
+      else if (lastTab === 'my-cards' && _txt.includes('my card')) t.classList.add('active');
+    });
+  }
+};
+
+// switchHosaTab — scoped to each event panel
+function switchHosaTab(eventId, tab, btn) {
+  const panel = document.getElementById('hosa-panel-' + eventId);
+  if (!panel) return;
+  panel.querySelectorAll('.cpr-tab').forEach(t => t.classList.remove('active'));
+  panel.querySelectorAll('.cpr-tab-content').forEach(c => c.classList.add('hidden'));
+  const tabEl = document.getElementById(eventId.replace(/-/g,'').replace('sportsm','sports-m') + '-tab-' + tab) ||
+                document.getElementById(eventId + '-tab-' + tab);
+  if (tabEl) tabEl.classList.remove('hidden');
+  if (btn) btn.classList.add('active');
+  // Remember which tab was last used for this panel
+  _hosaLastTab[eventId] = tab;
+  // Auto-load cards on first visit to flashcard tab
+  const eid = _panelToEid[eventId];
+  if (eid && tab === 'flashcards' && (!_hosaState[eid] || !_hosaState[eid].cards)) {
+    const firstBtn = panel.querySelector('.cpr-deck-btn');
+    loadHosaDeck(eid, 'all', firstBtn);
+  }
+}
+
+window._hosaDecks = window._hosaDecks || {};
+
+_hosaDecks.emt = {
+  assessment: [
+    {q:"What does AVPU stand for?", a:"Alert — responds normally\nVoice — responds to verbal stimuli only\nPain — responds only to painful stimuli\nUnresponsive — no response to any stimulus"},
+    {q:"What does SAMPLE history stand for?", a:"S — Signs & symptoms\nA — Allergies\nM — Medications\nP — Pertinent past medical history\nL — Last oral intake\nE — Events leading to the illness or injury"},
+    {q:"What does OPQRST stand for?", a:"O — Onset: when did it start?\nP — Provocation/palliation: what makes it better or worse?\nQ — Quality: what does it feel like?\nR — Radiation: does it spread anywhere?\nS — Severity: rate 1–10\nT — Time: how long has it been going on?"},
+    {q:"What is the correct order of the primary assessment?", a:"1. Form general impression\n2. Assess responsiveness (AVPU)\n3. Airway — open and maintain\n4. Breathing — rate, quality, effort\n5. Circulation — pulse, major bleeding, skin signs\n6. Determine transport priority"},
+    {q:"What does BSI stand for and why is it used?", a:"Body Substance Isolation — PPE worn before any patient contact to protect the EMT from blood and body fluids. Minimum: gloves. Add mask + goggles if fluid splash risk."},
+    {q:"What are signs of inadequate breathing in an adult?", a:"Rate <8 or >24 per minute\nShallow or laboured respirations\nNasal flaring, use of accessory muscles\nIrregular rhythm\nCyanosis (blue lips or fingertips)\nAbnormal sounds: wheezing or stridor"},
+    {q:"What is the Glasgow Coma Scale (GCS)?", a:"Eyes (E) 1–4 + Verbal (V) 1–5 + Motor (M) 1–6 = maximum 15\nGCS ≤8 = severe brain injury\nUsed to track level of consciousness over time — lower score = worse outcome"},
+    {q:"What vital signs do EMTs routinely assess?", a:"1. Breathing: rate and quality\n2. Pulse: rate and quality\n3. Skin: colour, temperature, moisture\n4. Blood pressure\nAdditional: pupils (PERRL), SpO₂, capillary refill time"},
+    {q:"What is mechanism of injury (MOI) and why does it matter?", a:"MOI describes the forces that caused the injury. High-energy MOI (high-speed MVA, fall from height) predicts likely injury patterns and guides assessment — warrants spinal precautions and rapid transport even without obvious injury."},
+    {q:"What is DCAP-BTLS?", a:"Secondary assessment mnemonic applied head-to-toe:\nDeformity, Contusions, Abrasions, Punctures/Penetrations\nBurns, Tenderness, Lacerations, Swelling"},
+    {q:"What is JVD and what does it indicate?", a:"Jugular Venous Distension — neck veins visibly bulge when patient is at 45°. Indicates elevated venous pressure. Seen in cardiac tamponade, tension pneumothorax, and right heart failure."},
+    {q:"What is tracheal deviation?", a:"Shift of the trachea away from the midline. Deviation AWAY from injury side indicates tension pneumothorax (life-threatening). Deviation TOWARD injury side suggests atelectasis."},
+    {q:"What is capillary refill time and what does delayed refill indicate?", a:"Press nail bed until blanched, release — colour should return in <2 seconds. Delayed refill indicates poor peripheral perfusion seen in shock and hypothermia."},
+    {q:"What is the Cincinnati Prehospital Stroke Scale?", a:"Three tests:\n1. Facial droop — ask to smile; one side should not droop\n2. Arm drift — hold both arms out 10 sec; one should not drift\n3. Abnormal speech — repeat a sentence; should not be slurred\nAny single abnormality = high suspicion for stroke"}
+  ],
+  pharmacology: [
+    {q:"What are the 6 medications EMTs can administer or assist with?", a:"1. Aspirin (ASA)\n2. Oral glucose\n3. Oxygen\n4. Prescribed bronchodilator inhalers (e.g., Ventolin/albuterol)\n5. Nitroglycerin\n6. Epinephrine auto-injectors\n(May vary by province/protocol)"},
+    {q:"When is aspirin given and what is the dose?", a:"Given for suspected heart attack (AMI).\nDose: 160–325 mg chewable ASA.\nContraindications: ASA allergy, active GI bleeding, recent head injury, patient already took ASA."},
+    {q:"When is oral glucose given and what is the key contraindication?", a:"Given for altered mental status in a known diabetic when hypoglycaemia is suspected.\nContraindication: patient cannot swallow — aspiration risk. Must be conscious and able to swallow."},
+    {q:"What are the 5 rights of medication administration?", a:"1. Right patient\n2. Right drug\n3. Right dose\n4. Right route\n5. Right time\n(Some add: right documentation)"},
+    {q:"When is nitroglycerin given and what are its contraindications?", a:"Given for cardiac chest pain (angina or suspected AMI).\nContraindications: systolic BP <90 mmHg, recent use of ED medications (sildenafil/Viagra), head injury, patient has not been prescribed it."},
+    {q:"What is naloxone (NARCAN) and when is it used?", a:"Naloxone is an opioid antagonist — reverses opioid overdose. Used when: unresponsive, slow/absent breathing, pinpoint pupils, suspected opioid exposure.\nRoute: intranasal (IN). May repeat in 2–3 min if no response."},
+    {q:"What are the EMT routes of drug administration?", a:"Oral (PO) — aspirin, oral glucose\nSublingual (SL) — nitroglycerin\nInhalation — bronchodilators, oxygen\nIntramuscular (IM) — epinephrine auto-injector into outer thigh\nIntranasal (IN) — naloxone"},
+    {q:"What is epinephrine used for and how does it work?", a:"Used for severe anaphylaxis. Effects:\n• Constricts blood vessels → raises BP\n• Dilates airways → reduces bronchospasm\n• Reduces swelling and hives\nDose: 0.3 mg adult, 0.15 mg child. IM into outer mid-thigh."},
+    {q:"What is first-pass metabolism?", a:"After oral absorption, drugs are metabolised by the liver before reaching systemic circulation — reducing bioavailability. Sublingual and parenteral routes bypass this effect."},
+    {q:"What is the difference between contraindications and side effects?", a:"Contraindication: a condition where a drug should NOT be given because risks exceed benefits (e.g., nitroglycerin with low BP).\nSide effect: an unintended effect that occurs even with correct use."},
+    {q:"What are the signs and symptoms of anaphylaxis?", a:"Hives (urticaria), angioedema (swelling of face, lips, throat)\nStridor or wheezing (airway compromise)\nHypotension (distributive shock)\nTachycardia\nNausea, vomiting\nAnxiety, sense of doom"},
+    {q:"What is online medical direction?", a:"Real-time physician authorisation by radio or phone — required by local protocol before EMTs administer or assist with certain medications, especially controlled substances."},
+    {q:"What is the difference between a generic and trade drug name?", a:"Generic name: official non-proprietary chemical name (e.g., acetylsalicylic acid).\nTrade/brand name: manufacturer's proprietary name (e.g., Aspirin®, Bayer®).\nEMTs must recognise both names for commonly used medications."},
+    {q:"How do bronchodilators help in a respiratory emergency?", a:"Bronchodilators relax smooth muscle in the airways, widening the bronchi to reduce wheezing and improve airflow. EMT assists patient with their own prescribed inhaler. Used for asthma, COPD with bronchospasm."}
+  ],
+  medical: [
+    {q:"What are signs of hypoglycaemia?", a:"Rapid onset: weakness, shakiness, diaphoresis (sweating), pale cool moist skin, hunger, headache, confusion, anxiety.\nSevere: seizures, unresponsiveness.\nMnemonic: 'Cold and clammy — need some candy'"},
+    {q:"What are signs of hyperglycaemia?", a:"Gradual onset: excessive thirst (polydipsia) and urination (polyuria), warm dry skin, fruity/acetone breath, abdominal pain, Kussmaul respirations, altered mental status progressing to coma."},
+    {q:"What is the EMT approach to a diabetic with altered mental status?", a:"Responsive + able to swallow → give oral glucose.\nUnresponsive or cannot swallow → DO NOT give anything by mouth. Maintain airway, give O₂, transport immediately. Never risk aspiration."},
+    {q:"What are the signs of an acute MI (heart attack)?", a:"Chest pressure, squeezing, or pain — may radiate to jaw, arm, or back\nShortness of breath\nNausea, vomiting, diaphoresis\nSense of impending doom\nNote: women and diabetics may have atypical presentations (no chest pain)."},
+    {q:"What is the difference between a TIA and a stroke?", a:"TIA (transient ischaemic attack): symptoms fully resolve within 24 hours, no permanent damage — but a major warning sign of impending stroke.\nStroke (CVA): permanent neurological deficit that does not resolve."},
+    {q:"What are the two major stroke types?", a:"Ischaemic (87%): artery blocked by clot — treated with tPA if within 4.5 hours.\nHaemorrhagic (13%): vessel ruptures — tPA is contraindicated.\nEMTs treat both as emergencies. Cannot differentiate in the field — note exact onset time."},
+    {q:"What is tension pneumothorax?", a:"Air trapped in the pleural space progressively compresses the heart and great vessels.\nSigns: worsening dyspnoea, absent breath sounds on one side, tracheal deviation AWAY from injury, JVD, hypotension, cyanosis.\nImmediate life threat — requires needle decompression."},
+    {q:"What is acute pulmonary oedema?", a:"Left ventricular failure floods the alveoli with fluid.\nSigns: sudden dyspnoea (often at night), pink frothy sputum, orthopnoea, bilateral crackles (rales), JVD, peripheral oedema, cyanosis, tachycardia."},
+    {q:"What does AEIOU-TIPS stand for?", a:"Mnemonic for causes of altered mental status:\nAlcohol, Epilepsy, Insulin (diabetes), Overdose, Uraemia\nTrauma, Infection, Psychiatric/Poisoning, Stroke/Shock"},
+    {q:"What are the signs of anaphylaxis requiring epinephrine?", a:"Hives/redness, angioedema (face, lip, throat), stridor, wheezing, hypotension, tachycardia, nausea, anxiety. Immediate IM epinephrine — delay is life-threatening."},
+    {q:"What are signs of sepsis?", a:"Life-threatening response to infection causing organ dysfunction.\nqSOFA: altered mental status + RR ≥22 + systolic BP ≤100.\nAlso: fever >38°C or hypothermia <36°C, tachycardia, skin changes (warm/flushed then cool/clammy)."},
+    {q:"What is the difference between angina and AMI?", a:"Angina: temporary reduced blood flow — relieved by rest or nitroglycerin in minutes, no permanent damage.\nAMI: prolonged blockage causing permanent myocardial death — pain >15–20 min, not fully relieved by nitroglycerin."},
+    {q:"What are stroke signs using FAST?", a:"F — Facial droop: ask to smile; one side droops\nA — Arm weakness: hold arms out 10 sec; one drifts down\nS — Speech difficulty: slurred or inappropriate\nT — Time: call 911 immediately; note the exact time symptoms started"},
+    {q:"What is renal failure and its EMT significance?", a:"Kidneys fail to filter waste adequately. Signs: decreased urine output, oedema, fatigue, confusion.\nEMT considerations: know dialysis status, avoid excess IV fluids, monitor for dangerous hyperkalaemia-related cardiac arrhythmias."},
+    {q:"What are signs of an abdominal emergency requiring rapid transport?", a:"Rigid board-like abdomen, rebound tenderness, guarding, distension, shock signs (pale/diaphoretic/tachycardic/hypotensive), severe peritoneal pain."},
+    {q:"What is the behavioural emergency EMT approach?", a:"Scene safety first — do not approach if unsafe. Be calm, non-threatening, speak slowly. Do not restrain unless danger to self/others. Remove stimulants from environment. All confused patients get full medical workup — rule out organic cause first."}
+  ],
+  environmental: [
+    {q:"What is hypothermia and how is severity classified?", a:"Core body temperature <35°C.\nMild (32–35°C): shivering, confusion, poor coordination.\nModerate (28–32°C): shivering stops, lethargy, bradycardia.\nSevere (<28°C): coma, VF risk — 'Not dead until warm and dead'"},
+    {q:"What are the four ways the body loses heat?", a:"Conduction — direct contact with cold objects or water\nConvection — wind or air currents carry heat away (wind chill)\nRadiation — heat radiates from body into cooler environment\nEvaporation — sweating or wet clothing drying"},
+    {q:"How is hypothermia managed in the field?", a:"Remove from cold; remove wet clothing\nHandle GENTLY — cold heart is irritable (VF risk from movement)\nApply passive rewarming: warm blankets, cover head\nModerate/severe: core rewarming only; do not rub extremities\nNever withhold CPR based on temperature alone"},
+    {q:"What is heat stroke and how does it differ from heat exhaustion?", a:"Heat exhaustion: heavy sweating, pale/cool/moist skin, weakness, core temp <40°C, normal or mildly altered mental status.\nHeat stroke (EMERGENCY): core temp >40°C, hot dry or moist skin, confusion/combativeness/seizures — immediate aggressive cooling required."},
+    {q:"What are the paediatric age group definitions?", a:"Newborn/Infant: birth – 1 year\nToddler: 1–3 years\nPreschooler: 3–6 years\nSchool age: 6–12 years\nAdolescent: 12–18 years\nCPR: infant = birth–1 year; child = 1 year to puberty"},
+    {q:"What are key paediatric anatomical differences from adults?", a:"Tongue proportionally larger → easier airway obstruction\nNarrower airways, more secretions\nFlat nose → harder mask seal\nHead proportionally heavier → higher head injury risk\nFaster respiratory rate, higher HR, lower BP than adults\nLess efficient temperature regulation"},
+    {q:"What are signs of respiratory distress in a child?", a:"Nasal flaring\nHead bobbing with each breath\nSee-saw breathing (chest sinks as belly rises)\nStridor or grunting\nRetractions: subcostal, intercostal, or suprasternal"},
+    {q:"What is decompensated shock in a child?", a:"Children compensate until they crash — hypotension is a LATE, ominous sign.\nEarly signs: tachycardia, capillary refill >2 sec, pale/cool skin, altered mental status.\nTreat aggressively at early signs — do not wait for hypotension."},
+    {q:"What is the SIDS EMT protocol?", a:"Initiate CPR unless obvious signs of death (rigor mortis, dependent lividity, decomposition).\nNotify medical direction immediately.\nSeparate family compassionately; preserve scene for law enforcement.\nNever state a cause of death."},
+    {q:"What are signs that childbirth is imminent?", a:"Crowning — presenting part visible at vaginal opening\nMother cannot stop pushing\nContractions ≤2 minutes apart\nDo NOT attempt to delay delivery — prepare OB kit and deliver on scene."},
+    {q:"What is the order of a normal delivery?", a:"1. Support head as it emerges; check for nuchal cord\n2. Suction mouth then nose\n3. Support shoulders\n4. Deliver body — hold securely (very slippery)\n5. Note time of birth\n6. Dry and stimulate; keep warm\n7. Clamp and cut cord if transport delayed\n8. Deliver placenta (usually within 30 min)"},
+    {q:"What is a nuchal cord and how is it managed?", a:"Umbilical cord wrapped around the baby's neck.\nLoose: slip over the baby's head.\nTight: double-clamp and cut before continuing delivery.\nNever pull the cord or continue delivery without addressing it."}
+  ]
+};
+
+_hosaDecks.sm = {
+  anatomy: [
+    {q:"What are the three planes of the body?", a:"Sagittal (median) plane: divides body into left and right halves\nFrontal (coronal) plane: divides into front and back\nTransverse (horizontal) plane: divides into upper and lower portions"},
+    {q:"What does HOPS stand for in injury assessment?", a:"H — History: mechanism, when, how it happened\nO — Observation: look at the area for deformity, swelling, bruising\nP — Palpation: feel for tenderness, temperature, crepitus\nS — Special tests: stress tests, range of motion, functional tests"},
+    {q:"What is the difference between a sprain and a strain?", a:"Sprain: injury to a LIGAMENT (connects bone to bone)\nStrain: injury to a MUSCLE or TENDON (connects muscle to bone)\nMnemonic: 'Sprained = Sprained ligament'"},
+    {q:"What are the three grades of a ligament sprain?", a:"Grade I: mild stretch, no instability, minimal swelling and pain\nGrade II: partial tear, some instability, moderate swelling and bruising\nGrade III: complete rupture, significant instability, severe swelling — may require surgery"},
+    {q:"What is the PRICE principle for acute injury management?", a:"Protection — prevent further injury\nRest — reduce activity\nIce — 20 min on / 20 min off\nCompression — reduce swelling\nElevation — reduce oedema\nModern version POLICE replaces Rest with Optimal Loading (gentle movement promotes healing)"},
+    {q:"What are the lateral ankle ligaments?", a:"ATFL (anterior talofibular ligament) — most commonly sprained in inversion injuries\nCFL (calcaneofibular ligament)\nPTFL (posterior talofibular ligament)\nMedial: Deltoid ligament — very strong, rarely sprained"},
+    {q:"What are the rotator cuff muscles (SITS)?", a:"Supraspinatus — initiates shoulder abduction (0–15°)\nInfraspinatus — external rotation of the humerus\nTeres minor — external rotation\nSubscapularis — internal rotation\nAll four stabilise the glenohumeral joint."},
+    {q:"What is the Q-angle and its significance?", a:"Angle between a line from the ASIS to the patella and a line from the patella to the tibial tuberosity. Normal: <18° male, <22° female. A larger Q-angle increases lateral patellar tracking stress and ACL injury risk."},
+    {q:"What are the ligaments of the knee?", a:"Anterior cruciate ligament (ACL): prevents anterior tibial translation\nPosterior cruciate ligament (PCL): prevents posterior tibial translation\nMedial collateral ligament (MCL): resists valgus force\nLateral collateral ligament (LCL): resists varus force"},
+    {q:"What is the unhappy triad of the knee?", a:"Simultaneous injury to:\n1. ACL\n2. MCL\n3. Medial meniscus\nCaused by a valgus force combined with rotation. Common in contact sports."},
+    {q:"What is a stress fracture?", a:"Repetitive force creates a small crack or severe bruising within bone. Common in runners: tibia, metatarsals, navicular. Pain with activity that improves with rest. X-ray often negative early — MRI or bone scan needed."},
+    {q:"What are the Ottawa ankle rules?", a:"X-ray needed if: bone tenderness at posterior edge or tip of lateral or medial malleolus, OR inability to weight-bear immediately AND in the ED.\nFor foot: tenderness at navicular or base of 5th metatarsal."},
+    {q:"What is a dermatome?", a:"Area of skin innervated by a single spinal nerve root. Used to localise spinal or nerve root lesions.\nC6 = thumb/index finger; C7 = middle finger; L4 = medial leg; L5 = dorsum foot; S1 = lateral/plantar foot."},
+    {q:"What is compartment syndrome?", a:"Elevated pressure within a fascial compartment compresses nerves and blood vessels → ischaemia.\n5 Ps: Pain (worst with passive stretch), Pressure, Pallor, Paraesthesia, Paralysis (late).\nEmergency — requires immediate fasciotomy."},
+    {q:"What are the quadriceps muscles and their function?", a:"Rectus femoris: hip flexion + knee extension\nVastus lateralis: knee extension\nVastus medialis (VMO): knee extension; prevents lateral patellar tracking\nVastus intermedius: knee extension\nAll insert via quadriceps tendon → patella → patellar tendon → tibial tuberosity."},
+    {q:"What are the anatomical directions used in sports medicine?", a:"Superior/inferior: above/below\nAnterior/posterior: front/back\nMedial/lateral: toward/away from midline\nProximal/distal: closer/farther from trunk\nSuperficial/deep: toward/away from surface"}
+  ],
+  injuries: [
+    {q:"What is a concussion?", a:"A traumatic brain injury that alters brain function — no structural damage visible on imaging. Loss of consciousness is NOT required for diagnosis.\nSigns: headache, confusion, fogginess, amnesia, nausea, light/noise sensitivity, balance problems."},
+    {q:"What is the graduated return-to-play protocol after concussion?", a:"6 steps (24 hours symptom-free between each):\n1. Symptom-limited activity\n2. Light aerobic exercise (walking, swimming)\n3. Sport-specific exercise\n4. Non-contact training drills\n5. Full-contact practice (requires medical clearance)\n6. Return to competition"},
+    {q:"What is Achilles tendinopathy?", a:"Chronic overuse injury to the Achilles tendon. Pain and stiffness at the posterior heel/lower calf, worst in the morning and with initial activity. Risk factors: sudden training increase, tight calf muscles, overpronation."},
+    {q:"What is IT band syndrome?", a:"Friction of the iliotibial band over the lateral femoral epicondyle → lateral knee pain. Common in runners — pain occurs at a consistent distance into a run. Manage with foam rolling, hip abductor strengthening, and activity modification."},
+    {q:"What is plantar fasciitis?", a:"Degeneration/inflammation of the plantar fascia at its calcaneal insertion. Classic: sharp heel pain with first morning steps that improves with walking. Risk: flat feet, tight calves, obesity, sudden training increase."},
+    {q:"What is patellofemoral pain syndrome (PFPS)?", a:"Abnormal patellar tracking → anterior knee pain. Worse with stairs, squatting, prolonged sitting (theatre sign). Managed with VMO and hip abductor strengthening, patellar taping, and biomechanical correction."},
+    {q:"What are the grades of a muscle strain?", a:"Grade I: <5% fibres torn, minimal strength loss and swelling\nGrade II: partial tear, moderate weakness, palpable gap\nGrade III: complete rupture — severe pain then numbness, major functional loss"},
+    {q:"What is rhabdomyolysis?", a:"Breakdown of muscle tissue releases myoglobin → acute kidney injury. Causes: extreme exercise, heat, crush injury. Signs: severe muscle pain, weakness, cola-coloured urine. Treatment: aggressive IV fluid hydration, hospitalisation."},
+    {q:"What is bursitis?", a:"Inflammation of a bursa (fluid-filled sac that reduces friction). Common sites: subacromial (shoulder), olecranon (elbow), prepatellar (knee), trochanteric (hip). Manage with ice, relative rest, and NSAIDs."},
+    {q:"What are the heat illness conditions, least to most severe?", a:"Heat cramps → heat syncope (fainting from vasodilation) → heat exhaustion (heavy sweating, weakness, core <40°C) → heat stroke (EMERGENCY: core >40°C + altered mental status — immediate immersion cooling required)."},
+    {q:"What is a dislocation versus a subluxation?", a:"Dislocation: complete separation of joint surfaces — bones no longer in contact.\nSubluxation: partial, brief separation that self-reduces.\nBoth can damage ligaments, capsule, cartilage, and neurovascular structures."},
+    {q:"What is epiphyseal plate injury significance in young athletes?", a:"Growth plates in skeletally immature athletes may be weaker than surrounding ligaments. Physeal injuries (Salter-Harris fractures) can impair bone growth if mismanaged. Always suspect physeal injury where an adult would 'just sprain.'"},
+    {q:"What is DOMS?", a:"Delayed Onset Muscle Soreness — peaks 24–72 hours after unaccustomed or eccentric exercise. Caused by microscopic muscle damage and inflammation. Normal training adaptation — distinct from acute injury (which causes immediate pain)."},
+    {q:"What are the signs of a fracture?", a:"Point tenderness directly over bone\nDeformity or angulation\nCrepitus (grating sensation)\nSwelling and bruising\nInability to bear weight or use the extremity\nNote: stress fractures may only present with activity-related pain."}
+  ],
+  taping: [
+    {q:"What is the purpose of athletic taping?", a:"Provide external support and stabilisation to joints\nRestrict pathological or excessive motion while allowing normal function\nProtect injured structures during healing\nPrevent re-injury\nCompress and reduce swelling"},
+    {q:"What are anchor strips and why are they applied first?", a:"Anchor strips are the first tape pieces applied at each end of the taping area. They create a firm base for all subsequent strips and prevent the tape from peeling during activity. Typically 2 anchors at each end."},
+    {q:"What are stirrups in ankle taping?", a:"Tape strips that run from the upper anchor, pass under the heel, and connect to the upper anchor on the opposite side. They reinforce the lateral and medial sides of the ankle. Apply 3 stirrups, each overlapping the previous by 50%."},
+    {q:"What are heel locks?", a:"Figure-eight tape strips that wrap around the heel to lock it in the calcaneal mortise. Applied after stirrups. Applied in both lateral-to-medial and medial-to-lateral directions for complete support."},
+    {q:"What position should the ankle be in for inversion sprain taping?", a:"Neutral (90°) dorsiflexion — foot at a right angle to the leg. Avoids taping in plantar flexion, which would stress the taped position and reduce protective benefit."},
+    {q:"How do you assess circulation after taping?", a:"Check distal pulse\nCapillary refill <2 seconds\nAsk about numbness, tingling, or colour change\nFit 2 fingers under the tape — should slide in without forcing\nRe-check after 5–10 minutes of activity"},
+    {q:"What are contraindications to taping?", a:"Open wounds, blisters, or skin conditions at the site\nAdhesive allergy\nAcute fracture (requires rigid splinting, not tape)\nUnreduced dislocation\nSevere swelling\nPoor peripheral circulation"},
+    {q:"What is pre-wrap and when is it used?", a:"Thin foam underwrap applied between skin and rigid tape to reduce irritation and blistering, facilitate easier tape removal, and protect bony prominences. NOT used when maximum skin adhesion is required."},
+    {q:"What is the basket weave pattern?", a:"Alternating stirrups (vertical) and horseshoes/heel locks (horizontal) that interlock to create a stable, load-distributing ankle support. The interlocking pattern prevents the tape from sliding or rolling under activity."},
+    {q:"What is shoulder spica taping used for?", a:"Limits shoulder ROM — restricts abduction and external rotation for AC joint injuries, or internal rotation for anterior instability. A figure-eight pattern encircles both the arm and trunk to provide support."},
+    {q:"What does the figure-eight technique do for the wrist?", a:"Alternates around the wrist and across the palm to restrict flexion/extension bilaterally. Provides functional wrist support while keeping the thumb free and maintaining circulation."},
+    {q:"What are the general principles of proper taping?", a:"Clean, dry, hair-free skin (or use pre-wrap)\nNeutral or protective joint position\nNo wrinkles — wrinkles cause pressure sores\n50% overlap on circular strips\n2 fingers must fit under tape after application\nCheck circulation before and after"}
+  ],
+  prevention: [
+    {q:"What are the five health-related fitness components?", a:"1. Cardiovascular/cardiorespiratory endurance\n2. Muscular strength\n3. Muscular endurance\n4. Flexibility\n5. Body composition\nImproving all five reduces injury risk and promotes athletic longevity."},
+    {q:"What is periodisation?", a:"Organising training into cycles (off-season, pre-season, in-season, peak) to achieve peak performance at the right time and minimise injury by systematically varying training load, volume, and intensity."},
+    {q:"What is overtraining syndrome?", a:"Excessive training load without adequate recovery → performance decline despite increased effort.\nSigns: persistent fatigue, mood disturbance, poor sleep, elevated resting HR, frequent illness, loss of motivation.\nRecovery may require weeks to months of reduced training."},
+    {q:"What is the FITT principle?", a:"F — Frequency: days per week\nI — Intensity: how hard (HR%, RPE, % 1RM)\nT — Time: session duration\nT — Type: mode of exercise (aerobic, resistance, flexibility)\nUsed to design progressive training programmes."},
+    {q:"What are the signs of dehydration affecting athletic performance?", a:"Dark urine, thirst, fatigue, headache, decreased urine frequency.\n2% body weight loss in fluids → impaired performance.\n3–5% → significant decline in strength and endurance.\n7%+ → severe heat illness risk."},
+    {q:"What are the components of a proper warm-up?", a:"1. Light aerobic activity 5–10 min (raises HR and muscle temperature)\n2. Dynamic stretching (controlled movements through full range)\n3. Sport-specific movements (gradually introduce sport patterns)\nReduces injury risk by improving neuromuscular readiness and tissue extensibility."},
+    {q:"What is proprioception and why is it trained after injury?", a:"Proprioception: the body's sense of joint position and movement mediated by receptors in muscles, tendons, and joints. It is impaired after injury (e.g., ankle sprain), increasing re-injury risk. Balance and neuromuscular exercises restore it during rehabilitation."},
+    {q:"What is an Emergency Action Plan (EAP)?", a:"A pre-arranged plan for handling medical emergencies at athletic events.\nMust include: designated roles (who calls EMS, who initiates care, who meets EMS), phone/communication procedures, AED and first aid locations, emergency vehicle access routes. One plan per venue/facility."},
+    {q:"What are bloodborne pathogen universal precautions in sport?", a:"Treat ALL blood and body fluids as potentially infectious.\nAlways wear gloves when in contact with blood.\nBiohazard disposal of contaminated materials.\nDo not allow a bleeding athlete to return to play.\nClean blood from equipment with bleach solution."},
+    {q:"What is the role of the athletic trainer?", a:"Prevention, immediate assessment, taping and bracing, rehabilitation, and return-to-play decisions. Works under physician supervision. Solely responsible for rehabilitation of injured athletes. Certified in CPR/AED and first aid."},
+    {q:"What is exercise-induced asthma?", a:"Bronchoconstriction triggered by exercise, especially in cold/dry air. Signs: wheezing, coughing, chest tightness, dyspnoea 5–10 minutes into or shortly after stopping exercise. Management: prescribed bronchodilator inhaler pre-exercise; monitoring and rest."},
+    {q:"What is the difference between open and closed kinetic chain exercise?", a:"Closed kinetic chain (CKC): distal end fixed — e.g., squat, push-up. Multi-joint, functional; preferred for lower extremity rehabilitation.\nOpen kinetic chain (OKC): distal end free — e.g., leg extension. Isolates one joint/muscle. Both have roles in rehabilitation."}
+  ]
+};
+
+_hosaDecks.rx = {
+  law: [
+    {q:"What is the Controlled Substances Act and what are the DEA schedules?", a:"US federal law (1970) regulating controlled substances.\nSchedule I: no accepted medical use, high abuse (heroin, LSD)\nSchedule II: high abuse, accepted use (opioids, stimulants, cocaine)\nSchedule III: moderate abuse (ketamine, some codeine)\nSchedule IV: low abuse (benzodiazepines, tramadol)\nSchedule V: very low (cough preps with codeine)"},
+    {q:"How do you validate a DEA number?", a:"Format: 2 letters + 7 digits (e.g., AB1234563)\n1. Add digits 1 + 3 + 5 = X\n2. Add digits 2 + 4 + 6, multiply sum by 2 = Y\n3. X + Y: the last digit must match the 7th digit of the DEA number.\nIf it matches, the DEA number is valid."},
+    {q:"What required elements must appear on a valid prescription?", a:"Patient name and date of birth\nDate written\nDrug name, strength, and dosage form\nQuantity to dispense\nSig (directions for use)\nRefills (if applicable)\nPrescriber name, address, phone, DEA number (for controlled substances)\nManual signature of prescriber"},
+    {q:"What does HIPAA regulate in pharmacy?", a:"HIPAA (Health Insurance Portability and Accountability Act) protects patient health information (PHI). In pharmacy: prescriptions and records are confidential; information cannot be shared without consent; the minimum necessary standard applies."},
+    {q:"What is the Orphan Drug Act?", a:"US law (1983) providing incentives — tax credits and 7 years of exclusive marketing rights — to pharmaceutical companies developing drugs for rare diseases affecting fewer than 200,000 people in the US."},
+    {q:"What is the role of OSHA in pharmacy?", a:"OSHA (Occupational Safety and Health Administration) establishes workplace safety standards: HazCom (hazardous chemical labelling), bloodborne pathogen standards, ergonomics requirements. Violations result in fines and mandatory corrections."},
+    {q:"What is drug diversion?", a:"The illegal transfer of legally manufactured controlled substances from the intended recipient to another person for unauthorised use. Pharmacy staff are legally obligated to identify and report suspected diversion. Consequences: loss of DEA registration, criminal charges."},
+    {q:"What is the difference between law, ethics, and standards in pharmacy?", a:"Law: government rules — violations result in criminal penalties.\nEthics: moral values guiding professional conduct — violations may be professional misconduct even if not illegal.\nStandards: best-practice guidelines set by professional organisations."},
+    {q:"What must a pharmacist do before dispensing a new prescription?", a:"Perform a Drug Utilisation Review (DUR): check drug-drug interactions, drug-disease interactions, appropriate dosing, allergies, and therapeutic duplication. Must offer patient counselling (required by law in most jurisdictions for new prescriptions)."},
+    {q:"What is the role of the pharmacy technician vs pharmacist?", a:"Technician: enters prescriptions, counts/measures, labels, manages inventory — cannot counsel patients on drug therapy.\nPharmacist: final verification of all prescriptions, patient counselling, clinical decisions.\nAll technician work must be verified by the pharmacist."},
+    {q:"What are the DEA forms used for controlled substances?", a:"DEA 222: ordering Schedule I and II substances\nDEA 224: pharmacy registration application\nDEA 41: destruction of controlled substances\nDEA 106: reporting theft or significant loss\nDEA CSOS: electronic ordering system (replaces paper DEA 222)"},
+    {q:"What are the rights of a pharmacy patient under ethics?", a:"Right to accurate medication information\nRight to privacy and confidentiality (HIPAA)\nRight to refuse treatment\nRight to be informed of side effects and interactions\nRight to affordable and non-discriminatory care\nRight to access their own health records"},
+    {q:"What is the FDA's role in pharmacy?", a:"The FDA approves drugs for safety and efficacy before marketing, monitors post-market safety, establishes labelling requirements, and can withdraw drug approvals. Governs manufacturing standards (cGMP) and compounding regulations (USP 503A/503B)."},
+    {q:"What is patient counselling and when is it required?", a:"A pharmacist-patient interaction explaining: indication, dosage, administration, potential side effects, drug interactions, storage, and what to do if a dose is missed. Required by most state/provincial law for all new prescriptions. Patients may waive counselling."}
+  ],
+  dosage: [
+    {q:"What are the four major drug sources?", a:"Plant: alkaloids — morphine (opium poppy), digoxin (foxglove)\nAnimal: enzymes and hormones — insulin historically from pig/cow pancreas\nMineral: inorganic compounds — iron, lithium\nSynthetic: laboratory-created — most antibiotics, oral contraceptives\nBiosynthetic: recombinant DNA — e.g., human insulin via E. coli"},
+    {q:"What is the difference between chemical, generic, and trade drug names?", a:"Chemical name: precise IUPAC chemical structure (e.g., N-acetyl-p-aminophenol)\nGeneric name: official non-proprietary USAN name (e.g., acetaminophen)\nTrade/brand name: manufacturer's proprietary name (e.g., Tylenol®)\nGenerics contain the same active ingredient, strength, and dosage form."},
+    {q:"What are the solid dosage forms?", a:"Tablets: compressed powder — may be scored, enteric-coated, or extended-release\nCapsules: powder or liquid in gelatin shell\nLozenges/troches: dissolved slowly in mouth\nSuppositories: rectal or vaginal — melt at body temperature\nPowders: for reconstitution or topical use"},
+    {q:"What are the semi-solid dosage forms?", a:"Cream: oil-in-water emulsion — not greasy, good for moist skin\nOintment: water-in-oil base — greasy, good for dry or thick skin\nGel: clear, water or alcohol-based — dries quickly\nPaste: thick ointment with high powder content\nSuppositories: semi-solid at room temp, melt at body temp"},
+    {q:"What are the liquid dosage forms?", a:"Solution: drug fully dissolved — syrups, elixirs\nSuspension: particles dispersed but not dissolved — must shake well\nEmulsion: two immiscible liquids mixed with emulsifier\nElixir: sweetened, alcohol-based, clear solution\nSpray/aerosol: pressurised or pump delivery"},
+    {q:"What is first-pass metabolism?", a:"After oral absorption, drugs are partially metabolised by the liver before reaching systemic circulation, reducing bioavailability. Drugs with high first-pass effect (nitroglycerin, morphine) require higher oral doses or sublingual/parenteral routes to achieve therapeutic effect."},
+    {q:"What are the parenteral routes of drug administration?", a:"IV (intravenous): directly into vein — fastest, 100% bioavailability\nIM (intramuscular): into muscle — moderate onset\nSC (subcutaneous): under the skin — slower than IM\nID (intradermal): into skin layers — allergy testing\nIO (intraosseous): into bone marrow — emergency when IV inaccessible\nIntrathecal: into spinal fluid"},
+    {q:"What are the topical and transdermal routes?", a:"Transdermal patch: absorbed through skin for systemic effect (e.g., fentanyl patch, nicotine patch)\nOphthalmic drops: eyes — local or systemic\nOtic drops: ears — local only\nNasal spray: nasal mucosa — local or systemic\nTopical cream/ointment: local effect at application site"},
+    {q:"What are inhalation routes and their advantages?", a:"MDI (metered-dose inhaler): pressurised canister delivering a measured dose\nDPI (dry powder inhaler): requires strong inhalation, no propellant needed\nNebuliser: converts liquid drug to fine mist for inhalation\nAdvantages: rapid onset, direct delivery to lungs, lower doses needed, fewer systemic side effects vs oral route."},
+    {q:"What is bioavailability?", a:"The fraction of a drug that reaches systemic circulation unchanged. IV = 100%. Oral varies based on absorption, first-pass metabolism, and formulation. General order (highest to lowest): IV > SL > inhalation > IM > SC > oral > rectal (varies by drug)."},
+    {q:"What is drug half-life?", a:"Time required for drug concentration in the body to decrease by 50%. Determines dosing frequency — short half-life requires more frequent dosing. After ~5 half-lives, 97% is eliminated. After ~5 half-lives of consistent dosing, steady-state blood levels are achieved."},
+    {q:"What is enteric coating and why is it used?", a:"A polymer coating that resists stomach acid but dissolves in the alkaline small intestine. Purposes: protect acid-sensitive drugs, prevent gastric irritation (e.g., aspirin, NSAIDs), deliver drug to intestine for local effect. Enteric-coated tablets must NEVER be crushed or split."},
+    {q:"What are extended-release (ER/XR) formulations?", a:"Slowly release drug over an extended period, maintaining more consistent blood levels. Advantages: fewer doses per day → better compliance; smoother blood levels → fewer side effects. Must NEVER be crushed or split — destroys the release mechanism."},
+    {q:"What factors affect oral drug absorption?", a:"Drug formulation (solution > suspension > tablet)\nGI motility (faster motility = less absorption time)\nBlood flow at absorption site\npH (affects drug ionisation)\nFood interactions (some drugs absorbed better with/without food)\nFirst-pass metabolism\nDisease states affecting GI function"}
+  ],
+  compounding: [
+    {q:"What is pharmacy compounding?", a:"Preparation of a customised medication for an individual patient when a commercially available product is not appropriate. Examples: altered dose or strength, flavouring for children, allergen-free formulations, topical preparations not commercially available."},
+    {q:"What is the difference between non-sterile and sterile compounding?", a:"Non-sterile: topical creams, oral suspensions, suppositories — prepared in a clean environment using good technique.\nSterile: IV admixtures, injectables, ophthalmic preparations — must be prepared in ISO Class 5 or better laminar airflow environment using strict aseptic technique."},
+    {q:"What is aseptic technique?", a:"Procedures used to prevent microbial contamination during sterile compounding: thorough hand washing, gowning, working in a certified cleanroom, swabbing vial tops with 70% IPA and letting dry, minimising movement, using sterile supplies only."},
+    {q:"What is a beyond-use date (BUD)?", a:"The date after which a compounded preparation should not be used — assigned by the compounder based on ingredient stability, storage conditions, and USP guidelines (Chapter 795 non-sterile, 797 sterile). BUD ≠ expiration date (manufacturer-assigned to commercial products)."},
+    {q:"What is trituration?", a:"The process of reducing a solid drug to a fine, uniform powder using a mortar and pestle. Used to prepare fine powder from tablets for incorporation into suspensions and to ensure uniform mixing of powders before incorporation."},
+    {q:"What is geometric dilution?", a:"A method to evenly distribute a small amount of potent drug through a larger powder mass to prevent 'hot spots' of concentrated drug. Technique: mix equal volume of drug with equal volume of diluent; mix thoroughly; add another equal volume; repeat until all diluent is incorporated."},
+    {q:"What are the required label elements for a compounded preparation?", a:"Patient name, prescription number, date prepared, beyond-use date, drug name and strength, quantity, dosage and route, storage conditions, pharmacy name and address, prescriber name, and required auxiliary labels (e.g., Shake Well, Refrigerate)."},
+    {q:"What is a laminar airflow workbench (LAFW)?", a:"A filtered environment providing ISO Class 5 air for sterile compounding.\nHorizontal LAFW: air flows toward the operator — for routine sterile CSPs.\nVertical LAFW (biological safety cabinet): air flows downward — for hazardous/cytotoxic drugs to protect the operator and environment."},
+    {q:"What are the safety precautions for handling hazardous (cytotoxic) drugs?", a:"Work in a vertical biological safety cabinet (BSC)\nWear double gloves, gown, goggles, N95 respirator\nUse closed-system drug transfer devices (CSTDs)\nDecontaminate work surfaces with approved agents\nDispose of waste in yellow hazardous drug containers\nNo eating, drinking, or applying cosmetics in the area"},
+    {q:"What is quality control in compounding?", a:"Ensures compounded preparations meet standards for: identity (correct drug), strength/potency, purity (no contaminants), sterility (for sterile preps), and stability (appropriate BUD). Includes visual inspection, pH testing, potency testing, and microbial testing for sterile preparations."},
+    {q:"What is the closed gloving technique?", a:"A method for donning sterile gloves without exposing skin. Keep hands inside gown sleeves; use the sleeve to pick up the first glove; pull glove over the sleeve cuff; use the gloved hand to don the second glove. Prevents contamination of sterile gloves before entering the clean room."},
+    {q:"What is a master formula record?", a:"Documents each unique compounded formulation: complete formula, ingredient sources and lot numbers, compounding procedure, equipment, beyond-use date, quality control tests performed, and expected yield. Required for traceability and regulatory compliance."}
+  ],
+  pharmacology: [
+    {q:"What are the major antihypertensive drug classes?", a:"ACE inhibitors (-pril suffix): block conversion of angiotensin I to II\nARBs (-sartan suffix): block angiotensin II receptor\nBeta-blockers (-olol suffix): block beta-adrenergic receptors\nCalcium channel blockers (-dipine suffix): block Ca²⁺ entry\nThiazide diuretics (e.g., hydrochlorothiazide): reduce blood volume"},
+    {q:"What are the main antibiotic classes and mechanisms?", a:"Beta-lactams (penicillins, cephalosporins): inhibit cell wall synthesis\nMacrolides (azithromycin): inhibit 50S ribosome (protein synthesis)\nFluoroquinolones (ciprofloxacin): inhibit DNA gyrase/topoisomerase IV\nTetracyclines: inhibit 30S ribosome\nAminoglycosides: inhibit 30S ribosome (bactericidal)\nGlycopeptides (vancomycin): inhibit cell wall; used for MRSA"},
+    {q:"What are NSAIDs and their major risks?", a:"Non-steroidal anti-inflammatory drugs inhibit COX-1 and COX-2 → reduce prostaglandins → anti-inflammatory, analgesic, antipyretic effects.\nMajor risks: GI ulceration (COX-1 inhibition), renal impairment, cardiovascular risk, contraindicated in pregnancy (third trimester)."},
+    {q:"What are opioid analgesics and their side effects?", a:"Opioids bind mu, kappa, and delta receptors → produce analgesia.\nExamples: morphine, oxycodone, fentanyl, codeine.\nSide effects: respiratory depression (main overdose risk), constipation, nausea, sedation, euphoria/addiction potential, urinary retention, miosis (pinpoint pupils)."},
+    {q:"What is the mechanism of statins?", a:"Inhibit HMG-CoA reductase — the rate-limiting enzyme in hepatic cholesterol synthesis. Effect: ↓ LDL, slight ↑ HDL, ↓ triglycerides.\nExamples: atorvastatin, rosuvastatin, simvastatin (all end in -statin).\nMain risk: myopathy/rhabdomyolysis, especially at high doses or with interactions."},
+    {q:"What are the drug classes for type 2 diabetes management?", a:"Biguanides (metformin): first-line — ↓ hepatic glucose output\nSulfonylureas (-ide suffix): stimulate insulin release\nGLP-1 agonists (-glutide suffix): ↑ insulin, ↓ glucagon\nSGLT-2 inhibitors (-flozin suffix): ↑ urinary glucose excretion\nDPP-4 inhibitors (-gliptin suffix): ↑ insulin, ↓ glucagon"},
+    {q:"What are the three types of drug interactions?", a:"Pharmacodynamic: drugs have additive, synergistic, or antagonistic effects at the same receptor (e.g., two CNS depressants together).\nPharmacokinetic: one drug affects absorption, distribution, metabolism, or excretion of another (CYP450 interactions).\nPharmaceutical: physical/chemical incompatibility when mixed (e.g., precipitation in IV bag)."},
+    {q:"What are anticoagulants and how do they differ from antiplatelets?", a:"Anticoagulants: prevent clot formation by interfering with the coagulation cascade.\n• Warfarin: vitamin K antagonist (INR monitoring)\n• Heparin/LMWH: enhance antithrombin III\n• DOACs (apixaban, rivaroxaban, dabigatran): direct factor inhibitors\n\nAntiplatelets (aspirin, clopidogrel): inhibit platelet aggregation — different mechanism."},
+    {q:"What are proton pump inhibitors (PPIs)?", a:"Irreversibly inhibit the H+/K+ ATPase proton pump in gastric parietal cells → reduce stomach acid. Uses: GERD, peptic ulcer, H. pylori eradication. Examples: omeprazole, pantoprazole, esomeprazole (all end in -prazole). Long-term risks: ↓ Ca²⁺/Mg²⁺ absorption, C. difficile risk."},
+    {q:"What are SSRIs and SNRIs used for?", a:"SSRIs (selective serotonin reuptake inhibitors): block serotonin reuptake — fluoxetine, sertraline. First-line for depression and anxiety.\nSNRIs: block serotonin + norepinephrine reuptake — venlafaxine, duloxetine. Used for depression, anxiety, neuropathic pain.\nKey risk for both: serotonin syndrome if combined with MAOIs (absolutely contraindicated)."},
+    {q:"What is serotonin syndrome?", a:"Life-threatening excess of serotonergic activity, typically from drug combinations.\nClassic triad: altered mental status + autonomic instability (hyperthermia, tachycardia, diaphoresis) + neuromuscular abnormalities (tremor, clonus, hyperreflexia).\nCommon cause: SSRI + MAOI. Management: stop offending drugs, supportive care, cyproheptadine."},
+    {q:"What are benzodiazepines used for and their risks?", a:"Enhance GABA-A receptor activity → CNS depression. Uses: anxiety, insomnia, seizures, alcohol withdrawal, procedural sedation. Examples: diazepam, lorazepam, alprazolam (end in -pam or -lam). Risks: dependence, tolerance, sedation, respiratory depression (especially with opioids)."},
+    {q:"What is the difference between agonist, antagonist, and partial agonist?", a:"Agonist: binds receptor and fully activates it — e.g., morphine at mu opioid receptor.\nAntagonist: binds receptor and blocks it, no intrinsic activity — e.g., naloxone.\nPartial agonist: activates receptor but with lower maximum effect; also blocks full agonists — e.g., buprenorphine."},
+    {q:"What are the major drug-drug interactions technicians must recognise?", a:"Warfarin + NSAIDs → ↑ bleeding risk\nSSRI + MAOIs → serotonin syndrome (NEVER combine)\nStatins + fibrates → myopathy risk\nACE inhibitors + K-sparing diuretics → hyperkalaemia\nQT-prolonging drugs (antipsychotics + macrolides) → torsades de pointes\nAlways screen for interactions before dispensing."}
+  ]
+};
+
+_hosaDecks.pt = {
+  fundamentals: [
+    {q:"What is physical therapy?", a:"A health profession focused on the examination, diagnosis, and treatment of movement dysfunction and physical disability. Aims to restore, maintain, and promote optimal physical function and quality of life through evidence-based intervention."},
+    {q:"What are the 5 elements of the patient/client management model?", a:"1. Examination: history, systems review, tests and measures\n2. Evaluation: clinical judgment from examination findings\n3. Diagnosis: classification of movement dysfunction\n4. Prognosis: predicted outcome and plan of care timeline\n5. Intervention: treatment (exercise, manual therapy, education, modalities)"},
+    {q:"What is the difference between a PT and PTA?", a:"PT (Doctor of Physical Therapy): performs examination, evaluation, diagnosis, prognosis; designs plan of care; supervises PTA.\nPTA (Associate degree): implements the plan of care under PT supervision; cannot re-examine independently or modify the plan of care."},
+    {q:"What is evidence-based practice (EBP)?", a:"Integration of: best available research evidence + clinical expertise + patient values and preferences. PTs are expected to use EBP for clinical decisions — following current research rather than tradition alone."},
+    {q:"What does goniometry measure and how is it performed?", a:"Measures joint range of motion (ROM) in degrees. Align stationary arm with proximal bony landmark, axis with joint centre, moveable arm with distal segment. Measure both active ROM (patient moves) and passive ROM (therapist moves). Neutral anatomical position = 0°."},
+    {q:"What is manual muscle testing (MMT)?", a:"Grades muscle strength on a 0–5 scale:\n0: No visible or palpable contraction\n1: Visible or palpable contraction only — no movement\n2: Full ROM with gravity eliminated\n3: Full ROM against gravity — no added resistance\n4: Full ROM against moderate resistance\n5: Normal strength — full resistance"},
+    {q:"What are the types of muscle contractions?", a:"Concentric: muscle shortens while contracting — e.g., lifting phase of a bicep curl\nEccentric: muscle lengthens while contracting — e.g., lowering phase; produces more force, more DOMS\nIsometric: contraction with no change in muscle length — e.g., pushing against immovable object\nIsokinetic: constant velocity with variable resistance — requires special equipment"},
+    {q:"What is SOAP note documentation?", a:"S — Subjective: patient's report (pain level, functional complaints)\nO — Objective: measurable data (ROM, strength, gait observation, vital signs)\nA — Assessment: clinical interpretation; progress toward goals\nP — Plan: interventions for this and next session; modifications to plan of care"},
+    {q:"What are SMART goals in physical therapy?", a:"Goals should be: Specific, Measurable, Achievable, Relevant, Time-bound.\nExample: 'Patient will ambulate 50 metres on level ground without an assistive device within 4 weeks.'\nGoals are patient-centred and written from the patient's perspective."},
+    {q:"What are contraindications to therapeutic exercise?", a:"Unstable fracture or joint\nAcute systemic infection or fever\nUnstable cardiac conditions (unstable angina, uncontrolled arrhythmia)\nDeep vein thrombosis in the exercised limb\nSevere osteoporosis (for high-impact exercise)\nRecent joint replacement (specific surgeon-directed precautions)"},
+    {q:"What is the difference between AROM, PROM, and AAROM?", a:"Active ROM (AROM): patient moves using own muscles — tests strength and mobility.\nPassive ROM (PROM): therapist moves the joint — tests mobility and soft tissue extensibility without muscle effort.\nActive-assisted ROM (AAROM): patient assisted by therapist, equipment, or opposite hand — used in early rehab when weakness is present."},
+    {q:"What are the major body systems treated by physical therapists?", a:"Musculoskeletal: bones, joints, muscles, tendons, ligaments\nNeuromuscular: peripheral nerves, spinal cord, brain\nCardiovascular and pulmonary: heart, lungs, circulation\nIntegumentary: skin, wounds, burns, lymphoedema"},
+    {q:"What is DOMS?", a:"Delayed Onset Muscle Soreness — peaks 24–72 hours after unaccustomed or eccentric exercise. Caused by microscopic muscle damage and inflammation. Normal training adaptation — distinct from acute injury (which causes immediate pain at the time of injury)."},
+    {q:"What is the integumentary system and when does PT treat it?", a:"The integumentary system = skin and its appendages. PT involvement includes: wound care (pressure injuries, diabetic ulcers, burns), scar management (compression garments, massage, stretching), and lymphoedema management (manual lymphatic drainage, compression bandaging)."}
+  ],
+  musculoskeletal: [
+    {q:"What are the stages of tissue healing?", a:"1. Inflammatory (0–72 hours): bleeding stops, inflammation begins, macrophages remove debris\n2. Proliferative/repair (3 days–6 weeks): collagen deposition, angiogenesis, granulation tissue\n3. Remodelling (6 weeks–1+ year): collagen matures and aligns along stress lines\nRehabilitation intensity must match the current healing stage."},
+    {q:"What is a herniated disc and symptoms by level?", a:"Nucleus pulposus extrudes through annulus fibrosus → compresses nerve root.\nL4-L5 → L5 root: weak great toe extension, lateral thigh/leg pain\nL5-S1 → S1 root: absent ankle reflex, lateral foot/calf pain\nC5-C6 → C6 root: weak biceps/wrist ext., thumb/index pain\nPositive straight leg raise test confirms lumbar involvement."},
+    {q:"What is the straight leg raise (SLR) test?", a:"Patient supine; therapist passively raises the straight leg. Positive: pain or paraesthesia radiating below the knee at <70° of elevation. Indicates lumbar nerve root compression (disc herniation or foraminal stenosis). Cross-SLR positive = high specificity for disc herniation."},
+    {q:"What are post-total hip arthroplasty (THA) hip precautions?", a:"Posterior approach:\n• No hip flexion >90°\n• No hip internal rotation\n• No hip adduction past midline (no crossing legs)\nPrecautions prevent prosthetic dislocation. Anterior approach has different restrictions. Duration per surgeon's instructions, typically 6–12 weeks."},
+    {q:"What are post-total knee arthroplasty (TKA) PT goals?", a:"Prevent DVT — early mobilisation is critical\nRestore ROM: goal of 0–90° flexion by 4–6 weeks\nStrengthen quadriceps\nNormalise gait pattern\nWatch for signs of DVT (calf pain, swelling, warmth) and infection (fever, increased wound drainage)"},
+    {q:"What is osteoarthritis versus rheumatoid arthritis?", a:"OA: degenerative — wear and tear of articular cartilage; asymmetric; worse with activity, better with rest; Heberden's nodes at DIP joints; no systemic inflammation.\nRA: autoimmune — inflammatory destruction of synovium; symmetric; morning stiffness >1 hour; involves MCP/PIP joints; systemic signs present."},
+    {q:"What is a frozen shoulder (adhesive capsulitis)?", a:"Progressive fibrosis of the glenohumeral joint capsule.\nStage 1 (Freezing): increasing pain, 2–9 months\nStage 2 (Frozen): less pain but severe ROM loss, 4–12 months\nStage 3 (Thawing): gradual ROM return, 5–26 months\nTreatment: mobilisation, stretching, corticosteroid injections, manipulation under anaesthesia if severe."},
+    {q:"What are the therapeutic modalities used in PT?", a:"Cold (cryotherapy): vasoconstriction, ↓ nerve conduction velocity — acute injury, post-exercise\nHeat: vasodilation, ↑ tissue extensibility, ↓ spasm — chronic conditions, before stretching\nUltrasound: deep heating or non-thermal tissue effects\nTENS: electrical analgesia (gate control theory)\nIontophoresis: drug delivery via electrical current"},
+    {q:"What is the difference between tendinitis and tendinopathy?", a:"Tendinitis: acute inflammation — pain, redness, warmth. Treat with relative rest and anti-inflammatories.\nTendinopathy (tendinosis): chronic degenerative change without significant inflammation — collagen disorganisation. More common clinically. Treat with eccentric exercise and progressive load management."},
+    {q:"What is Phalen's test and Tinel's sign?", a:"Both test for carpal tunnel syndrome:\nPhalen's test: maximum wrist flexion for 60 seconds → tingling in thumb, index, middle, and lateral ring finger = positive.\nTinel's sign: tap over carpal tunnel at wrist → tingling in same distribution = positive.\nCTS is caused by median nerve compression."},
+    {q:"What are the phases of the gait cycle?", a:"Stance phase (60% of gait cycle): foot in contact with ground\n— Heel strike → loading response → midstance → terminal stance → pre-swing\nSwing phase (40%): foot off ground\n— Initial swing → midswing → terminal swing\nKey: step length should be equal bilaterally; symmetrical timing"},
+    {q:"What is RICE vs POLICE for acute injuries?", a:"RICE (traditional): Rest, Ice, Compression, Elevation.\nPOLICE (current evidence): Protection, Optimal Loading, Ice, Compression, Elevation.\nOptimal Loading (gentle controlled movement) promotes faster healing and prevents stiffness and muscle atrophy compared to complete rest."},
+    {q:"What is lymphoedema and what is CDT?", a:"Lymphoedema: protein-rich fluid accumulates causing limb swelling due to impaired lymphatic drainage.\nCDT (Complete Decongestive Therapy):\n1. Manual lymphatic drainage (MLD)\n2. Multilayer compression bandaging\n3. Therapeutic exercise\n4. Skin care\n5. Compression garments for maintenance"},
+    {q:"What is the difference between UMN and LMN lesion signs?", a:"Upper motor neuron (UMN): spasticity, hyperreflexia, clonus, Babinski sign, weakness without early atrophy — seen in brain/spinal cord lesions.\nLower motor neuron (LMN): flaccidity, hyporeflexia, fasciculations, significant atrophy — seen in peripheral nerve or anterior horn cell lesions."}
+  ],
+  neuromuscular: [
+    {q:"What are common motor deficits after stroke?", a:"Hemiplegia/hemiparesis (weakness of one side)\nSpasticity (velocity-dependent increased tone — UMN sign)\nAbnormal synergy patterns: UE flexor synergy, LE extensor synergy\nAtaxia (if cerebellar involvement)\nAphasia (language-dominant hemisphere)\nContralateral neglect (non-dominant hemisphere)"},
+    {q:"What are Parkinson's disease cardinal signs (TRAP)?", a:"T — Tremor at rest (pill-rolling tremor)\nR — Rigidity (cogwheel or lead pipe)\nA — Akinesia/bradykinesia (slowness of movement initiation)\nP — Postural instability (late sign)\nAlso: shuffling/festinating gait, freezing episodes, hypophonia, masked facies."},
+    {q:"What is the ASIA spinal cord injury classification?", a:"A — Complete: no motor or sensory function below injury level\nB — Sensory incomplete only\nC — Motor incomplete: <50% of key muscles grade 3+\nD — Motor incomplete: ≥50% of key muscles grade 3+\nE — Normal function\nLevel: cervical = tetraplegia; thoracic/lumbar = paraplegia"},
+    {q:"What is multiple sclerosis (MS)?", a:"Autoimmune demyelination of CNS neurons — patchy destruction of myelin slows or blocks nerve conduction. Types: relapsing-remitting (most common), primary progressive, secondary progressive. Symptoms: fatigue, optic neuritis, spasticity, ataxia, bladder dysfunction, Lhermitte's sign."},
+    {q:"What are the three sensory systems for balance?", a:"1. Vestibular system: inner ear senses head position and linear/angular acceleration\n2. Visual system: eyes provide environmental spatial orientation\n3. Somatosensory/proprioceptive: receptors in joints and muscles sense body position and movement\nPT trains each system and their integration to improve balance and prevent falls."},
+    {q:"What is BPPV and how is it treated?", a:"Benign Paroxysmal Positional Vertigo: displaced otoconia (calcium crystals) in semicircular canals → brief intense vertigo with position changes. Diagnosed with Dix-Hallpike test (posterior canal most common). Treated with Epley canalith repositioning manoeuvre — 80–95% effective in 1–2 sessions."},
+    {q:"What is the FIM (Functional Independence Measure)?", a:"18-item standardised tool measuring functional independence.\nDomains: self-care, sphincter control, transfers, locomotion, communication, social cognition.\nScored 1–7 per item (1 = total assistance, 7 = complete independence).\nUsed in inpatient rehabilitation to track progress and plan discharge."},
+    {q:"What are the phases of cardiac rehabilitation?", a:"Phase I (inpatient): gentle mobilisation, education immediately post-cardiac event or surgery.\nPhase II (outpatient): supervised exercise 3×/week for 3–6 months with cardiac monitoring.\nPhase III (maintenance): independent long-term exercise programme.\nGoals: improve functional capacity, reduce risk factors, improve quality of life."},
+    {q:"What are the signs that exercise should be stopped in cardiac rehab?", a:"Chest pain, pressure, or tightness\nSevere dyspnoea or respiratory distress\nDiaphoresis, pallor, or cyanosis\nDizziness or near-syncope\nHR >120% predicted max or <50 bpm\nSystolic BP >200 mmHg or drop >10 mmHg with exercise\nNew arrhythmia on monitor"},
+    {q:"What is COPD and how does PT manage it?", a:"COPD: chronic obstructive pulmonary disease (emphysema + chronic bronchitis) → irreversible airflow limitation.\nPT management: pulmonary rehabilitation (aerobic exercise), pursed-lip breathing, diaphragmatic breathing, secretion clearance (huffing, postural drainage, percussion), energy conservation techniques."},
+    {q:"What is TBI severity classification?", a:"Classified by GCS at injury:\nMild (concussion): GCS 13–15, LOC <30 min\nModerate: GCS 9–12, LOC 30 min–24 hours, post-traumatic amnesia 1–7 days\nSevere: GCS ≤8, coma >24 hours\nPT addresses: motor control, balance, cognitive-motor dual-tasking, ADL retraining."},
+    {q:"What is spasticity and how is it treated in PT?", a:"Velocity-dependent increase in muscle tone — the faster the movement, the greater the resistance. 'Clasp-knife' quality. Upper motor neuron sign.\nTreatment: prolonged stretching, splinting or serial casting, neuromuscular electrical stimulation, functional exercises, coordination with botulinum toxin injections."},
+    {q:"What is peripheral neuropathy and PT's role?", a:"Damage to peripheral nerves → distal, symmetrical sensorimotor deficits: stocking-glove numbness, burning pain, weakness, absent ankle reflexes, balance impairment. Common causes: diabetes, chemotherapy, alcohol. PT: balance training, strengthening, fall prevention, foot care education."},
+    {q:"What is lymphoedema CDT?", a:"Complete Decongestive Therapy is the gold standard for lymphoedema management:\n1. Manual lymphatic drainage (MLD): gentle massage to redirect lymph flow\n2. Multilayer compression bandaging: maintain reduction\n3. Therapeutic exercise: muscle pump to assist lymph flow\n4. Skin and nail care: prevent infection\n5. Compression garments: long-term maintenance"}
+  ]
+};
+
+_hosaDecks.cl = {
+  instruments: [
+    {q:"What is a haemocytometer?", a:"A thick glass slide with a precisely machined counting chamber (0.1 mm depth) used to manually count cells under a microscope. The Neubauer grid has 9 large squares. Cells counted in specified areas × dilution factor × depth factor = cells per µL. Used for RBCs, WBCs, platelets, and microorganisms."},
+    {q:"What is a centrifuge and its uses?", a:"Spins specimens at high speed using centrifugal force to separate components by density. Lab uses: separate serum/plasma from blood cells, spin urine for sediment analysis, prepare buffy coat (WBCs/platelets), isolate cell pellets. Speed measured in RPM or g-force (RCF)."},
+    {q:"What is a spectrophotometer?", a:"Measures the intensity of light at a specific wavelength that passes through a solution, determining concentration (Beer-Lambert law: A = εlc). Lab uses: measure haemoglobin, bilirubin, glucose, protein concentrations, enzyme activity levels."},
+    {q:"What are the standard microscope objective magnifications?", a:"4× (scanning): initial overview of slide\n10× (low power): cell identification\n40× (high dry): cell morphology detail\n100× (oil immersion): bacteria, fine cell structures — requires immersion oil\nTotal magnification = objective × eyepiece (usually 10×) = 40× to 1000×"},
+    {q:"What is a micropipette and what sizes are used?", a:"Delivers precise small volumes in the µL range.\nP2: 0.2–2 µL; P20: 2–20 µL; P200: 20–200 µL; P1000: 100–1000 µL\nProper technique: pre-wet tip, aspirate to first stop, dispense to first stop then second stop (blow-out). Single-use tips only to prevent cross-contamination."},
+    {q:"What is an autoclave?", a:"Sterilises equipment using saturated steam at 121°C, 15 psi for 15–30 minutes. Kills all microorganisms including spores. Used for: glassware, culture media, surgical instruments, biohazardous waste. Validated with Bacillus stearothermophilus biological spore strips."},
+    {q:"What is a haematology analyser?", a:"Automated instrument that counts and differentiates blood cells using electrical impedance (Coulter principle) and/or light scattering (flow cytometry). Provides complete CBC including differential. Flagged or abnormal results always require manual blood film review by a laboratory scientist."},
+    {q:"What is the difference between serum and plasma?", a:"Plasma: liquid portion of anticoagulated whole blood — contains fibrinogen and clotting factors. Tube: EDTA (purple), heparin (green), citrate (blue).\nSerum: liquid portion of clotted blood after centrifugation — no fibrinogen or clotting factors. Tube: red top or gold SST."},
+    {q:"What is a refractometer used for?", a:"Measures the refractive index of a solution. In the lab: measures urine specific gravity and total protein concentration in body fluids. Normal urine SG: 1.003–1.030. SG >1.030 = highly concentrated urine; SG <1.010 = dilute urine or impaired concentrating ability."},
+    {q:"What is flow cytometry?", a:"Analyses individual cells in fluid passing single-file through a laser beam. Measures: cell size (forward scatter), granularity (side scatter), and fluorescent markers from labelled antibodies. Uses: immunophenotyping (CD4 count in HIV), leukaemia/lymphoma diagnosis, cell cycle analysis, apoptosis detection."},
+    {q:"What is a coagulation analyser?", a:"Measures clotting times by detecting fibrin clot formation in plasma. Key tests: PT/INR (extrinsic pathway — monitors warfarin therapy), APTT (intrinsic pathway — monitors heparin therapy), TT (thrombin time), fibrinogen level."},
+    {q:"What is the Coulter principle?", a:"Cells suspended in electrolyte solution pass through a tiny aperture, interrupting an electrical current. Each cell produces a pulse proportional to its volume → allows counting and sizing of RBCs, WBCs, and platelets using appropriate dilutions and voltage thresholds."},
+    {q:"What is a haematocrit and how is it measured?", a:"Percentage of blood volume occupied by red blood cells. Measured by spinning blood in a capillary tube at 12,000 RPM for 5 minutes → read packed RBC column as % of total blood column.\nNormal: male 40–52%; female 36–46%."},
+    {q:"What is a microbiological incubator?", a:"Maintains precise constant temperature to support growth of microorganisms on culture media. Standard: 35–37°C for most human pathogens. Some organisms need special conditions (Campylobacter: 42°C; Mycobacterium: 37°C for up to 6 weeks). Routine cultures are read after 18–48 hours of incubation."}
+  ],
+  haematology: [
+    {q:"What are the components of a CBC?", a:"RBC count, haemoglobin (Hgb), haematocrit (Hct)\nMCV (mean corpuscular volume): average RBC size\nMCH: average haemoglobin per RBC\nMCHC: haemoglobin concentration per RBC\nWBC count + 5-part differential (neutrophils, lymphocytes, monocytes, eosinophils, basophils)\nPlatelet count"},
+    {q:"How are anaemias classified by MCV?", a:"Microcytic (MCV <80 fL): iron-deficiency anaemia, thalassaemia, lead poisoning\nNormocytic (MCV 80–100 fL): anaemia of chronic disease, acute haemolysis, acute blood loss\nMacrocytic (MCV >100 fL): vitamin B12 or folate deficiency, liver disease, hypothyroidism, certain medications"},
+    {q:"What are the white blood cell types and their functions?", a:"Neutrophils (60–70%): first-line bacterial phagocytosis\nLymphocytes (20–30%): T cells (cell-mediated), B cells (antibody production), NK cells\nMonocytes (3–8%): differentiate into macrophages; phagocytosis and antigen presentation\nEosinophils (1–4%): parasitic infections and allergic reactions\nBasophils (<1%): histamine release in allergic reactions"},
+    {q:"What is a left shift in the WBC differential?", a:"Increased numbers of immature neutrophil forms (band cells, metamyelocytes, myelocytes) in peripheral blood. Indicates active bacterial infection or severe physiological stress requiring rapid neutrophil mobilisation from bone marrow reserves."},
+    {q:"What is ABO blood grouping?", a:"Based on antigens on the RBC surface and corresponding serum antibodies:\nType A: A antigen + anti-B antibodies\nType B: B antigen + anti-A antibodies\nType AB: A and B antigens + no ABO antibodies (universal recipient)\nType O: no ABO antigens + both anti-A and anti-B (universal donor for packed RBCs)"},
+    {q:"What is the Rh blood group system?", a:"Based on the D antigen. Rh positive: D antigen present. Rh negative: D antigen absent.\nClinical significance: Rh-negative mothers with Rh-positive babies risk sensitisation → haemolytic disease of the newborn in subsequent pregnancies. Anti-D immunoglobulin (RhoGAM) prevents sensitisation."},
+    {q:"What are normal haemoglobin ranges?", a:"Male: 135–175 g/L (13.5–17.5 g/dL)\nFemale: 120–155 g/L (12.0–15.5 g/dL)\nLow Hgb = anaemia; High Hgb = polycythaemia\nHgb types: HgbA (97% in adults), HgbA2 (<3.5%), HgbF (<1% in adults)\nAbnormal: HgbS (sickle cell disease), HgbC"},
+    {q:"What is DIC (disseminated intravascular coagulation)?", a:"Systemic activation of the coagulation cascade consuming clotting factors and platelets → paradoxical clotting AND bleeding simultaneously.\nLab findings: ↓ platelets, ↓ fibrinogen, ↑ PT/APTT, ↑ D-dimer, ↑ FDPs\nCauses: sepsis, major trauma, obstetric emergencies, malignancy"},
+    {q:"What are the coagulation cascade pathways?", a:"Intrinsic pathway: activated by contact factors (XII, XI) → tested by APTT (monitors heparin therapy)\nExtrinsic pathway: activated by tissue factor + factor VII → tested by PT/INR (monitors warfarin therapy)\nCommon pathway: Factor X → prothrombin → thrombin → fibrinogen → fibrin clot"},
+    {q:"What is the ESR (erythrocyte sedimentation rate)?", a:"Rate at which RBCs settle in a tube of anticoagulated blood over 1 hour (mm/hr). Normal: male <15 mm/hr; female <20 mm/hr. Elevated ESR is a non-specific marker of inflammation, infection, malignancy, or autoimmune disease. Raised because plasma proteins increase RBC aggregation (rouleaux)."},
+    {q:"What is sickle cell anaemia?", a:"Autosomal recessive mutation in the beta-globin gene (HgbS) — RBCs become sickle-shaped under low O₂ conditions → vaso-occlusion and haemolysis.\nDiagnosis: blood film (sickle cells, target cells), Hgb electrophoresis (HgbSS pattern).\nClinical: painful crises, stroke, acute chest syndrome, organ damage."},
+    {q:"What is a reticulocyte?", a:"An immature RBC retaining residual RNA — visible as a blue-staining network with supravital stains.\nElevated count (reticulocytosis) = increased bone marrow RBC production in response to haemorrhage, haemolysis, or iron/B12/folate supplementation.\nLow reticulocyte count = bone marrow suppression or aplasia."},
+    {q:"What is thrombocytopenia?", a:"Platelet count <150 × 10⁹/L.\nMild (100–150): usually asymptomatic\nModerate (50–100): easy bruising, prolonged bleeding\nSevere (<50): risk of spontaneous bleeding\n<20: high risk of major haemorrhage\nCauses: decreased production (bone marrow failure, chemotherapy), increased destruction (ITP, HIT, TTP, DIC), sequestration."},
+    {q:"What is a peripheral blood smear review used for?", a:"Confirm automated CBC results; identify abnormal cells (blasts, sickle cells, spherocytes, schistocytes, hypersegmented neutrophils); perform manual differential when auto-diff flags results; detect parasites (malaria, babesia). Examined in the monolayer zone where RBCs lie singly without overlapping."}
+  ],
+  microbiology: [
+    {q:"What is the Gram stain and how does it differentiate bacteria?", a:"1. Crystal violet (primary stain) → 2. Iodine (mordant) → 3. Alcohol/acetone (decolouriser) → 4. Safranin (counterstain)\nGram-positive: thick peptidoglycan retains crystal violet → PURPLE (e.g., Staphylococcus, Streptococcus)\nGram-negative: outer membrane loses crystal violet → PINK/RED (e.g., E. coli, Pseudomonas, Klebsiella)"},
+    {q:"What are the types of bacteriological culture media?", a:"Non-selective enriched: supports most bacteria — blood agar, chocolate agar\nSelective: inhibits some organisms — MacConkey (Gram-negatives), Mannitol Salt Agar (Staphylococci), Thayer-Martin (Neisseria)\nDifferential: produces visible colony differences — MacConkey (pink = lactose fermenters; colourless = non-fermenters)\nEnrichment broth: amplifies pathogens in mixed samples"},
+    {q:"What are the three types of haemolysis on blood agar?", a:"Alpha (α): partial haemolysis — green zone around colony. Examples: S. pneumoniae, viridans streptococci.\nBeta (β): complete haemolysis — clear transparent zone. Examples: Group A Strep (S. pyogenes), Staph. aureus.\nGamma (γ): no haemolysis — no change in agar. Examples: Enterococcus, some Staphylococci."},
+    {q:"What are the transmission-based precautions?", a:"Contact precautions: gloves + gown when entering room — MRSA, VRE, C. difficile, wound infections, scabies\nDroplet precautions: surgical mask within 1 metre — influenza, pertussis, rubella\nAirborne precautions: N95 respirator + negative-pressure room — TB, measles, varicella, disseminated zoster\nAll are additions to standard precautions."},
+    {q:"What is MRSA?", a:"Methicillin-resistant Staphylococcus aureus — carries the mecA gene conferring resistance to all beta-lactam antibiotics (penicillins, cephalosporins, carbapenems).\nTreatment: vancomycin (IV), linezolid, or daptomycin.\nContact precautions required. Screen high-risk patients on admission (nasal swab).\nHA-MRSA: hospital-acquired; CA-MRSA: community-acquired (skin infections)."},
+    {q:"What is Clostridioides difficile (C. diff) and why is it a concern?", a:"Spore-forming, toxin-producing anaerobe that causes antibiotic-associated colitis after disruption of normal gut flora.\nSigns: watery diarrhoea ≥3/day, abdominal cramps, fever.\nKey: alcohol hand rub does NOT kill C. diff spores — soap and water handwashing required.\nContact precautions; treat with oral vancomycin or fidaxomicin."},
+    {q:"What is an antibiogram (antibiotic sensitivity test)?", a:"Tests which antibiotics are effective against an isolated pathogen.\nKirby-Bauer disk diffusion: antibiotic-impregnated disks placed on agar — zone of inhibition size indicates sensitivity.\nMIC (minimum inhibitory concentration): lowest concentration preventing visible growth.\nReported as: S (susceptible), I (intermediate), R (resistant)."},
+    {q:"What are the five modes of microbial transmission?", a:"1. Contact: direct touch or indirect via contaminated objects (fomites) — most common mode\n2. Droplet: respiratory secretions travel <1 m\n3. Airborne: droplet nuclei travel >1 m (TB, measles, varicella)\n4. Vector-borne: via insect vector (malaria via Anopheles mosquito)\n5. Common vehicle: contaminated food/water/blood (Salmonella, Hepatitis B)"},
+    {q:"What are standard precautions?", a:"Applied to ALL patients for ALL care regardless of diagnosis:\nHand hygiene — the most important standard precaution\nPPE (gloves, gown, mask, goggles as indicated)\nSafe sharps handling — no two-handed recapping; immediate sharps container disposal\nProper waste and soiled linen handling\nRespiratory hygiene and cough etiquette"},
+    {q:"What is urine culture and the clean-catch midstream technique?", a:"Diagnoses urinary tract infection. Clean-catch technique: clean urethral area with antiseptic wipes; discard first stream; collect midstream urine in sterile container.\nSignificant bacteriuria: ≥10⁵ CFU/mL (≥10² for catheter specimens).\nMost common pathogens: E. coli (80%), Klebsiella, Enterococcus, Pseudomonas."},
+    {q:"What are common causes of pneumonia by pathogen type?", a:"Community-acquired (CAP):\n• Typical: S. pneumoniae (most common), H. influenzae, S. aureus\n• Atypical: Mycoplasma, Legionella, Chlamydia\n• Viral: influenza, RSV, COVID-19\nHospital-acquired (HAP/VAP): Gram-negative rods (Pseudomonas, Klebsiella), MRSA"},
+    {q:"What is the quadrant streaking method for bacterial culture plates?", a:"Purpose: dilute the inoculum to obtain isolated colonies.\nZone 1: streak with specimen\nZone 2: pass through Zone 1 (flame loop between zones)\nZone 3: pass through Zone 2\nZone 4: pass through Zone 3 — isolated single colonies expected here\nInvert and incubate at 35–37°C for 18–48 hours."}
+  ],
+  immunology: [
+    {q:"What is the difference between innate and adaptive immunity?", a:"Innate: non-specific, immediate response, no immunological memory. Includes: physical barriers (skin, mucus), phagocytes (neutrophils, macrophages), complement, NK cells.\nAdaptive: antigen-specific, slower (days–weeks) but more powerful. B cells (antibodies) and T cells (cell-mediated). Has immunological memory → faster, stronger response on re-exposure."},
+    {q:"What are the five immunoglobulin classes?", a:"IgG: most abundant; crosses placenta; long-term immunity and secondary response\nIgA: mucous membranes, saliva, breast milk; secretory antibody — first line at mucosal surfaces\nIgM: first produced in primary infection; pentamer; best complement activator\nIgE: allergies and parasites; binds mast cells and basophils\nIgD: B cell surface receptor — function not fully understood"},
+    {q:"What is ELISA and how does it work?", a:"Enzyme-Linked Immunosorbent Assay: detects or quantifies antigen or antibody using antibody-antigen interaction followed by enzyme-linked detection and colorimetric signal.\nSandwich ELISA (most sensitive): capture antibody + antigen + detection antibody + enzyme secondary → colour change proportional to antigen concentration.\nUses: HIV screening, pregnancy tests (hCG), drug testing, COVID-19 serology."},
+    {q:"What are autoimmune diseases and give examples?", a:"The immune system mistakenly attacks self-tissues:\nType 1 diabetes: insulin-producing beta cells\nRheumatoid arthritis: joint synovium\nSLE (lupus): multiple organs (anti-dsDNA antibodies, butterfly rash)\nMultiple sclerosis: myelin sheath\nHashimoto's thyroiditis: thyroid gland\nMyasthenia gravis: acetylcholine receptors at the neuromuscular junction"},
+    {q:"What is the direct Coombs test (Direct Antiglobulin Test — DAT)?", a:"Detects antibodies or complement already bound to RBCs in the patient's circulation.\nPositive DAT indicates: haemolytic transfusion reaction, haemolytic disease of the newborn, autoimmune haemolytic anaemia, or drug-induced haemolysis.\nMethod: wash patient's RBCs → add anti-human globulin (Coombs serum) → agglutination = positive."},
+    {q:"What is the indirect Coombs test?", a:"Detects antibodies in the patient's serum that can bind to donor RBCs.\nUsed for: pre-transfusion compatibility testing (crossmatch), antenatal antibody screening during pregnancy.\nMethod: patient serum + donor RBCs → incubate → add anti-human globulin → agglutination = incompatible (positive)."},
+    {q:"What is the ANA test and when is it used?", a:"Antinuclear antibody test: screens for autoimmune disease by detecting antibodies directed against cell nuclei.\nHighly positive in SLE (95%), Sjögren's syndrome, mixed connective tissue disease.\nNot specific — also positive in ~5% of healthy individuals.\nIf positive: further testing with anti-dsDNA, anti-Smith, anti-Ro/La, anti-Scl-70 for specific diagnosis."},
+    {q:"What are the three components of urinalysis?", a:"1. Physical examination: colour, clarity, odour, specific gravity\n2. Chemical examination: urine dipstick — pH, protein, glucose, ketones, blood, leukocyte esterase, nitrite, bilirubin, urobilinogen\n3. Microscopic examination: centrifuged sediment — RBCs, WBCs, casts, crystals, bacteria, epithelial cells"},
+    {q:"What do leukocyte esterase and nitrite indicate on the urine dipstick?", a:"Leukocyte esterase: enzyme from WBCs — positive = pyuria → suggests infection or inflammation.\nNitrite: bacteria that reduce nitrate to nitrite (E. coli, Klebsiella) → positive suggests significant bacteriuria.\nBoth positive together: >90% sensitivity for UTI. Always confirm with urine culture."},
+    {q:"What are urinary casts and what do they indicate?", a:"Cylindrical structures formed in renal tubules from Tamm-Horsfall protein:\nHyaline: normal in small numbers\nRBC casts: glomerulonephritis — always pathological\nWBC casts: pyelonephritis or interstitial nephritis\n'Muddy brown' granular casts: acute tubular necrosis (ATN)\nFatty casts: nephrotic syndrome\nWaxy casts: severe chronic kidney disease"},
+    {q:"What is normal urine specific gravity?", a:"Normal: 1.003–1.030\nSG ~1.000: very dilute (possible diabetes insipidus)\nSG 1.010: fixed SG — loss of concentrating ability (chronic renal failure)\nSG >1.020: concentrated urine (dehydration, ADH effect)\nSG >1.030: highly concentrated (severe dehydration or SIADH)"},
+    {q:"What is the complement system?", a:"A cascade of ~30 proteins that:\n• Lyse pathogens via membrane attack complex (MAC)\n• Opsonise bacteria (coat them to enhance phagocytosis)\n• Cause inflammation (C3a and C5a — anaphylatoxins that attract neutrophils)\nActivated by three pathways: classical (antibody-triggered), lectin (mannose-triggered), alternative (bacterial surface-triggered)."},
+    {q:"What is the rheumatoid factor (RF) test?", a:"RF: an autoantibody (usually IgM) directed against the Fc portion of IgG antibodies.\nPositive in: rheumatoid arthritis (70–80%), Sjögren's syndrome, SLE, some infections.\nNot specific — positive in ~5% of healthy individuals (higher in elderly).\nAnti-CCP (anti-cyclic citrullinated peptide) antibodies are more specific for RA and appear earlier in disease."}
+  ]
+};
+
+_hosaDecks.ds = {
+  instruments: [
+    {q:"What is an amalgam carrier?", a:"Delivers freshly mixed amalgam directly into a cavity preparation. Double-ended; made of stainless steel (some have Teflon barrels to prevent clogging). The carrier loads amalgam and dispenses it into the cavity with a plunger mechanism."},
+    {q:"What is an amalgam condenser (plugger)?", a:"Packs amalgam tightly into the cavity preparation to eliminate voids and ensure intimate adaptation to the cavity walls. Hand condensers: smooth or serrated tips in various shapes. Mechanical condensers: vibrate via compressed air to pack amalgam."},
+    {q:"What is an amalgam burnisher?", a:"Smooths and shapes amalgam BEFORE it fully hardens.\nBall burnisher: smooth broad surfaces\nBeaver tail: flat end for adapting margins\nT-ball: for proximal margins\nBurnishing adapts marginal areas to the tooth and creates the initial contour of the restoration."},
+    {q:"What is an amalgam carver?", a:"Removes excess amalgam and reproduces the natural tooth anatomy BEFORE the restoration fully sets.\nHollenback carver: most commonly used — sharp, round-ended tip.\nAcorn and Frahm carvers also used for specific anatomical areas.\nCarving should reproduce the original occlusal anatomy."},
+    {q:"What is an aspirating syringe?", a:"Allows the dentist to verify the needle is NOT in a blood vessel before injecting local anaesthetic. The harpoon on the piston engages the cartridge; retracting the thumb ring creates negative pressure. Blood in the cartridge = intravascular placement — reposition before injecting."},
+    {q:"What is a dental explorer?", a:"A sharp, pointed instrument used to: detect caries (catches/sticks in soft carious dentin), assess restoration margins and integrity, detect subgingival calculus, and examine pits and fissures.\nTypes: #17 (right-angle tip), #23 (shepherd's hook)."},
+    {q:"What is a dental mirror?", a:"Three clinical functions:\n1. Indirect vision — viewing areas not directly visible (lingual surfaces, posterior teeth)\n2. Light reflection — directing light into shadowed areas\n3. Retraction — retracting tongue, cheeks, and lips\nMust be fog-free; front-surface mirrors provide the clearest image."},
+    {q:"What is a spoon excavator?", a:"Removes soft, carious dentin from cavity preparations.\nLarge spoon: bulk removal of caries\nSmall spoon: clean cavity walls and floor\nSharp, spoon-shaped cutting edge removes necrotic tooth structure while preserving sound dentin."},
+    {q:"What is a matrix band and Tofflemire retainer?", a:"Matrix band: thin metal or plastic strip that temporarily replaces a missing proximal tooth wall during restoration, providing a form for the restorative material.\nTofflemire retainer: holds the band in position around the tooth.\nWedge: seals the band at the gingival margin and prevents restoration overhangs."},
+    {q:"What is a dental periodontal probe?", a:"A calibrated instrument (millimetre markings) used to: measure periodontal pocket depth (healthy ≤3 mm), assess bleeding on probing (indicates inflammation), evaluate attachment loss, and examine furcations in multi-rooted teeth. Common types: Williams probe, UNC-15, WHO probe."},
+    {q:"What is a dental curette?", a:"A periodontal instrument used to remove subgingival calculus, perform root planing (smooth root surface), and débride soft tissue.\nGracey curettes: site-specific — different curettes for different tooth surfaces.\nUniversal curette: two cutting edges per side, used throughout the mouth."},
+    {q:"What is a rubber dam?", a:"A thin latex or non-latex sheet used to isolate one or more teeth during procedures.\nBenefits: prevents salivary contamination, protects airway from instruments and materials, improves visibility and access, reduces cross-contamination.\nComponents: sheet, clamp/retainer, clamp forceps, frame/holder, punch for creating holes."},
+    {q:"What is the tri-syringe (three-way syringe)?", a:"A dental unit attachment that delivers air, water, or a combined air-water spray. Used to rinse and dry the field, cool cavity preparations, and test tooth vitality. Tip must be sterilised or replaced with a single-use disposable tip between patients."},
+    {q:"What is a high-speed versus low-speed dental handpiece?", a:"High-speed (air turbine): 200,000–400,000 RPM — cuts enamel and dentin for cavity preparation, requires water coolant.\nLow-speed (air or electric motor): 5,000–40,000 RPM — polishing, finishing restorations, prophy angles, endodontic files. More torque than high-speed."},
+    {q:"What are dental extraction forceps?", a:"Grasp and remove teeth after adequate luxation. Designed for specific teeth:\n#150/151: upper and lower universal (premolars)\n#99C: upper molars (beaks fit buccal groove)\n#17: lower molars (beaks fit buccal groove)\nBeaks must be placed below the cemento-enamel junction (CEJ)."},
+    {q:"What is an ultrasonic (cavitron) scaler?", a:"Uses high-frequency vibration (25,000–30,000 Hz) plus water lavage to remove supra- and subgingival calculus, plaque biofilm, and stain. Faster than hand scaling; water flushes debris and cools the tip. Contraindicated for patients with older cardiac pacemakers."},
+    {q:"What is a periosteal elevator?", a:"Used to reflect (lift) the periosteum away from bone during surgical procedures and for atraumatic extractions — severs the periodontal ligament and elevates the tooth before forceps application. Common types: Molt #9, Prichard elevator."},
+    {q:"What is a bone file?", a:"Used after tooth extraction to smooth sharp alveolar bone edges, remove bony spicules that could delay healing or cause discomfort, and reduce ridge height before denture construction. Used with push-pull cross-cut strokes."}
+  ],
+  procedures: [
+    {q:"What is Black's cavity classification?", a:"Class I: pit and fissure caries — occlusal surfaces of posterior teeth, lingual pits of upper incisors\nClass II: proximal surfaces of posterior teeth (mesial or distal of premolars/molars)\nClass III: proximal surfaces of anterior teeth — NOT involving the incisal edge\nClass IV: proximal + incisal edge of anterior teeth\nClass V: cervical third (gingival third) of any tooth\nClass VI: incisal/occlusal cusp tips worn down by attrition"},
+    {q:"What is dental caries and how does it progress?", a:"Acid produced by bacteria (S. mutans) metabolising fermentable carbohydrates demineralises tooth structure.\nProgression:\n1. White spot lesion — demineralisation only (reversible with fluoride)\n2. Enamel cavity — irreversible lesion forms\n3. Dentinal involvement — more rapid spread; tooth becomes sensitive\n4. Pulp involvement — pain, abscess risk; root canal therapy required"},
+    {q:"What is pulpitis and how are types distinguished?", a:"Reversible pulpitis: pain with stimulus (cold, sweet) that resolves when removed. Can restore the tooth.\nIrreversible pulpitis: spontaneous or lingering pain after stimulus removed. Root canal therapy required.\nPulp necrosis: death of pulp tissue — often painless initially. Periapical abscess risk."},
+    {q:"What is root canal (endodontic) therapy?", a:"Removes infected or necrotic pulp tissue, shapes the canals, and fills with gutta-percha to prevent re-infection.\nSteps: access opening → pulpectomy → canal length measurement → cleaning and shaping with files → obturation with gutta-percha → permanent coronal restoration (usually a crown)"},
+    {q:"What is periodontal disease?", a:"Infection and inflammation of tooth-supporting structures.\nGingivitis: reversible — gingiva only, bleeding on probing, redness, no bone loss.\nPeriodontitis: irreversible — bone and attachment loss, pockets >3 mm, possible tooth mobility and tooth loss.\nCaused by bacterial biofilm (dental plaque). Risk factors: smoking, diabetes, genetics."},
+    {q:"What is a dental prophylaxis?", a:"Professional cleaning removing supragingival calculus, plaque, and stain using: ultrasonic scaler, hand scalers/curettes, prophy angle with polishing paste. Frequency: every 6 months for low-risk patients; every 3–4 months for periodontal patients."},
+    {q:"What is dental alginate and how is it used?", a:"Irreversible hydrocolloid impression material. Mix powder + water 45–60 sec → load tray → seat in mouth 3–5 min until set → remove with a snap.\nMust pour in dental stone within 30 min (shrinks if dehydrated, expands if overly wet).\nUses: study models, bleaching trays, orthodontic models."},
+    {q:"What is local anaesthesia in dentistry?", a:"Blocks nerve conduction by inhibiting sodium channels → prevents pain signal transmission. Most common: lidocaine 2% with 1:100,000 epinephrine (vasoconstrictor prolongs action and reduces bleeding).\nInfiltration: small local area. IAN block: entire hemimandible.\nMaximum dose: lidocaine 4.4 mg/kg body weight."},
+    {q:"What is dental sealant?", a:"A thin resin coating applied to the pits and fissures of posterior teeth to prevent bacterial colonisation and caries. Procedure: clean tooth → etch with 35–37% phosphoric acid 15–30 sec → rinse and dry completely → apply sealant → light cure 20–30 sec. Most effective preventive intervention for children and adolescents."},
+    {q:"What are the dental radiograph types?", a:"Intraoral: periapical (full tooth + root + periapical bone), bitewing (crowns + alveolar crest — best for interproximal caries detection), occlusal (arch cross-section).\nExtraoral: panoramic OPG (full dentition, mandible, TMJ, sinuses), cephalometric (lateral skull — orthodontic assessment)."},
+    {q:"What is antibiotic prophylaxis before dental procedures?", a:"Recommended for high-risk cardiac patients to prevent infective endocarditis.\nHigh-risk patients: previous IE, prosthetic cardiac valves, unrepaired cyanotic congenital heart disease.\nDrug: amoxicillin 2 g orally 30–60 min before procedure.\nIf penicillin allergic: clindamycin 600 mg or azithromycin 500 mg."},
+    {q:"What are the surfaces of a tooth?", a:"Mesial (M): surface facing toward the midline\nDistal (D): surface facing away from midline\nBuccal (B) / Labial (F): surface facing cheeks/lips\nLingual (L) / Palatal (P): surface facing tongue/palate\nOcclusal (O): biting surface of posterior teeth\nIncisal (I): biting edge of anterior teeth"},
+    {q:"What is dental fluorosis?", a:"Permanent white spots, striations, or pitting on enamel caused by excessive fluoride ingestion during tooth development (before age 8). Mild: white lines/spots — cosmetic only. Moderate: widespread white areas. Severe: pitting and brown staining. Cause: excess fluoride supplements, swallowing fluoride toothpaste, already-fluoridated water + supplements."}
+  ],
+  anatomy: [
+    {q:"How many teeth are in the permanent and primary dentitions?", a:"Permanent dentition: 32 teeth — 8 incisors, 4 canines, 8 premolars (bicuspids), 12 molars (including 4 third molars/wisdom teeth)\nPrimary (deciduous) dentition: 20 teeth — 8 incisors, 4 canines, 8 molars (no premolars in the primary dentition)"},
+    {q:"What is the anatomical structure of a tooth?", a:"Crown: portion above the gum line — covered by enamel\nRoot: portion below the gum line — covered by cementum\nCEJ (cemento-enamel junction): border between crown and root\nDentin: main bulk of the tooth — harder than bone, softer than enamel\nPulp: inner soft tissue containing nerves, blood vessels, connective tissue, and odontoblasts"},
+    {q:"What is enamel and its key properties?", a:"The hardest tissue in the human body (96% hydroxyapatite mineral). Translucent; covers the anatomical crown. Contains NO living cells → cannot self-repair after damage. Formed by ameloblasts (cells lost after tooth eruption). Protected by fluoride (forms fluorapatite) and salivary buffering."},
+    {q:"What is dentin?", a:"70% mineral (hydroxyapatite), 30% organic (mainly collagen). Softer than enamel; more yellow in colour — contributes to overall tooth shade. Contains dentinal tubules running from pulp to DEJ — responsible for tooth sensitivity when exposed. Produced throughout life by odontoblasts → secondary and tertiary (reparative) dentin."},
+    {q:"What is the periodontium?", a:"The complete tooth-supporting apparatus:\n1. Gingiva: oral mucosa surrounding teeth — attached and free gingiva\n2. Periodontal ligament (PDL): collagen fibre bundles connecting cementum to alveolar bone; allows slight physiological tooth movement\n3. Cementum: thin calcified tissue covering the root\n4. Alveolar bone: the bone housing and supporting tooth roots"},
+    {q:"What are eruption dates for permanent teeth?", a:"6–7 years: central incisors + first molars (6-year molars)\n7–8 years: lateral incisors\n9–11 years: canines + first premolars\n11–12 years: second premolars\n12–13 years: second molars (12-year molars)\n17–21 years: third molars (wisdom teeth)"},
+    {q:"What is Angle's classification of occlusion?", a:"Class I (Normal): upper first molar buccal groove aligns with lower first molar mesial buccal cusp.\nClass II: upper molar is positioned mesially — overjet ('buck teeth')\nClass III: upper molar is positioned distally — underbite; prognathic mandible."},
+    {q:"What are the major salivary glands?", a:"Parotid: largest; serous secretion; Stensen's duct opens opposite upper second molar\nSubmandibular: mixed (serous + mucous); Wharton's duct opens at sublingual caruncle\nSublingual: smallest; mainly mucous; multiple small ducts\nSaliva functions: lubrication, amylase digestion, antimicrobial (IgA, lysozyme), acid buffering, remineralisation"},
+    {q:"What is the temporomandibular joint (TMJ)?", a:"The synovial joint connecting the mandibular condyle to the temporal bone (glenoid fossa). An articular disc separates upper and lower joint compartments. Lower compartment: hinge movement (rotation). Upper compartment: translation/protrusion. TMD (disorders): pain, clicking, limited opening — managed with splints, PT, and botox."},
+    {q:"What are the muscles of mastication?", a:"Masseter: most powerful by weight — elevates mandible (closes jaw)\nTemporalis: elevates and retrudes mandible — fan-shaped over temporal fossa\nMedial pterygoid: elevates and protrudes; assists lateral excursion\nLateral pterygoid: the only depressor in this group — protrudes mandible and initiates mouth opening"},
+    {q:"What is the dental pulp and its functions?", a:"Soft connective tissue within the pulp chamber and root canals.\nContains: odontoblasts (dentin-producing cells), sensory nerves (pain and temperature), blood vessels, lymphatics, and fibroblasts.\nFunctions: dentinogenesis (produce secondary and reparative dentin), nutrition of dentin, sensory (pain/temperature detection), defence (reparative dentin formation in response to irritation)."}
+  ]
+};
+
+_hosaDecks.vs = {
+  instruments: [
+    {q:"What is an Ambu bag (BVM)?", a:"Bag-valve-mask: a manually operated resuscitation device providing positive pressure ventilation to patients in respiratory distress or arrest. Used during anaesthesia induction, CPR, or respiratory emergencies to deliver oxygen and breathe for an unconscious animal."},
+    {q:"What is an autoclave and how does it sterilise?", a:"Uses saturated steam at 121°C, 15 psi for 15–30 minutes to kill all microorganisms including heat-resistant spores. Used for surgical instruments, packs, glassware, culture media, and biohazardous waste. Validated with autoclave tape (colour change) and biological spore strip indicators."},
+    {q:"What is a Bair Hugger Warming Unit?", a:"A forced-air warming system that circulates warm air through a specialised blanket placed over the patient. Used to prevent perioperative hypothermia — anaesthetised animals cannot thermoregulate effectively. Normal canine and feline temperature: 38–39.2°C."},
+    {q:"What is a binocular microscope?", a:"A two-eyepiece microscope allowing stereoscopic vision and enhanced depth perception. Used in veterinary practice to examine urine sediment, fecal flotation results, blood smears, cytology, and skin scrapes. Objectives: 4×, 10×, 40× (high dry), 100× (oil immersion)."},
+    {q:"What is a butterfly catheter?", a:"A winged infusion set — a thin, flexible needle with plastic wings for venipuncture and short-term IV access. Used in small animals with fragile or small veins, for blood collection from peripheral veins, and for short IV medication administration."},
+    {q:"What is a balling gun?", a:"A device used to administer oral boluses (large tablets or capsules) to livestock such as cattle, horses, and sheep. The bolus is loaded into the gun, which is passed over the back of the tongue; the plunger releases the tablet directly into the pharynx to ensure proper dosing."},
+    {q:"What is a Barnes dehorner?", a:"A circular cutting instrument used to remove the horns of cattle by slicing through the horn below the horn ring. Performed with local anaesthesia; prevents injury to handlers and other livestock. Proper wound care required post-procedure."},
+    {q:"What is an endotracheal (ET) tube?", a:"Inserted through the mouth into the trachea to maintain a patent airway and deliver inhalant anaesthetics. An inflatable cuff seals the trachea to prevent aspiration. Correct placement confirmed by: visualising tube passing through glottis, bilateral chest movement, and capnography (ETCO₂)."},
+    {q:"What is a fecal flotation kit?", a:"Contains flotation solution (zinc sulfate 33% or sodium nitrate), strainer, microscope slides, coverslips, and applicator sticks. Used to concentrate and detect intestinal parasite eggs and oocysts — parasitic ova float to the surface while heavy fecal debris sinks."},
+    {q:"What is a hoof tester?", a:"A large calibrated pincer that applies localised pressure to specific areas of the equine hoof to identify the source of lameness. A positive response (flinching, lifting the foot) when pressure is applied over a specific area helps diagnose navicular disease, laminitis, or subsolar abscess."},
+    {q:"What is a laryngoscope?", a:"Consists of a handle with a light source and an interchangeable blade. Used to visualise the larynx and glottis for endotracheal intubation. Straight Miller blade most commonly used in veterinary patients. Essential for intubation of cats, dogs, and large animals during anaesthesia induction."},
+    {q:"What are Mayo scissors vs Metzenbaum scissors?", a:"Mayo scissors: heavy, blunt-tipped, robust — for cutting dense tissue, suture material, and bandage material. Straight or curved.\nMetzenbaum scissors: lighter, longer-handled, delicate — for careful blunt dissection and cutting fine tissue.\nMnemonic: 'Mayo for Muscle; Metzenbaum for delicate Meat'"},
+    {q:"What is a needle holder?", a:"A ratcheting clamp used to grasp and manipulate a suture needle during surgical closure. Cross-hatched jaws provide firm needle grip. Types: Mayo-Hegar (without scissors), Olsen-Hegar (with built-in scissors for cutting suture). Load needle perpendicular to the jaw tip."},
+    {q:"What is a pulse oximeter?", a:"Measures haemoglobin oxygen saturation (SpO₂) non-invasively via differential light absorption at two wavelengths. Normal SpO₂: >95%. Values <90% indicate significant hypoxaemia. Probe placement: tongue, toe web, prepuce, ear, rectum (species and procedure dependent). Also measures heart rate."},
+    {q:"What are vacutainer tube colours and their uses?", a:"Purple/EDTA: haematology/CBC\nRed (no additive) or gold (SST): serum chemistries\nGreen (heparin): plasma chemistries\nBlue (sodium citrate): coagulation testing\nGrey (fluoride/oxalate): glucose testing (fluoride inhibits glycolysis to preserve glucose level)"},
+    {q:"What is a trocar?", a:"A pointed, hollow instrument used to puncture body cavities for fluid drainage or laparoscopic access. Veterinary uses: ruminal trocar to relieve bloat in cattle (puncture rumen through paralumbar fossa); laparoscopic trocars create access portals for cameras and instruments."},
+    {q:"What are tissue forceps and their types?", a:"Tweezer-like instruments used to grasp and manipulate tissue during surgery.\nRat-tooth (1×2): interlocking teeth — firm grip, more tissue trauma\nBrown-Adson: multiple fine teeth — secure grip with less damage\nDeBakey: atraumatic — for delicate or vascular tissue\nNever use tissue forceps to grasp suture needles (use needle holder)."},
+    {q:"What is a Penrose drain?", a:"A flat, soft latex tube placed post-operatively to prevent fluid accumulation (seroma, haematoma) in surgical sites. Drains exudate and blood by gravity and capillary action through a separate stab incision away from the primary closure. Typically removed after 3–7 days when drainage ceases."}
+  ],
+  procedures: [
+    {q:"What are the steps for preparing an operative site?", a:"1. Clip fur with electric clippers — at least 5 cm wider than the planned surgical site\n2. Remove loose hair with vacuum or damp gauze\n3. Scrub with chlorhexidine or betadine in concentric circles from the centre outward\n4. Do NOT return to the centre with a used gauze — always start a new piece\n5. Perform 3 alternating scrub-and-wipe cycles\n6. Allow to dry; apply final antiseptic solution"},
+    {q:"What are the steps for simple fecal flotation?", a:"1. Weigh 2–5 g of feces; add to flotation solution and mix thoroughly\n2. Strain through cheesecloth or strainer into a clean tube\n3. Fill tube to the meniscus; place coverslip directly on the surface\n4. Allow to stand 10–20 minutes (or centrifuge for more sensitive results)\n5. Lift coverslip straight up; transfer to microscope slide\n6. Examine under 10× for parasite ova; 40× for identification"},
+    {q:"What are common parasites detected by fecal flotation?", a:"Toxocara (roundworm): oval, thick-walled eggs\nAncylostoma/Uncinaria (hookworm): oval, thin-walled, clear\nTrichuris (whipworm): football-shaped with polar plugs\nGiardia: oval cysts (best detected with zinc sulfate flotation)\nCoccidia (Isospora): small, round oocysts\nStrongyle eggs (horses, ruminants): oval, thin-walled"},
+    {q:"How do you lift a small dog correctly?", a:"1. Approach calmly and allow the dog to sniff your hand\n2. Place one arm under the chest and front legs\n3. Place the other arm under the hindquarters/rump\n4. Lift in one smooth, controlled motion\n5. Hold securely against your body, supporting the entire body weight\n6. Never lift by the scruff alone — it does not support the animal's weight"},
+    {q:"How do you restrain a dog in lateral recumbency?", a:"For lateral (dog on its side):\nOne arm over the neck; reach under to grasp and hold both front legs together.\nOther arm over the flank; reach under to grasp and hold both hindlegs together.\nPress animal gently but firmly against the table.\nMaintain head flat; restrict movement without compromising the airway.\nMonitor for stress: panting, whale eye, excessive struggling."},
+    {q:"What are the steps for wrapping a surgical pack?", a:"1. Lay wrap flat in a diamond orientation; place items in the centre\n2. Fold near corner up and over items; tuck the tip under\n3. Fold right side in, then left side in\n4. Fold far corner over — leave a triangular flag for aseptic opening\n5. Secure with autoclave tape; label with contents, date, and initials\n6. Sterilise immediately or store in a clean, dry location"},
+    {q:"How do you obtain a rectal temperature in a cat?", a:"1. Restrain cat with scruffing or towel wrap\n2. Lift tail to expose the rectum\n3. Apply water-based lubricant to thermometer tip\n4. Insert thermometer gently 2.5 cm into the rectum\n5. Hold for 60 seconds (digital) or until the device signals\n6. Remove, wipe clean, and read temperature\n7. Normal feline temperature: 38–39.2°C (100.5–102.5°F)\n8. Disinfect thermometer after use"},
+    {q:"What are the principles of aseptic technique in veterinary surgery?", a:"Sterile to sterile only — never pass sterile items through non-sterile areas\nGowned and gloved team members only touch sterile surfaces\nAlways face the sterile field — your back is never sterile\nHands and arms must remain above the waist within the sterile field\nIf sterility is in doubt — consider it contaminated and replace\nMinimise movement and talking in the operating room"},
+    {q:"What are normal vital signs for dogs, cats, and horses?", a:"Dog: HR 60–120 bpm, RR 10–30 breaths/min, Temp 38–39.2°C\nCat: HR 120–180 bpm, RR 20–30 breaths/min, Temp 38–39.2°C\nHorse: HR 28–44 bpm, RR 12–20 breaths/min, Temp 37.5–38.5°C\nAlways compare to the individual animal's known baseline when possible."},
+    {q:"What are the common drug administration routes in veterinary patients?", a:"Oral (PO): tablets or liquid medications when animal is cooperative\nSubcutaneous (SC): scruff or lateral chest — slow absorption\nIntramuscular (IM): epaxial muscles or semimembranosus/semitendinosus — moderate onset\nIntravenous (IV): cephalic, saphenous, or jugular vein — fastest absorption\nIntraosseous (IO): emergency when IV access is impossible\nTopical: ear, eye, and skin medications"},
+    {q:"What are the signs of anaesthetic depth — too light vs too deep?", a:"Too light: voluntary movement, swallowing reflex, blink reflex intact, increased HR and BP\nAdequate depth: loss of pedal withdrawal reflex, jaw relaxation, stable HR and BP, no voluntary movement\nToo deep: apnoea (no breathing), absent corneal reflex, cardiovascular depression, pale mucous membranes, dilated pupils"},
+    {q:"What is euthanasia in veterinary medicine?", a:"Humane, painless induction of death. Most common method: IV pentobarbital sodium overdose (87 mg/kg IV).\nProtocol: place IV catheter; optional pre-sedation for anxious animals; administer pentobarbital; confirm death (no heartbeat × 2 min, no corneal reflex, no respiratory effort).\nAlways performed with informed owner consent, compassion, and professionalism."},
+    {q:"What is the scruffing technique for cat restraint?", a:"Grasp the loose skin at the back of the neck (scruff) firmly. Appropriate for brief, minor procedures. Can be combined with towel wrapping ('cat burrito'). Limitations: some cats become more anxious or aggressive; not appropriate for prolonged procedures or painful examinations. Alternatives: towel wrap, calm handling, gabapentin pre-visit medication."}
+  ],
+  breeds: [
+    {q:"What are the major dog breed groups?", a:"Sporting: Labrador Retriever, Golden Retriever, Cocker Spaniel — hunting and retrieving\nHound: Beagle, Greyhound, Bloodhound — scent or sight tracking\nWorking: German Shepherd, Rottweiler, Doberman — guarding, pulling\nTerrier: Jack Russell, Bull Terrier — vermin hunting\nToy: Chihuahua, Pomeranian, Maltese — companion animals\nHerding: Border Collie, Australian Shepherd\nNon-sporting: Bulldog, Dalmatian, Standard Poodle"},
+    {q:"What are common purebred cat breeds and their characteristics?", a:"Persian: flat face (brachycephalic), long coat, gentle temperament\nSiamese: pointed coat, vocal, slender body type\nMaine Coon: largest domestic breed, tufted ears, dog-like temperament\nRagdoll: large, very docile, blue eyes\nBengal: spotted or marbled coat, athletic\nSphynx: hairless, extroverted personality"},
+    {q:"What are common small animal and exotic species in veterinary practice?", a:"Small mammals: rabbits (hindgut fermenters; fragile spines), guinea pigs (require dietary vitamin C), hamsters, gerbils, ferrets (obligate carnivores), rats, mice\nBirds: parrots (psittacines), raptors, pigeons, poultry\nReptiles: snakes, lizards (bearded dragon, iguana, chameleon), turtles, tortoises\nAmphibians: frogs, salamanders, axolotls"},
+    {q:"What are common livestock species and their digestive classification?", a:"Cattle, sheep, goats: ruminants — 4-chambered stomach; regurgitate and re-chew cud\nHorses: hindgut fermenters — monogastric; colic is a serious emergency\nPigs: omnivores with simple stomachs\nPoultry (chickens, turkeys, ducks): birds — no diaphragm; air sac respiratory system\nCamelids (llamas, alpacas): modified ruminants — 3 stomach compartments"},
+    {q:"What are breed-specific health predispositions in common dogs?", a:"Labrador Retriever: obesity, hip and elbow dysplasia, exercise-induced collapse\nGerman Shepherd: degenerative myelopathy, hip dysplasia, exocrine pancreatic insufficiency\nGolden Retriever: cancer (high incidence), hip dysplasia, hypothyroidism\nEnglish Bulldog: BOAS, skin fold dermatitis, hip dysplasia\nGreat Dane: GDV/bloat, dilated cardiomyopathy\nBeagle: epilepsy, hypothyroidism"},
+    {q:"What is brachycephalic obstructive airway syndrome (BOAS)?", a:"Respiratory dysfunction in flat-faced breeds due to anatomical abnormalities: stenotic nares, elongated soft palate, hypoplastic trachea, everted laryngeal saccules.\nAffected breeds: English Bulldog, Pug, French Bulldog, Shih Tzu, Persian cats.\nSigns: loud breathing (stertor), snoring, exercise intolerance, cyanosis in heat.\nTreatment: surgical correction of nares and soft palate."},
+    {q:"What is gastric dilatation-volvulus (GDV/bloat)?", a:"Life-threatening emergency: stomach fills with gas and rotates on its axis, cutting off blood supply to the stomach and spleen.\nAt-risk breeds: deep-chested large breeds — Great Dane, German Shepherd, Standard Poodle, Weimaraner, Saint Bernard.\nSigns: unproductive retching, progressively distended abdomen, hypersalivation, restlessness, rapid deterioration.\nTreatment: immediate gastric decompression followed by emergency surgical correction."},
+    {q:"What is feline lower urinary tract disease (FLUTD)?", a:"A group of conditions affecting the feline bladder and urethra: idiopathic cystitis (most common), urolithiasis (bladder stones), urethral plugs, bacterial infection.\nSigns: straining, frequent small urinations, haematuria, vocalising in the litter box, inappropriate urination.\nUrethral obstruction (male cats only) = MEDICAL EMERGENCY — can be fatal within 24–48 hours if untreated."},
+    {q:"What is feline hyperthyroidism?", a:"The most common endocrine disorder in older cats. Cause: benign functional thyroid adenoma → overproduction of T3 and T4.\nSigns: weight loss despite increased appetite (polyphagia), hyperactivity, vomiting/diarrhoea, unkempt coat, tachycardia, hypertension.\nDiagnosis: elevated total T4.\nTreatment options: methimazole (medication), radioactive iodine (curative), thyroidectomy (surgery)."},
+    {q:"What is canine parvovirus?", a:"Highly contagious, potentially fatal viral disease primarily affecting unvaccinated puppies and young dogs. Transmission: fecal-oral; virus is extremely hardy — survives months in environment; resistant to many disinfectants (dilute bleach 1:32 is effective).\nSigns: severe haemorrhagic gastroenteritis, vomiting, profound depression and dehydration.\nTreatment: intensive supportive care. Prevention: vaccination (highly effective)."},
+    {q:"What is diabetes mellitus in dogs versus cats?", a:"Dogs: Type 1-like — immune-mediated beta cell destruction; insulin-dependent for life; intact females predisposed (progesterone causes insulin resistance).\nCats: Type 2-like — insulin resistance from obesity; may achieve diabetic remission with diet and weight loss.\nBoth: signs include PU/PD, weight loss despite increased appetite.\nDogs: cataracts are common. Cats: diabetic neuropathy (plantigrade stance) can occur."},
+    {q:"What is the normal reproductive cycle in female dogs?", a:"Proestrus (7–10 days): vulvar swelling, serosanguineous discharge; males attracted but female not receptive.\nOestrus (5–9 days): female receptive to mating; LH surge triggers ovulation.\nDioestrus (60–90 days): progesterone-dominant phase; pregnancy or pseudopregnancy.\nAnoestrus (2–4 months): sexual inactivity; uterine recovery.\nTotal cycle approximately every 6–8 months."}
+  ]
+};
+
+_hosaDecks.bt = {
+  molecular: [
+    {q:"What is DNA and its structure?", a:"Double-stranded helix composed of nucleotide monomers. Each nucleotide: deoxyribose sugar + phosphate group + nitrogenous base (A, T, G, or C). Base pairing: A–T (2 hydrogen bonds), G–C (3 hydrogen bonds). Two strands run antiparallel (5'→3' paired with 3'→5'). Described by Watson and Crick in 1953."},
+    {q:"What is the central dogma of molecular biology?", a:"DNA → RNA → Protein\nReplication: DNA → DNA (before cell division)\nTranscription: DNA used as template to synthesise mRNA (in the nucleus)\nTranslation: mRNA read by ribosomes to produce a polypeptide chain\nException: retroviruses (e.g., HIV) use reverse transcriptase to convert RNA back to DNA."},
+    {q:"What is PCR (Polymerase Chain Reaction) and how does it work?", a:"PCR amplifies a specific DNA sequence exponentially. Components: template DNA, primers (short complementary sequences), Taq DNA polymerase, dNTPs, buffer.\nThree steps per cycle:\n1. Denaturation (94°C): strands separate\n2. Annealing (55–65°C): primers bind to template strands\n3. Extension (72°C): Taq polymerase synthesises new strand from primers\nEach cycle doubles the DNA → 2ⁿ copies after n cycles"},
+    {q:"What are restriction enzymes (restriction endonucleases)?", a:"Bacterial proteins that recognise specific short DNA sequences (restriction sites) and cut double-stranded DNA at or near those sites. Example: EcoRI recognises GAATTC and cuts between G and A → produces sticky ends. Used in: restriction mapping, gene cloning, creating recombinant DNA constructs."},
+    {q:"What is gel electrophoresis?", a:"Separates DNA fragments (or proteins) by size using an electric field. DNA is negatively charged → migrates toward the positive electrode through agarose gel. Smaller fragments migrate faster and travel further. Size estimated by comparison to a DNA ladder (known size markers). Visualised with ethidium bromide or GelRed under UV light."},
+    {q:"What is a plasmid?", a:"A small, circular, self-replicating DNA molecule separate from the bacterial chromosome.\nCloning vector features:\n• Origin of replication (ori)\n• Selectable marker (antibiotic resistance gene)\n• Multiple cloning site (MCS) with restriction enzyme sites for inserting foreign DNA\nPlasmids are fundamental tools for gene cloning and protein expression."},
+    {q:"What is bacterial transformation?", a:"The uptake of exogenous DNA (usually a plasmid) by a bacterium.\nArtificial transformation: CaCl₂ treatment makes cells competent (pores form) → heat shock at 42°C for 45 seconds allows DNA entry.\nAlternative: electroporation (brief electric pulse permeabilises the membrane).\nTransformants selected on antibiotic plates — only cells that incorporated the plasmid survive."},
+    {q:"What is recombinant DNA technology?", a:"Combining DNA from two or more sources in vitro:\n1. Cut source DNA and vector with same restriction enzyme\n2. Ligate fragments with DNA ligase\n3. Transform into host cell\n4. Select transformants (antibiotic resistance)\n5. Screen for insert (blue-white selection, PCR)\nApplications: insulin production, gene therapy, transgenic organisms, vaccines."},
+    {q:"What is CRISPR-Cas9?", a:"A gene editing tool derived from the bacterial adaptive immune system. Components: guide RNA (gRNA) — directs Cas9 to the target DNA sequence; Cas9 endonuclease — cuts both DNA strands at the target.\nOutcomes: NHEJ (non-homologous end joining → gene knockout) or HDR (homology-directed repair with template → precise edit).\nApplications: gene therapy, cancer treatment, agricultural improvement."},
+    {q:"What is the lac operon?", a:"A regulatory system in E. coli controlling genes for lactose metabolism (lacZ, lacY, lacA). Classic example of negative regulation:\nGlucose present: repressor protein binds operator → genes OFF.\nLactose present (no glucose): allolactose (lactose metabolite) inactivates repressor → genes ON.\nIllustrates inducible gene expression and transcriptional regulation."},
+    {q:"What is horizontal gene transfer and its significance?", a:"Transfer of genetic material between organisms other than parent-to-offspring.\nThree bacterial mechanisms:\nTransformation: uptake of naked DNA from environment\nTransduction: DNA transfer via bacteriophage\nConjugation: direct transfer via sex pilus (F factor plasmid)\nMajor driver of antibiotic resistance spread — resistance genes carried on plasmids transfer between species."},
+    {q:"What are the three types of RNA and their functions?", a:"mRNA (messenger RNA): carries the genetic code from the nucleus to the ribosome for translation.\ntRNA (transfer RNA): carries specific amino acids to the ribosome; has an anticodon loop that pairs with the mRNA codon.\nrRNA (ribosomal RNA): structural and catalytic component of the ribosome (rRNA forms peptidyl transferase centre).\nStart codon: AUG (methionine). Stop codons: UAA, UAG, UGA."},
+    {q:"What are the key enzymes in DNA replication?", a:"Helicase: unwinds the double helix at the replication fork\nPrimase: synthesises short RNA primers to initiate synthesis\nDNA polymerase III: synthesises new DNA strands (5'→3' only)\nDNA polymerase I: removes RNA primers and fills in gaps\nDNA ligase: joins Okazaki fragments on the lagging strand\nTopoisomerase: relieves torsional stress ahead of the moving replication fork"},
+    {q:"What are the four levels of protein structure?", a:"Primary: amino acid sequence joined by peptide bonds\nSecondary: local folding — alpha helices and beta sheets (stabilised by hydrogen bonds)\nTertiary: overall 3D shape from all R-group interactions (hydrophobic, ionic, disulfide bonds)\nQuaternary: two or more polypeptide chains assembled together — e.g., haemoglobin (4 subunits)\nProtein function depends entirely on its 3D shape."},
+    {q:"What is a codon and anticodon?", a:"Codon: a 3-nucleotide sequence on mRNA specifying one amino acid (or a stop/start signal). 64 codons encode 20 amino acids → the genetic code is degenerate (redundant).\nAnticodon: the complementary 3-nucleotide sequence on tRNA that pairs with the mRNA codon at the ribosomal A site, delivering the correct amino acid to be added to the growing polypeptide chain."},
+    {q:"What is the difference between prokaryotes and eukaryotes?", a:"Prokaryotes: no membrane-bound nucleus, circular chromosome, no membrane-bound organelles, smaller cells (bacteria, archaea)\nEukaryotes: membrane-bound nucleus, linear chromosomes, organelles (mitochondria, ER, Golgi), larger cells (animals, plants, fungi)\nBiotechnology note: E. coli cannot perform mammalian post-translational modifications → yeast, CHO, or HEK293 cells used for complex human therapeutic proteins."}
+  ],
+  techniques: [
+    {q:"What is the Bradford protein assay?", a:"Measures total protein concentration using Coomassie Brilliant Blue G-250 dye — binds to protein and shifts absorption from 465 nm (red) to 595 nm (blue). Absorbance at 595 nm is proportional to protein concentration. BSA standards create a standard curve. Sensitive range: 1–1000 µg/mL."},
+    {q:"What is Western blotting?", a:"Detects a specific protein in a complex mixture.\nSteps:\n1. SDS-PAGE: separate proteins by molecular weight\n2. Transfer proteins to nitrocellulose or PVDF membrane\n3. Block non-specific binding (BSA or non-fat milk)\n4. Incubate with primary antibody specific to target protein\n5. Incubate with enzyme-linked secondary antibody\n6. Add substrate → chemiluminescent or coloured band at expected molecular weight = positive"},
+    {q:"What is the difference between Southern, Northern, and Western blots?", a:"Southern blot (Edwin Southern, 1975): detects specific DNA sequences.\nNorthern blot: detects specific RNA sequences (named by analogy to Southern).\nWestern blot: detects specific proteins (named by analogy).\nAll share the same general approach: gel electrophoresis → transfer to membrane → probe with labelled specific molecule → detect signal."},
+    {q:"What is quantitative PCR (qPCR/real-time PCR)?", a:"Measures DNA amplification in real time using a fluorescent signal (SYBR Green dye or TaqMan probes). Generates a Ct (cycle threshold) value — lower Ct = more starting template. Applications: gene expression quantification (RT-qPCR), viral load measurement (HIV, COVID-19), GMO detection, copy number variation analysis."},
+    {q:"What is SDS-PAGE?", a:"Sodium dodecyl sulphate polyacrylamide gel electrophoresis separates proteins by molecular weight. SDS denatures proteins and coats them with negative charge proportional to size → all migrate toward the positive electrode at different rates — smaller proteins migrate faster and further. Used before Western blotting. Molecular weight estimated from protein ladder."},
+    {q:"What is flow cytometry used for in biotechnology?", a:"Analyses individual cells or particles as they flow single-file through a laser beam. Simultaneously measures: cell size (forward scatter), granularity (side scatter), and up to 12+ fluorescent markers from labelled antibodies.\nApplications: immunophenotyping, cell cycle analysis, apoptosis detection, leukaemia/lymphoma diagnosis, cell sorting (FACS), stem cell characterisation."},
+    {q:"What is DNA sequencing and what are current methods?", a:"Determines the exact nucleotide order in a DNA molecule.\nSanger sequencing: chain-termination using ddNTPs — gold standard for single gene verification (~1000 bp reads).\nNext-generation sequencing (NGS): massively parallel — millions of reads simultaneously; used for whole genome, metagenomics, RNA-seq.\nNanopore: reads single DNA molecules through a nanopore — long reads (>100 kb), portable, real-time."},
+    {q:"How is transformation efficiency calculated?", a:"Formula: (number of colonies on plate) ÷ (µg of DNA used × volume plated in mL) = CFU/µg of DNA\n\nExample: 300 colonies, 0.001 µg DNA, 0.1 mL plated:\n300 ÷ (0.001 × 0.1) = 3 × 10⁶ CFU/µg\n\nGood competent cells: 10⁶ to 10⁹ CFU/µg. Higher efficiency = more competent cells."},
+    {q:"What is RNA extraction and what makes RNA unstable?", a:"Isolates total RNA or mRNA for downstream applications (RT-PCR, RNA-seq, northern blot). RNA is very unstable — RNase enzymes are ubiquitous on skin and surfaces and degrade RNA rapidly.\nPrecautions: work on ice, use RNase-free reagents and tubes, wear gloves.\nCommon methods: TRIzol (phenol-chloroform extraction) or silica column-based kits.\nQuality assessment: A260/A280 ratio >2.0 = pure RNA."},
+    {q:"What is spectrophotometry and Beer-Lambert law?", a:"Spectrophotometry measures light absorbance at a specific wavelength through a solution. Beer-Lambert Law: A = εlc where A = absorbance, ε = molar absorptivity, l = path length (cm), c = concentration.\nNucleic acid quantification: A260. Protein quantification: A280 (Tryptophan/Tyrosine) or A595 (Bradford).\nPurity ratio: A260/A280 ≈ 1.8 for pure DNA; ≈ 2.0 for pure RNA."},
+    {q:"What are micropipettes and proper technique?", a:"Precision instruments for delivering µL volumes.\nSizes: P2 (0.2–2 µL), P20 (2–20 µL), P200 (20–200 µL), P1000 (100–1000 µL)\nProper technique: set volume, attach tip firmly, pre-wet tip (aspirate and dispense 2–3×), aspirate to first stop, hold at 45° in liquid, dispense to first stop at tube wall then depress to second stop (blow-out), eject tip immediately.\nUse fresh tip for each sample to prevent cross-contamination."},
+    {q:"What is cell culture and what conditions are required?", a:"Growing cells outside the organism in a controlled environment.\nKey requirements: sterile technique throughout; growth medium (DMEM or RPMI + serum FBS + antibiotics); 37°C incubator; 5% CO₂ atmosphere (buffers pH via bicarbonate system); regular passaging (splitting) to prevent overgrowth.\nPrimary cultures: from tissue — limited divisions.\nEstablished cell lines: immortalised — grow indefinitely (HeLa, CHO, HEK293)."},
+    {q:"What is immunofluorescence?", a:"Visualises specific proteins in cells or tissue sections using fluorescently labelled antibodies, examined by fluorescence microscopy.\nDirect IF: primary antibody directly conjugated to a fluorophore — simpler but less sensitive.\nIndirect IF: unlabelled primary antibody + fluorescent secondary antibody — amplified signal, more sensitive, more flexible.\nApplications: protein localisation within cells, pathogen detection, autoimmune disease diagnosis (e.g., ANA patterns)."}
+  ],
+  applications: [
+    {q:"What is recombinant insulin and why is it important?", a:"Human insulin produced by inserting the human insulin gene into E. coli or yeast (S. cerevisiae) using recombinant DNA technology. First approved recombinant therapeutic protein (1982 — Humulin). Advantages over animal-derived insulin: identical to human insulin (no immune reactions), unlimited scalable production, consistent purity."},
+    {q:"What are monoclonal antibodies and how are they produced?", a:"Identical antibodies from a single B cell clone — all recognising the same epitope with identical specificity.\nProduction (hybridoma technology): immunise mouse → harvest B cells → fuse with myeloma cells (immortalised) → hybridoma → clone and screen for desired antibody → scale up production.\nTherapeutic examples: Herceptin (breast cancer), Rituximab (lymphoma), Adalimumab (RA)."},
+    {q:"What is gene therapy?", a:"The introduction of genetic material into a patient's cells to treat disease by: replacing a mutated gene, silencing a malfunctioning gene, or introducing a new protective gene.\nViral vectors: AAV, lentivirus, adenovirus — efficient delivery.\nNon-viral: liposomes, naked DNA — safer but less efficient.\nChallenges: immune response to vector, off-target editing, delivery to target tissue, duration of expression."},
+    {q:"What are GMOs and give examples?", a:"Genetically modified organisms — DNA altered by genetic engineering techniques to introduce desirable traits.\nExamples:\nBt corn: Bacillus thuringiensis toxin gene inserted → insect-resistant\nRoundup Ready soya: herbicide-resistant\nGolden Rice: beta-carotene producing (addresses vitamin A deficiency)\nAquaAdvantage salmon: growth hormone gene → grows faster"},
+    {q:"What is DNA fingerprinting?", a:"Identifies individuals based on unique patterns of short tandem repeats (STRs) at specific genomic loci.\nTechnique: extract DNA → PCR amplify STR loci → capillary electrophoresis → generate allele profile → compare profiles.\nApplications: forensic identification (crime scenes), paternity/parentage testing, missing persons, remains identification.\nProbability of two unrelated people sharing a full profile: <1 in 1 trillion."},
+    {q:"What are the biotechnology applications in medicine?", a:"Drug production: recombinant proteins (insulin, erythropoietin, growth hormone, Factor VIII, monoclonal antibodies)\nDiagnostics: PCR, ELISA, rapid antigen tests, DNA sequencing for pathogen identification\nVaccines: recombinant subunit (Hepatitis B), mRNA vaccines (COVID-19 — Pfizer/Moderna)\nGene therapy: treatment of sickle cell disease, haemophilia, inherited blindness\nPharmacogenomics: personalised medicine based on genetic profile"},
+    {q:"What is CRISPR's clinical impact?", a:"First CRISPR therapeutic approved by FDA (2023): Casgevy (exagamglogene autotemcel) for sickle cell disease and beta-thalassaemia.\nMechanism: ex vivo editing of patient's own stem cells to reactivate foetal haemoglobin.\nOther applications: CAR-T cell enhancement for cancer immunotherapy; potential HIV cure (excising viral provirus); diagnostic tools (SHERLOCK, DETECTR rapid tests)."},
+    {q:"What is pharmacogenomics?", a:"The study of how an individual's genetic variation affects their response to drugs.\nGoal: 'right drug, right dose, right patient.'\nExamples: CYP2D6 poor metabolisers cannot convert codeine to morphine (no analgesia or toxicity risk); HER2 amplification → Herceptin effective; BRCA1/2 mutations guide prophylactic surgery; warfarin dosing guided by VKORC1 and CYP2C9 genotype."},
+    {q:"What are induced pluripotent stem cells (iPSCs)?", a:"Adult somatic cells reprogrammed back to a pluripotent state (capable of becoming any cell type) using four transcription factors (Oct4, Sox2, Klf4, c-Myc — Yamanaka factors, 2006 Nobel Prize).\nAdvantages over embryonic stem cells: no ethical issues surrounding embryo destruction; patient-specific → no immune rejection.\nApplications: disease modelling, drug screening, personalised cell therapy."},
+    {q:"What is bioremediation?", a:"Use of microorganisms or plants to degrade or neutralise environmental contaminants.\nBacterial examples: Pseudomonas and Alcanivorax degrade hydrocarbon pollutants in oil spills; bacteria bioaccumulate or convert toxic heavy metals.\nPhytoremediation: plants absorb and concentrate heavy metals (sunflowers used in uranium-contaminated soil cleanup).\nAdvantages: cost-effective, environmentally friendly, sustainable compared to chemical treatment."},
+    {q:"What is bioinformatics?", a:"The application of computer science, statistics, and mathematics to analyse and interpret large biological datasets — particularly genomic, proteomic, and sequence data.\nKey tools: BLAST (sequence similarity search), GenBank (global sequence repository), NCBI databases, AlphaFold (AI protein structure prediction).\nApplications: genome annotation, evolutionary analysis, drug target identification, epidemiological tracking of pathogens, personalised medicine."},
+    {q:"What are the ethical issues in biotechnology?", a:"GMOs: environmental risk to biodiversity, corporate control of food supply\nGermline editing (CRISPR babies): permanent heritable changes — international moratorium\nCloning: reproductive cloning banned in most countries; therapeutic cloning ethically debated\nGenetic privacy: risk of insurance or employment discrimination based on genetic data\nBiosecurity: risk of misuse for biological weapons\nPatenting life: companies holding patents on naturally occurring human gene sequences"}
+  ]
+};
+
+// ─────────────────────────────────────────
+//  EXAM-ONLY EVENT FLASHCARD DATA
+// ─────────────────────────────────────────
+
+window._hosaDecks = window._hosaDecks || {};
+
+// ── MEDICAL TERMINOLOGY ──────────────────────────────────────────────────
+_hosaDecks.mt = {
+  word_parts: [
+    {q:"What are the four types of medical word parts?", a:"Root (word root): the core meaning of the term — e.g., 'gastr' = stomach\nCombining form: root + vowel (usually 'o') to ease pronunciation — e.g., 'gastr/o'\nPrefix: placed before the root to modify meaning — e.g., 'brady-' = slow\nSuffix: placed after the root to modify meaning — e.g., '-itis' = inflammation"},
+    {q:"What do the prefixes brady- and tachy- mean?", a:"Brady-: slow — e.g., bradycardia = slow heart rate\nTachy-: fast/rapid — e.g., tachycardia = fast heart rate"},
+    {q:"What do the prefixes hypo- and hyper- mean?", a:"Hypo-: below normal, deficient, under — e.g., hypoglycaemia = low blood sugar\nHyper-: above normal, excessive, over — e.g., hypertension = high blood pressure"},
+    {q:"What do the prefixes pre-, post-, and peri- mean?", a:"Pre-: before — e.g., prenatal = before birth\nPost-: after — e.g., postoperative = after surgery\nPeri-: around, surrounding — e.g., pericardium = the sac surrounding the heart"},
+    {q:"What do the suffixes -itis, -osis, and -emia mean?", a:"-itis: inflammation — e.g., appendicitis = inflammation of the appendix\n-osis: condition, process, or abnormal increase — e.g., fibrosis\n-emia: condition of the blood — e.g., anaemia = low red blood cell count"},
+    {q:"What do the suffixes -ectomy, -otomy, and -ostomy mean?", a:"-ectomy: surgical removal — e.g., appendectomy\n-otomy (or -tomy): surgical incision/cutting into — e.g., laparotomy\n-ostomy: surgical creation of a new opening — e.g., colostomy"},
+    {q:"What do the suffixes -plasty, -scopy, and -graphy mean?", a:"-plasty: surgical repair or reshaping — e.g., rhinoplasty (nose reshaping)\n-scopy: visual examination with an instrument — e.g., endoscopy\n-graphy: process of recording — e.g., radiography"},
+    {q:"What do the suffixes -algia, -dynia, and -plegia mean?", a:"-algia: pain — e.g., neuralgia = nerve pain\n-dynia: pain — e.g., cardiodynia = heart pain (synonym of -algia)\n-plegia: paralysis — e.g., hemiplegia = paralysis of one side of the body"},
+    {q:"What are the combining forms for heart, blood, and blood vessels?", a:"Heart: cardi/o — e.g., cardiology\nBlood: hem/o or hemat/o — e.g., haematology\nBlood vessels: angi/o, vas/o — e.g., angiogram\nArtery: arteri/o — e.g., arteriosclerosis\nVein: phleb/o, ven/o — e.g., phlebitis"},
+    {q:"What are the combining forms for bone, joint, and muscle?", a:"Bone: oste/o — e.g., osteoporosis\nJoint: arthr/o — e.g., arthritis\nCartilage: chondr/o — e.g., chondromalacia\nMuscle: my/o, myos/o — e.g., myopathy\nTendon: ten/o, tendin/o — e.g., tendinitis"},
+    {q:"What are the combining forms for stomach, intestine, and liver?", a:"Stomach: gastr/o — e.g., gastritis\nSmall intestine: enter/o — e.g., gastroenteritis\nLarge intestine: col/o — e.g., colostomy\nLiver: hepat/o — e.g., hepatitis\nBiliary/bile: chol/e, chol/o — e.g., cholecystitis"},
+    {q:"What are the combining forms for brain, nerve, and spinal cord?", a:"Brain: encephal/o — e.g., encephalitis\nNerve: neur/o — e.g., neurology\nSpinal cord: myel/o — e.g., myelopathy (also means bone marrow)\nMind: psych/o — e.g., psychology\nMeninges (brain covering): mening/o — e.g., meningitis"},
+    {q:"What do the prefixes a-/an-, dys-, and eu- mean?", a:"A-/an-: without, absence of — e.g., apnoea = absence of breathing; anaemia = without blood (low)\nDys-: bad, difficult, painful, abnormal — e.g., dyspnoea = difficulty breathing\nEu-: good, normal, easy — e.g., eupnoea = normal breathing"},
+    {q:"What are the combining forms for skin, kidney, and lung?", a:"Skin: derm/o, dermat/o — e.g., dermatitis\nKidney: nephr/o, ren/o — e.g., nephritis, renal\nLung: pneum/o, pulmon/o — e.g., pneumonia, pulmonary\nUrinary bladder: cyst/o — e.g., cystoscopy\nUterus: hyster/o, uter/o — e.g., hysterectomy"},
+    {q:"What do the directional prefixes endo-, exo-, and inter- mean?", a:"Endo-: within, inside — e.g., endoscopy = looking inside\nExo-: outside, away from — e.g., exocrine = secreting outward\nInter-: between — e.g., intercostal = between the ribs\nIntra-: within — e.g., intravenous = within a vein\nExtra-: outside, beyond — e.g., extracellular = outside the cell"},
+    {q:"What do the prefixes uni-, bi-, and poly- mean?", a:"Uni-: one — e.g., unilateral = affecting one side\nBi-: two — e.g., bilateral = affecting both sides\nTri-: three — e.g., tricuspid (3 valve leaflets)\nPoly-: many — e.g., polyuria = excessive urination\nMacro-: large — Micro-: small"},
+    {q:"What do the suffixes -phagia, -pnea, and -uria mean?", a:"-phagia: eating, swallowing — e.g., dysphagia = difficulty swallowing\n-pnea (or -pnoea): breathing — e.g., apnea = absence of breathing\n-uria: condition of the urine — e.g., haematuria = blood in urine; polyuria = excessive urination"},
+    {q:"What do the suffixes -megaly, -penia, and -phobia mean?", a:"-megaly: enlargement — e.g., cardiomegaly = enlarged heart; hepatomegaly = enlarged liver\n-penia: deficiency, decrease — e.g., leukopenia = decreased white cells\n-phobia: fear, aversion — e.g., haemophobia = fear of blood"},
+  ],
+  body_systems: [
+    {q:"What are the three layers of the heart wall?", a:"Endocardium: innermost layer lining the heart chambers — in direct contact with blood\nMyocardium: middle and thickest layer — specialised cardiac muscle that contracts and relaxes\nEpicardium: outer layer of the heart wall (= inner layer of the pericardium)"},
+    {q:"What is the difference between arteries, veins, and capillaries?", a:"Arteries: carry blood AWAY from the heart (usually oxygenated)\nCapillaries: smallest blood vessels — site of oxygen/CO₂ and nutrient/waste exchange with tissues\nVeins: carry blood TOWARD the heart (usually deoxygenated)\nMnemonic: 'Arteries Away from heart'"},
+    {q:"What are the major structures of the respiratory system in order?", a:"Nose/mouth → pharynx (throat) → larynx (voice box) → trachea (windpipe) → bronchi → bronchioles → alveoli (air sacs)\nGas exchange occurs in the alveoli — oxygen diffuses in, CO₂ diffuses out"},
+    {q:"What are the functions of the respiratory system?", a:"1. Deliver air to the lungs\n2. Transport oxygen from inhaled air into blood\n3. Expel waste products (CO₂ and water vapour) through exhalation\n4. Produce airflow through the larynx for speech\nExternal respiration: gas exchange between lungs and blood\nInternal/cellular respiration: gas exchange between blood and body cells"},
+    {q:"What are the major organs of the digestive system in order?", a:"Mouth → oesophagus → stomach → small intestine (duodenum, jejunum, ileum) → large intestine (colon) → rectum → anus\nAccessory organs: liver (bile production), gallbladder (bile storage), pancreas (enzymes and insulin)"},
+    {q:"What are the functions of the kidneys?", a:"Filter blood to remove waste products and excess water → form urine\nRegulate blood pressure (renin-angiotensin system)\nMaintain fluid, electrolyte, and acid-base balance\nProduce erythropoietin (EPO) — stimulates red blood cell production\nActivate vitamin D"},
+    {q:"What are the major parts of the central nervous system (CNS)?", a:"Brain: cerebrum (thinking, voluntary movement), cerebellum (coordination, balance), brainstem (vital functions)\nSpinal cord: transmits signals between brain and body; mediates reflexes\nThe CNS is protected by the skull and vertebrae, and by the meninges (3-layered membrane)"},
+    {q:"What are the major glands of the endocrine system and their hormones?", a:"Pituitary (master gland): GH, TSH, ACTH, FSH, LH, ADH, oxytocin\nThyroid: T3, T4 (metabolism); calcitonin (↓ calcium)\nParathyroid: PTH (↑ calcium)\nAdrenal cortex: cortisol, aldosterone; adrenal medulla: epinephrine/norepinephrine\nPancreas: insulin (↓ glucose), glucagon (↑ glucose)\nGonads: oestrogen, progesterone, testosterone"},
+    {q:"What are the four types of tissue in the body?", a:"Epithelial tissue: covers body surfaces, lines organs and cavities, forms glands\nConnective tissue: supports, binds, protects — bone, cartilage, blood, fat, tendons, ligaments\nMuscle tissue: skeletal (voluntary), cardiac, smooth (involuntary)\nNervous tissue: neurons and supporting glial cells — transmit electrical impulses"},
+    {q:"What are the major components of the musculoskeletal system and their functions?", a:"Bones: framework and protection; mineral storage (calcium); RBC production in red marrow\nJoints: allow movement between bones\nTendons: connect muscle to bone\nLigaments: connect bone to bone, stabilise joints\nSkeletal muscle: produces movement by contracting (shortening)"},
+    {q:"What is the lymphatic system and its functions?", a:"Network of lymph vessels, lymph nodes, and lymphoid organs (spleen, thymus, tonsils, lymph nodes).\nFunctions:\n• Return excess interstitial fluid to blood circulation\n• Filter lymph fluid — lymph nodes trap pathogens\n• Produce lymphocytes (immune cells)\n• Absorb dietary fat (lacteals in small intestine)"},
+    {q:"What are the two divisions of the nervous system?", a:"Central nervous system (CNS): brain + spinal cord — integrates information\nPeripheral nervous system (PNS):\n• Somatic: voluntary movement and sensory input\n• Autonomic: involuntary control of visceral organs\n  - Sympathetic: 'fight or flight' — ↑ HR, ↑ BP, dilate pupils\n  - Parasympathetic: 'rest and digest' — ↓ HR, stimulate digestion"},
+    {q:"What are the male and female reproductive organs?", a:"Male: testes (sperm + testosterone), epididymis, vas deferens, seminal vesicles, prostate, penis\nFemale: ovaries (eggs + oestrogen/progesterone), fallopian tubes, uterus, cervix, vagina\nCombining forms: orchid/o (testes), oophor/o (ovary), uter/o, hyster/o (uterus)"},
+    {q:"What is the integumentary system and its functions?", a:"The integumentary system = skin, hair, nails, sweat glands, sebaceous glands.\nFunctions:\n• Physical barrier against pathogens, UV, and injury\n• Thermoregulation (sweating, vasodilation/constriction)\n• Sensory reception (touch, pain, temperature, pressure)\n• Vitamin D synthesis when exposed to UV\n• Excretion of waste through sweat"},
+    {q:"What are the anatomical body planes and directional terms?", a:"Sagittal plane: divides body into left/right halves\nFrontal (coronal) plane: divides into front/back\nTransverse plane: divides into upper/lower\nDirectional terms: anterior/posterior (front/back), superior/inferior (above/below), medial/lateral (toward/away from midline), proximal/distal (closer/farther from trunk)"},
+    {q:"What are the body cavities and what organs are in them?", a:"Dorsal cavity: cranial cavity (brain) + spinal/vertebral canal (spinal cord)\nVentral cavity:\n• Thoracic cavity: heart, lungs, trachea, oesophagus\n• Abdominopelvic cavity: digestive organs, kidneys, bladder, reproductive organs"},
+  ],
+  pathology: [
+    {q:"What is the difference between acute and chronic disease?", a:"Acute: sudden onset, short duration, usually severe — e.g., appendicitis, myocardial infarction\nChronic: slow onset, long duration (months to years) — e.g., diabetes, hypertension, COPD\nSubacute: between acute and chronic"},
+    {q:"What is a sign versus a symptom?", a:"Sign: objective finding observed or measured by a healthcare provider — e.g., fever (38.5°C), elevated BP, jaundice\nSymptom: subjective experience reported by the patient — e.g., pain, nausea, fatigue, dizziness"},
+    {q:"What are the four cardinal signs of inflammation?", a:"1. Calor: heat (redness)\n2. Rubor: redness\n3. Tumor: swelling\n4. Dolor: pain\n(Some add a 5th: Functio laesa — loss of function)"},
+    {q:"What is the difference between benign and malignant neoplasms?", a:"Benign: non-cancerous — encapsulated, slow-growing, does not invade surrounding tissue or metastasise. Generally less dangerous.\nMalignant: cancerous — invasive, can metastasise (spread to distant sites via blood or lymph), can be life-threatening\nNeoplasm = new abnormal tissue growth (tumour)"},
+    {q:"What is metastasis?", a:"The spread of cancer cells from the primary tumour to distant organs or tissues through the bloodstream or lymphatic system, forming secondary (metastatic) tumours. Metastasis is what makes most cancers life-threatening."},
+    {q:"What are the major categories of disease aetiology (causes)?", a:"Hereditary/genetic: inherited gene mutations or chromosomal abnormalities\nInfectious: bacteria, viruses, fungi, parasites\nEnvironmental: toxins, radiation, chemicals, trauma\nNutritional: deficiencies or excesses\nAutoimmune: immune system attacks self\nNeoplastic: abnormal cell growth\nIdiopathic: cause unknown"},
+    {q:"What is the difference between a prognosis and a diagnosis?", a:"Diagnosis: identification of a disease or condition based on signs, symptoms, history, and tests\nPrognosis: predicted outcome or course of a disease — e.g., 'good prognosis' means expected recovery; 'poor prognosis' means expected decline"},
+    {q:"What are risk factors for disease?", a:"A risk factor is any characteristic that increases the probability of developing a disease. Types:\nModifiable: smoking, obesity, physical inactivity, diet, alcohol\nNon-modifiable: age, sex, genetics, family history, race/ethnicity"},
+    {q:"What is the difference between infectious and contagious diseases?", a:"Infectious disease: caused by a pathogen (bacteria, virus, fungus, parasite) that invades the body — e.g., pneumonia (bacterial)\nContagious: an infectious disease that is transmissible from person to person — e.g., influenza, measles\nAll contagious diseases are infectious, but not all infectious diseases are contagious (e.g., tetanus from a wound is infectious but not contagious)."},
+    {q:"What is homeostasis and what happens when it is disrupted?", a:"Homeostasis: the body's ability to maintain relatively stable internal conditions (temperature, pH, blood glucose, fluid balance) despite external fluctuations.\nWhen homeostasis is significantly disrupted → disease. The body uses negative feedback loops to detect and correct deviations from normal."},
+    {q:"What is the difference between hypertrophy, atrophy, and hyperplasia?", a:"Hypertrophy: increase in CELL SIZE — e.g., cardiac hypertrophy from sustained high BP; muscle hypertrophy from exercise\nAtrophy: decrease in cell size or tissue mass — e.g., muscle atrophy from disuse or malnutrition\nHyperplasia: increase in CELL NUMBER — e.g., endometrial hyperplasia"},
+    {q:"What is the difference between necrosis and apoptosis?", a:"Necrosis: uncontrolled, pathological cell death — caused by injury, toxins, ischaemia. Triggers inflammation.\nApoptosis: programmed cell death — normal, controlled process. Essential for development and elimination of damaged or old cells. Does NOT trigger inflammation."},
+    {q:"What are the common suffixes used in pathological terminology?", a:"-oma: tumour — e.g., lipoma (benign fat tumour), carcinoma (malignant epithelial tumour)\n-itis: inflammation — e.g., tonsillitis\n-osis: condition or abnormal process — e.g., nephrosis\n-pathy: disease — e.g., cardiomyopathy\n-emia: blood condition — e.g., septicaemia"},
+    {q:"What does the prefix 'carcinoma' vs 'sarcoma' indicate?", a:"Carcinoma: malignant tumour of epithelial tissue (skin, glands, organ linings) — most common type of cancer\nSarcoma: malignant tumour of connective tissue (bone, muscle, fat, cartilage) — less common, often aggressive\nAdenocarcinoma: malignant tumour of glandular epithelial tissue (e.g., lung, prostate, colon)"},
+  ],
+  abbreviations: [
+    {q:"What do the vital sign abbreviations BP, HR, RR, and T mean?", a:"BP: blood pressure\nHR: heart rate (beats per minute)\nRR: respiratory rate (breaths per minute)\nT (or Temp): temperature\nSpO₂: peripheral oxygen saturation (pulse oximetry)\nNormal adult ranges: BP ~120/80 mmHg; HR 60–100 bpm; RR 12–20; T 36.1–37.2°C"},
+    {q:"What do the route abbreviations PO, IV, IM, SC, and SL mean?", a:"PO (per os): by mouth (oral)\nIV: intravenous (directly into a vein)\nIM: intramuscular (into muscle)\nSC or SQ: subcutaneous (under the skin)\nSL: sublingual (under the tongue)\nID: intradermal (into skin layers — allergy testing)"},
+    {q:"What do the frequency abbreviations QD, BID, TID, and QID mean?", a:"QD (or OD): once daily\nBID (or BD): twice daily\nTID: three times daily\nQID: four times daily\nQ4H: every 4 hours\nPRN: as needed\nStat (STAT): immediately"},
+    {q:"What do the medical abbreviations Hx, Dx, Tx, and Rx mean?", a:"Hx: history (medical history)\nDx: diagnosis\nTx: treatment\nRx: prescription or medication order\nPx: prognosis\nSx: symptoms"},
+    {q:"What do the abbreviations CBC, BMP, and ABG stand for?", a:"CBC: complete blood count — counts RBCs, WBCs, and platelets\nBMP: basic metabolic panel — glucose, electrolytes, kidney function\nABG: arterial blood gas — measures blood pH, oxygen, CO₂\nCMP: comprehensive metabolic panel (includes liver function)\nPT/INR: prothrombin time / international normalised ratio (clotting)"},
+    {q:"What do the abbreviations CVA, MI, and CHF stand for?", a:"CVA: cerebrovascular accident (stroke)\nMI: myocardial infarction (heart attack)\nCHF: congestive heart failure\nCAD: coronary artery disease\nDVT: deep vein thrombosis\nPE: pulmonary embolism"},
+    {q:"What do the abbreviations COPD, URI, and UTI stand for?", a:"COPD: chronic obstructive pulmonary disease\nURI: upper respiratory infection (e.g., common cold)\nUTI: urinary tract infection\nPNA: pneumonia\nSOB or DOE: shortness of breath / dyspnoea on exertion\nDM: diabetes mellitus"},
+    {q:"What do the abbreviations NPO, HOB, and ROM stand for?", a:"NPO (nil per os): nothing by mouth\nHOB: head of bed\nROM: range of motion\nADL: activities of daily living\nBRP: bathroom privileges\nOOB: out of bed"},
+    {q:"What do the abbreviations PRN, STAT, and QID mean in nursing documentation?", a:"PRN: as needed — medication given only when required\nSTAT: immediately — urgent; administer without delay\nQID: four times daily\nAC: before meals\nPC: after meals\nHS: hour of sleep (bedtime)"},
+    {q:"What do the common diagnostic abbreviations CT, MRI, US, and CXR mean?", a:"CT (CAT scan): computed tomography — detailed cross-sectional X-ray images\nMRI: magnetic resonance imaging — uses magnetic fields, good for soft tissue\nUS: ultrasound — uses sound waves; safe in pregnancy\nCXR: chest X-ray\nECG (or EKG): electrocardiogram — records heart's electrical activity\nEEG: electroencephalogram — records brain electrical activity"},
+    {q:"What do the charting abbreviations WNL, NAD, and A&Ox3 mean?", a:"WNL: within normal limits\nNAD: no acute distress\nA&Ox3 (or AOx3): alert and oriented to person, place, and time (×4 adds events/situation)\nSOAP: Subjective, Objective, Assessment, Plan (documentation format)\nPRN: as needed\ncc: chief complaint"},
+    {q:"What do the abbreviations HIPAA, DNR, and AMA stand for in legal/ethical contexts?", a:"HIPAA: Health Insurance Portability and Accountability Act — protects patient privacy\nDNR: do not resuscitate — a patient's advance directive refusing CPR\nAMA: against medical advice (or American Medical Association)\nAD: advance directive — legal document outlining care wishes\nPOA: power of attorney — designates someone to make medical decisions"},
+  ],
+};
+
+// ── PATHOPHYSIOLOGY ──────────────────────────────────────────────────────
+_hosaDecks.pp = {
+  disease_concepts: [
+    {q:"What is homeostasis and why is it important?", a:"Homeostasis: the body's maintenance of relatively stable internal conditions (temperature 36.1–37.2°C, blood pH 7.35–7.45, blood glucose 3.9–5.6 mmol/L) despite external changes. Significant disruptions to homeostasis lead to disease."},
+    {q:"What is the difference between aetiology, pathogenesis, and pathophysiology?", a:"Aetiology: the cause of a disease (what started it)\nPathogenesis: the mechanism by which the cause leads to the disease process (how it develops)\nPathophysiology: the functional changes in the body caused by the disease — how disease disrupts normal physiological processes"},
+    {q:"What is the difference between signs, symptoms, and a syndrome?", a:"Sign: objective, measurable finding — e.g., elevated temperature, skin rash\nSymptom: subjective complaint reported by the patient — e.g., pain, dizziness, fatigue\nSyndrome: a cluster of signs and symptoms that consistently occur together — e.g., metabolic syndrome, Cushing's syndrome"},
+    {q:"What are the major categories of disease causes?", a:"Genetic/hereditary: inherited mutations (e.g., cystic fibrosis, sickle cell)\nInfectious: pathogens (bacteria, viruses, fungi, parasites)\nEnvironmental: toxins, radiation, trauma\nNutritional: deficiency or excess\nAutoimmune: immune attacks self\nNeoplastic: uncontrolled cell growth\nIschaemic: inadequate blood supply\nIdiopathic: unknown cause"},
+    {q:"What is inflammation and what are its functions?", a:"Inflammation is the body's non-specific defensive response to tissue injury or infection.\nFunctions: destroy pathogens, remove dead cells and debris, initiate repair.\nClassic signs: redness, heat, swelling, pain, loss of function.\nAcute inflammation is rapid and short-lived; chronic inflammation persists and can cause tissue damage."},
+    {q:"What is the difference between benign and malignant tumours?", a:"Benign: encapsulated, non-invasive, do not metastasise — generally less dangerous (e.g., lipoma, fibroma)\nMalignant: invasive, can metastasise to distant sites via blood or lymph, potentially life-threatening\nMetastasis: spread of cancer cells to form secondary tumours at distant sites"},
+    {q:"What is ischaemia and what can it lead to?", a:"Ischaemia: inadequate blood supply to tissues, leading to oxygen and nutrient deprivation.\nIn the heart: myocardial ischaemia → angina pectoris; prolonged ischaemia → myocardial infarction (MI)\nIn the brain: cerebral ischaemia → TIA or ischaemic stroke\nIn the limb: peripheral arterial disease → claudication, gangrene"},
+    {q:"What is oedema and what causes it?", a:"Oedema: abnormal accumulation of fluid in the interstitial space, causing swelling.\nCauses: increased capillary hydrostatic pressure (heart failure), decreased plasma osmotic pressure (low albumin), increased capillary permeability (inflammation), blocked lymphatic drainage (lymphoedema)"},
+    {q:"What is necrosis and what are the types?", a:"Necrosis: pathological, uncontrolled cell death causing inflammation.\nTypes:\nCoagulative: most common; proteins denature; ischaemia (e.g., MI)\nLiquefactive: tissue digested into liquid; bacterial infection/brain infarct\nCaseous: cheese-like; tuberculosis\nGangrene: necrosis of large tissue areas (wet/dry/gas)\nFat necrosis: adipose tissue (pancreatitis)"},
+    {q:"What is the difference between primary and secondary prevention?", a:"Primary prevention: prevent disease before it occurs — e.g., vaccination, not smoking, healthy diet\nSecondary prevention: detect and treat disease early before symptoms — e.g., screening (mammograms, blood pressure checks)\nTertiary prevention: reduce complications and disability in established disease — e.g., cardiac rehabilitation after MI"},
+    {q:"What is a risk factor and give examples of modifiable vs non-modifiable ones?", a:"A risk factor is any characteristic that increases the likelihood of developing a disease.\nModifiable: smoking, obesity, physical inactivity, poor diet, alcohol, high BP, high cholesterol\nNon-modifiable: age, sex, genetic makeup, family history, race/ethnicity\nChanging modifiable risk factors is the focus of health promotion."},
+    {q:"What is the difference between acute, subacute, and chronic disease?", a:"Acute: sudden onset, intense symptoms, short duration (days to weeks) — e.g., pneumonia, appendicitis\nSubacute: moderate onset, intermediate duration (weeks to months)\nChronic: slow onset, prolonged duration (months to years) — e.g., diabetes, COPD, RA\nExacerbation: sudden worsening of a chronic condition"},
+    {q:"What is shock and what are the main types?", a:"Shock: circulatory failure — inadequate oxygen delivery to tissues.\nTypes:\nHypovolaemic: blood/fluid loss (haemorrhage, dehydration)\nCardiogenic: pump failure (MI, heart failure)\nDistributive: vasodilation and maldistribution of blood flow\n  - Septic (most common distributive): bacteria in blood\n  - Anaphylactic: severe allergic reaction\n  - Neurogenic: spinal cord injury"},
+    {q:"What is hypoxia and its types?", a:"Hypoxia: inadequate oxygen at the cellular level.\nHypoxaemic (arterial): low blood oxygen — altitude, lung disease\nAnaemic: decreased oxygen-carrying capacity (low Hgb)\nIschaemic/stagnant: poor circulation — heart failure, shock\nHistotoxic: cells cannot use oxygen — cyanide poisoning\nAll types lead to impaired cellular metabolism and, if severe, cell death."},
+  ],
+  cardiovascular: [
+    {q:"What is atherosclerosis and how does it develop?", a:"Atherosclerosis: progressive narrowing of arteries from plaque build-up (lipids, foam cells, fibrous tissue) in the vessel wall.\nProcess: endothelial injury → LDL infiltration → foam cell formation → fibrous plaque → calcification → vessel narrowing → ischaemia or thrombosis.\nRisk factors: smoking, hypertension, high LDL, diabetes, obesity, family history."},
+    {q:"What is hypertension, how is it classified, and what are its complications?", a:"Hypertension: persistent elevation of blood pressure.\nNormal: <120/80; Pre-hypertension: 120–139/80–89; Stage 1: 140–159/90–99; Stage 2: ≥160/≥100\nComplications: left ventricular hypertrophy, heart failure, stroke (haemorrhagic), renal failure, retinopathy, aortic aneurysm\nAlso called 'the silent killer' — often asymptomatic."},
+    {q:"What is myocardial infarction (MI) and how does it occur?", a:"MI (heart attack): death of myocardial tissue due to prolonged ischaemia — most commonly from rupture of an atherosclerotic plaque → coronary artery thrombosis.\nSigns: severe crushing chest pain (often radiates to arm, jaw, back), diaphoresis, nausea, SOB, sense of doom.\nTreatment: reperfusion — thrombolytics (tPA), PCI/angioplasty, aspirin, oxygen."},
+    {q:"What is heart failure and what are the types?", a:"Heart failure: the heart cannot pump enough blood to meet the body's needs.\nLeft-sided failure: pulmonary congestion (fluid in lungs) — SOB, orthopnoea, pink frothy sputum\nRight-sided failure: systemic venous congestion — peripheral oedema, JVD, hepatomegaly\nCongestive heart failure (CHF): both sides fail; biventricular failure"},
+    {q:"What are the main cardiac arrhythmias and their significance?", a:"Atrial fibrillation (AF): irregular rapid atrial activity — risk of stroke (atrial thrombus)\nVentricular fibrillation (VF): chaotic ventricular activity — cardiac arrest; fatal without immediate defibrillation\nVentricular tachycardia (VT): rapid ventricular rate — may degenerate to VF\nHeart block: delayed/absent impulse conduction — bradycardia; may need pacemaker\nPremature beats (PAC/PVC): often benign"},
+    {q:"What is the difference between arteriosclerosis and atherosclerosis?", a:"Arteriosclerosis: general hardening and loss of elasticity of arteries — broad term for any arterial wall thickening/stiffening (common with ageing)\nAtherosclerosis: a specific type of arteriosclerosis involving lipid-rich plaque deposits in the intima (inner layer) of medium and large arteries — the major cause of heart attack and stroke"},
+    {q:"What are the signs and pathophysiology of left vs right heart failure?", a:"Left heart failure: left ventricle cannot pump blood forward → backs up into pulmonary circulation → pulmonary oedema\nSigns: dyspnoea, orthopnoea, paroxysmal nocturnal dyspnoea, pink frothy sputum, crackles\nRight heart failure: right ventricle fails → backs up into systemic circulation\nSigns: peripheral oedema (ankles, legs), JVD, hepatomegaly, ascites"},
+    {q:"What is a stroke (CVA) and what are the two major types?", a:"Stroke (cerebrovascular accident): disruption of blood supply to brain causing neurological deficit.\nIschaemic (87%): blocked artery — thrombotic or embolic. Treat with tPA if within 4.5 hours.\nHaemorrhagic (13%): ruptured vessel — intracerebral or subarachnoid haemorrhage. tPA contraindicated.\nTIA: transient ischaemic attack — stroke symptoms <24 hours, no permanent damage; major warning sign."},
+    {q:"What is peripheral arterial disease (PAD)?", a:"PAD: atherosclerosis of peripheral arteries (usually lower limbs) reducing blood flow.\nSigns: intermittent claudication (calf pain with walking, relieved by rest), decreased/absent pulses, cool pale limb, non-healing wounds.\nSevere: rest pain, gangrene.\nRisk factors: smoking (most important), diabetes, hypertension, high cholesterol."},
+    {q:"What are congenital heart defects?", a:"Structural abnormalities of the heart present at birth. Examples:\nVSD (ventricular septal defect): hole between ventricles — most common congenital defect\nASD: hole between atria\nPDA (patent ductus arteriosus): foetal vessel between aorta and pulmonary artery fails to close\nTetralogy of Fallot: 4 defects including VSD and pulmonary stenosis — cyanotic ('blue baby')"},
+    {q:"What is anaemia and what are common types?", a:"Anaemia: reduced capacity of blood to carry oxygen — low Hgb, Hct, or RBC count.\nIron-deficiency: most common; microcytic, hypochromic; poor diet, blood loss\nVitamin B12/folate deficiency: macrocytic anaemia; neurological symptoms in B12 deficiency\nHaemolytic: RBC destruction (sickle cell, G6PD, autoimmune)\nAplastic: bone marrow failure\nAnaemia of chronic disease: reduced iron utilisation"},
+    {q:"What is deep vein thrombosis (DVT) and what is the danger?", a:"DVT: blood clot in a deep vein, usually the lower leg or thigh.\nRisk factors: prolonged immobility, surgery, dehydration, oral contraceptives, cancer, thrombophilia.\nSigns: calf pain, warmth, swelling, redness.\nDanger: the clot can break off and travel to the lungs → pulmonary embolism (PE) — potentially fatal.\nTreatment: anticoagulation (heparin, warfarin, DOACs)."},
+    {q:"What is shock and how does the body compensate initially?", a:"Shock: circulatory failure → inadequate tissue perfusion and oxygenation.\nInitial compensatory mechanisms (sympathetic response): tachycardia, vasoconstriction (↑ BP), cool pale skin, diaphoresis, ↑ respirations.\nDecompensation: mechanisms fail → hypotension, altered mental status, organ dysfunction.\nTreatment: restore perfusion — IV fluids, vasopressors, treat underlying cause."},
+    {q:"What is the difference between systolic and diastolic heart failure?", a:"Systolic (HFrEF — Heart Failure with reduced Ejection Fraction): ventricle cannot contract normally → reduced ejection fraction (<40%); pumps too little blood forward\nDiastolic (HFpEF — Heart Failure with preserved Ejection Fraction): ventricle cannot relax/fill normally → ejection fraction preserved; fills too little blood\nBoth cause fatigue, dyspnoea, and oedema via different mechanisms."},
+  ],
+  nervous_musculo: [
+    {q:"What is a traumatic brain injury (TBI) and how is severity classified?", a:"TBI: brain injury from external force. Severity by Glasgow Coma Scale:\nMild (concussion): GCS 13–15, brief LOC if any\nModerate: GCS 9–12, LOC 30 min–24 hrs\nSevere: GCS ≤8, prolonged coma\nComplications: oedema, intracranial haemorrhage, herniation, long-term cognitive/motor deficits"},
+    {q:"What is epilepsy and what are the major seizure types?", a:"Epilepsy: recurrent unprovoked seizures from abnormal neuronal activity.\nFocal (partial): one brain region; may or may not impair consciousness\nGeneralised — affect both hemispheres:\n• Tonic-clonic (grand mal): LOC + rhythmic jerking\n• Absence (petit mal): brief staring spells, no convulsion\n• Tonic, clonic, myoclonic, atonic (drop attacks)\nTreatment: anticonvulsant medications"},
+    {q:"What is multiple sclerosis (MS)?", a:"Autoimmune demyelination of the CNS — immune system attacks myelin sheaths, slowing or blocking nerve conduction.\nTypes: relapsing-remitting (most common), primary progressive, secondary progressive.\nSigns: fatigue, optic neuritis, muscle weakness, spasticity, balance problems, bladder dysfunction, Lhermitte's sign (electric shock with neck flexion).\nTreatment: disease-modifying therapies; symptom management."},
+    {q:"What is Parkinson's disease and what causes it?", a:"Parkinson's disease: progressive degeneration of dopaminergic neurons in the substantia nigra → dopamine deficiency → impaired motor control.\nCardinal signs (TRAP): Tremor at rest (pill-rolling), Rigidity (cogwheel), Akinesia/bradykinesia, Postural instability.\nAlso: shuffling gait, freezing, masked facies, hypophonia.\nTreatment: levodopa/carbidopa (dopamine replacement); symptomatic."},
+    {q:"What is Alzheimer's disease?", a:"The most common form of dementia — progressive neurodegenerative disorder causing memory loss, cognitive decline, and behavioural changes. Pathology: accumulation of amyloid plaques (between neurons) and neurofibrillary tangles (tau protein inside neurons) → neuronal death.\nRisk: age (most important), APOE-e4 gene, family history.\nTreatment: cholinesterase inhibitors (donepezil) — slow progression, not curative."},
+    {q:"What is a spinal cord injury (SCI) and what function is lost?", a:"Damage to the spinal cord disrupts motor and sensory pathways below the injury level.\nCervical injury: quadriplegia/tetraplegia — arms, legs, and trunk affected\nThoracic/lumbar injury: paraplegia — legs only\nComplete injury: no motor or sensory function below the level\nIncomplete: some function preserved\nAutonomic dysfunction: BP instability, temperature regulation, bowel/bladder control lost"},
+    {q:"What is amyotrophic lateral sclerosis (ALS)?", a:"ALS (Lou Gehrig's disease): progressive degeneration of both upper and lower motor neurons → muscle weakness, atrophy, spasticity.\nProgression: starts in limbs or speech/swallowing, eventually paralysis of respiratory muscles.\nFatally progressive — median survival 2–5 years after diagnosis.\nSensory and cognitive function usually preserved.\nTreatment: riluzole (slows progression); supportive care."},
+    {q:"What is osteoporosis and what causes it?", a:"Osteoporosis: decreased bone mineral density → increased fracture risk, especially hip, vertebrae, and wrist.\nCauses: oestrogen deficiency (post-menopause), age, low calcium/vitamin D, prolonged steroid use, physical inactivity.\nDiagnosis: DEXA scan (bone density measurement); T-score ≤ -2.5 = osteoporosis.\nTreatment: calcium + vitamin D supplements, bisphosphonates (alendronate), weight-bearing exercise."},
+    {q:"What is rheumatoid arthritis (RA)?", a:"RA: chronic autoimmune disease — immune attack on the synovial membrane of joints → pannus formation, joint destruction.\nCharacteristics: symmetric joint involvement (MCP, PIP joints of hands), morning stiffness >1 hour, systemic symptoms (fatigue, fever, weight loss), rheumatoid nodules, positive RF and anti-CCP antibodies.\nTreatment: DMARDs (methotrexate first-line), biologics (TNF inhibitors)."},
+    {q:"What is osteoarthritis (OA) and how does it differ from RA?", a:"OA: degenerative wear and tear of articular cartilage — most common joint disease.\nCharacteristics: asymmetric joint involvement, worst with activity (improves with rest), Heberden's nodes (DIP joints), Bouchard's nodes (PIP joints), no systemic inflammation, X-ray shows joint space narrowing and osteophytes.\nRA vs OA: RA = autoimmune, symmetric, systemic; OA = degenerative, asymmetric, local."},
+    {q:"What is a herniated (slipped) disc?", a:"A vertebral disc's nucleus pulposus extrudes through the annulus fibrosus → compresses adjacent nerve root.\nMost common levels: L4-L5, L5-S1 (lower back) and C5-C6, C6-C7 (neck).\nSigns: radiating pain (sciatica for lumbar), numbness, weakness, paresthesia in the affected dermatome.\nTreatment: conservative (rest, NSAIDs, physical therapy); surgical if severe or not improving."},
+    {q:"What is fibromyalgia?", a:"Fibromyalgia: chronic widespread musculoskeletal pain syndrome without an inflammatory or structural cause.\nCharacteristics: diffuse pain (≥3 months), tender points, fatigue, sleep disturbance, cognitive difficulties ('fibro fog'), heightened pain sensitivity (central sensitisation).\nDiagnosis: clinical (no diagnostic test); based on widespread pain index and symptom severity score.\nTreatment: exercise, cognitive behavioural therapy, duloxetine, pregabalin."},
+    {q:"What are the major types of fractures?", a:"Closed (simple): bone broken but skin intact\nOpen (compound): bone breaks through skin — infection risk\nGreenstick: incomplete fracture (one side bends) — common in children\nComminuted: bone shatters into multiple fragments\nStress fracture: small crack from repetitive force\nPathological fracture: fracture through diseased bone (osteoporosis, cancer)\nColles' fracture: distal radius (wrist) from fall on outstretched hand"},
+    {q:"What is gout?", a:"Gout: deposition of monosodium urate crystals in joints from hyperuricaemia → acute severe inflammatory arthritis.\nTypically affects the first metatarsophalangeal joint (big toe — podagra), but also ankle, knee, wrist.\nSigns: sudden onset intense pain, redness, warmth, swelling.\nRisk factors: high purine diet (red meat, seafood), alcohol (especially beer), diuretics, obesity.\nTreatment: NSAIDs/colchicine (acute attack); allopurinol (prevent recurrence)."},
+  ],
+  endocrine_mental: [
+    {q:"What is type 1 vs type 2 diabetes mellitus?", a:"Type 1 DM: autoimmune destruction of pancreatic beta cells → absolute insulin deficiency → insulin-dependent for life. Ketoacidosis-prone. Usually younger onset.\nType 2 DM: insulin resistance (cells don't respond) + relative insulin deficiency → hyperglycaemia. Managed with diet, oral medications (metformin), and sometimes insulin. Associated with obesity."},
+    {q:"What is diabetic ketoacidosis (DKA)?", a:"DKA: life-threatening complication of Type 1 diabetes — insulin deficiency → hyperglycaemia + fat breakdown → ketone production → metabolic acidosis.\nTriad: hyperglycaemia + ketonaemia + metabolic acidosis\nSigns: Kussmaul respirations (deep rapid breathing to blow off CO₂), fruity/acetone breath, polyuria, polydipsia, nausea/vomiting, altered consciousness.\nTreatment: IV fluids, insulin infusion, electrolyte replacement."},
+    {q:"What is hypothyroidism and hyperthyroidism?", a:"Hypothyroidism: insufficient thyroid hormone → slows metabolism.\nSigns: fatigue, weight gain, cold intolerance, constipation, dry skin, bradycardia, depression.\nMost common cause: Hashimoto's thyroiditis (autoimmune).\n\nHyperthyroidism: excess thyroid hormone → speeds up metabolism.\nSigns: weight loss, heat intolerance, tachycardia, tremor, anxiety, exophthalmos (in Grave's disease).\nMost common cause: Grave's disease (autoimmune TSH receptor stimulation)."},
+    {q:"What is Cushing's syndrome?", a:"Cushing's syndrome: excess cortisol exposure — most commonly from prolonged corticosteroid medication; or from cortisol-secreting adrenal tumour or ACTH-producing pituitary tumour (Cushing's disease).\nSigns: central obesity (moon face, buffalo hump), purple striae, thin skin, muscle wasting, hypertension, hyperglycaemia, osteoporosis, immunosuppression."},
+    {q:"What is Addison's disease?", a:"Addison's disease: primary adrenal insufficiency — destruction of the adrenal cortex → deficiency of cortisol and aldosterone.\nCauses: autoimmune (most common), tuberculosis, metastatic cancer.\nSigns: fatigue, weight loss, hypotension, hyponatraemia, hyperkalaemia, hyperpigmentation of skin (due to elevated ACTH).\nAddisonian crisis: life-threatening — precipitated by stress or illness; treat with IV hydrocortisone and fluids."},
+    {q:"What is schizophrenia?", a:"A serious psychotic disorder characterised by:\nPositive symptoms: hallucinations (most often auditory), delusions (fixed false beliefs), disorganised thinking/speech\nNegative symptoms: flat affect, alogia (poverty of speech), avolition (lack of motivation), anhedonia (inability to feel pleasure)\nCognitive symptoms: impaired memory and executive function\nTreatment: antipsychotics (dopamine antagonists); psychosocial rehabilitation."},
+    {q:"What is major depressive disorder?", a:"MDD: persistent depressed mood and/or loss of interest/pleasure (anhedonia) lasting ≥2 weeks + ≥4 other symptoms:\nWeight/appetite change, sleep disturbance (insomnia or hypersomnia), psychomotor agitation or retardation, fatigue, feelings of worthlessness/guilt, difficulty concentrating, recurrent thoughts of death or suicidal ideation.\nTreatment: SSRIs (first-line), CBT, combined pharmacotherapy + psychotherapy."},
+    {q:"What is bipolar disorder?", a:"Bipolar disorder: cyclical mood disorder alternating between manic/hypomanic episodes and depressive episodes.\nMania: elevated or irritable mood, ↓ sleep need, grandiosity, racing thoughts, increased goal-directed activity, reckless behaviour, pressured speech.\nBipolar I: full manic episode; Bipolar II: hypomanic (less severe) + depressive episodes.\nTreatment: mood stabilisers (lithium, valproate), atypical antipsychotics."},
+    {q:"What are anxiety disorders?", a:"A group of disorders characterised by excessive, persistent fear or worry impairing daily function.\nGeneralised anxiety disorder (GAD): excessive worry about multiple areas\nPanic disorder: recurrent unexpected panic attacks (intense fear, palpitations, SOB, chest pain)\nSocial anxiety disorder: fear of social situations and being judged\nSpecific phobia: irrational fear of specific object/situation\nObsessive-compulsive disorder (OCD): intrusive obsessions + compulsive rituals\nTreatment: SSRIs/SNRIs, CBT, exposure therapy."},
+    {q:"What is post-traumatic stress disorder (PTSD)?", a:"PTSD: develops after exposure to actual or threatened death, serious injury, or sexual violence.\nFour symptom clusters:\n1. Intrusion: flashbacks, nightmares, distressing memories\n2. Avoidance: of trauma-related thoughts, places, people\n3. Negative mood/cognition: guilt, shame, detachment\n4. Hyperarousal: hypervigilance, exaggerated startle, sleep disturbance, irritability\nTreatment: trauma-focused CBT, EMDR, SSRIs."},
+    {q:"What is the DSM-5 and how is it used?", a:"DSM-5 (Diagnostic and Statistical Manual of Mental Disorders, 5th edition): published by the American Psychiatric Association — the standard classification system for mental health disorders in North America.\nProvides: diagnostic criteria for each disorder, symptom duration and severity thresholds, clinical descriptors.\nUsed by: psychiatrists, psychologists, clinical social workers, and other mental health professionals for diagnosis, treatment planning, and insurance purposes."},
+    {q:"What is attention deficit hyperactivity disorder (ADHD)?", a:"ADHD: neurodevelopmental disorder characterised by:\nInattention: difficulty focusing, easily distracted, forgetful, disorganised\nHyperactivity-impulsivity: excessive movement, talking, inability to wait turn, acting without thinking\nMust be present before age 12, in ≥2 settings, and impair function.\nPredominantly inattentive type, hyperactive-impulsive type, or combined type.\nTreatment: stimulant medications (methylphenidate, amphetamine salts), CBT, behavioural strategies."},
+  ],
+};
+
+// ── MEDICAL MATH ─────────────────────────────────────────────────────────
+_hosaDecks.mm = {
+  math_essentials: [
+    {q:"What is the order of operations (PEMDAS/BEDMAS)?", a:"Parentheses/Brackets → Exponents/Orders → Multiplication and Division (left to right) → Addition and Subtraction (left to right)\nExample: 2 + 3 × 4 = 2 + 12 = 14 (NOT 20)"},
+    {q:"What are Roman numerals and how are they used in medicine?", a:"I=1, V=5, X=10, L=50, C=100, D=500, M=1000\nMedical use: prescription dosing (e.g., 'gr ss' = half grain); clocks; surgical instruments\nRules: smaller value before larger = subtract (IV=4, IX=9); smaller after larger = add (VI=6, XI=11)"},
+    {q:"How do you convert between fractions, decimals, and percentages?", a:"Fraction → decimal: divide numerator by denominator (e.g., 3/4 = 0.75)\nDecimal → percent: multiply by 100 (e.g., 0.75 = 75%)\nPercent → decimal: divide by 100 (e.g., 25% = 0.25)\nPercent → fraction: put over 100 and simplify (e.g., 25% = 25/100 = 1/4)"},
+    {q:"How do you calculate a percentage of a value?", a:"Formula: Part = (Percent ÷ 100) × Whole\nExample: What is 30% of 150?\n30 ÷ 100 = 0.30; 0.30 × 150 = 45\nFinding percent: (Part ÷ Whole) × 100\nExample: 45 is what % of 150? (45 ÷ 150) × 100 = 30%"},
+    {q:"What are the measures of central tendency?", a:"Mean: arithmetic average — sum all values ÷ number of values\nMedian: middle value when data is arranged in order (average of two middle values if even number)\nMode: most frequently occurring value\nRange: highest value − lowest value\nIn medicine: mean temperature, median hospital stay"},
+    {q:"What is standard deviation and what does it tell us?", a:"Standard deviation (SD): measures how spread out values are around the mean.\nSmall SD: values clustered close to the mean\nLarge SD: values spread wide from the mean\n68% of data falls within 1 SD; 95% within 2 SD; 99.7% within 3 SD (empirical rule — normal distribution)\nUsed to define normal laboratory reference ranges."},
+    {q:"What is the difference between descriptive and inferential statistics?", a:"Descriptive statistics: summarise and describe the collected data — mean, median, mode, standard deviation, frequency tables, graphs. Tells you about YOUR sample.\nInferential statistics: use sample data to make inferences (predictions) about a larger population — t-tests, ANOVA, chi-square, p-values, confidence intervals."},
+    {q:"How do you read and interpret a frequency table?", a:"A frequency table shows each value or category alongside: frequency (how many times it occurs), relative frequency (proportion of total), and cumulative frequency (running total).\nPercentile rank: the percentage of scores that fall at or below a given score.\nExample: if your score is at the 80th percentile, 80% of people scored the same or lower."},
+    {q:"What is the difference between nominal, ordinal, interval, and ratio data?", a:"Nominal: categories with no order — e.g., blood type (A, B, AB, O), eye colour\nOrdinal: ordered categories, unequal intervals — e.g., pain scale 1–10, satisfaction rating\nInterval: ordered, equal intervals, no true zero — e.g., temperature in °C or °F\nRatio: ordered, equal intervals, true zero exists — e.g., weight, height, blood pressure, age"},
+    {q:"What is military time and how is it converted?", a:"Military time uses a 24-hour clock. No AM/PM. Midnight = 0000; Noon = 1200.\nConversion — PM times: add 12 to the hour\n1:00 PM → 1 + 12 = 1300; 3:30 PM → 1530; 11:45 PM → 2345\nConversion — AM times: same as standard (0800 = 8:00 AM)\nUsed in medical documentation for accuracy and to prevent AM/PM errors."},
+    {q:"How do you round numbers correctly in medical math?", a:"If the digit to the right of the rounding place is 5 or greater → round UP\nIf less than 5 → round DOWN (keep the digit the same)\nExample: 2.47 rounded to tenths = 2.5\nExample: 2.44 rounded to tenths = 2.4\nIn drug dosages: always round appropriately — rounding errors can cause harm."},
+    {q:"How do you calculate intake and output (I&O) in patients?", a:"Intake: all fluids taken in — oral (water, juice, Jello, ice cream), IV fluids, medications, tube feedings (converted to mL)\nOutput: all fluids leaving — urine, drainage (surgical, nasogastric), emesis, diarrhoea\nTarget: usually balanced intake and output\n1 oz = 30 mL; 1 cup = 240 mL; 1 L = 1000 mL"},
+  ],
+  measurement: [
+    {q:"What are the three measurement systems used in healthcare?", a:"1. Metric system: the standard in healthcare — units of 10\n2. Apothecaries' system: older system (grains, drams, ounces, minims) — rarely used\n3. Household system: cups, tablespoons, teaspoons — used for patient instructions at home\nHealthcare providers must convert between systems for accurate dosing."},
+    {q:"What are the basic metric units and their abbreviations?", a:"Length: metre (m), centimetre (cm), millimetre (mm)\nWeight: kilogram (kg), gram (g), milligram (mg), microgram (mcg/µg)\nVolume: litre (L), millilitre (mL) — note: 1 mL = 1 cc (cubic centimetre)\nConversions: 1 kg = 1000 g; 1 g = 1000 mg; 1 mg = 1000 mcg; 1 L = 1000 mL"},
+    {q:"What are key metric to household/imperial conversions?", a:"Weight: 1 kg = 2.2 lb; 1 lb = 453.6 g\nVolume: 1 L = 33.8 fl oz; 1 fl oz = 30 mL; 1 tsp = 5 mL; 1 tbsp = 15 mL; 1 cup = 240 mL\nLength: 1 inch = 2.54 cm; 1 cm = 0.394 inch\nPaediatric dosing: always convert patient weight from lbs to kg first (divide by 2.2)"},
+    {q:"How do you convert between Fahrenheit and Celsius?", a:"Celsius to Fahrenheit: °F = (°C × 9/5) + 32\nFahrenheit to Celsius: °C = (°F − 32) × 5/9\nKey reference points:\n0°C = 32°F (freezing)\n37°C = 98.6°F (normal body temperature)\n100°C = 212°F (boiling)\n38°C = 100.4°F (fever threshold)"},
+    {q:"What is dimensional analysis (factor-label method)?", a:"A method to convert between units by multiplying by conversion fractions so unwanted units cancel.\nExample: Convert 180 lb to kg:\n180 lb × (1 kg / 2.2 lb) = 81.8 kg\nThe 'lb' units cancel, leaving only 'kg'.\nAlways set up the fraction so the unit you want to CANCEL is in the denominator of the conversion factor."},
+    {q:"How do you convert grains to milligrams?", a:"The apothecaries' grain (gr) is used for some medications (e.g., aspirin, codeine, phenobarbital):\n1 grain (gr) = 60–65 mg (use 60 mg for calculations unless told otherwise)\n½ grain = 30 mg; ¼ grain = 15 mg\nExample: gr 5 of aspirin = 5 × 60 = 300 mg"},
+    {q:"What is specific gravity in urine and how is it measured?", a:"Specific gravity (SG): the density of urine relative to water (SG of water = 1.000).\nNormal urine SG: 1.003–1.030\nHigh SG (concentrated urine): dehydration, SIADH, renal impairment\nLow SG (dilute urine): excess fluid intake, diabetes insipidus\nMeasured with: refractometer or urine dipstick reagent strip"},
+    {q:"How do you convert between standard time and military time?", a:"AM hours (midnight to 12:59 PM): write with 4 digits, midnight = 0000, 6 AM = 0600, 12:00 PM = 1200\nPM hours: add 12 to the hours\n1:00 PM = 1300; 5:30 PM = 1730; 10:45 PM = 2245; 11:59 PM = 2359\nAlways use 4 digits in military time notation."},
+    {q:"What are normal laboratory reference ranges for key values?", a:"Blood glucose: 3.9–5.6 mmol/L (70–100 mg/dL) fasting\nSodium: 135–145 mmol/L; Potassium: 3.5–5.0 mmol/L\nCreatinine: 60–110 µmol/L (male); 45–90 µmol/L (female)\nHaemoglobin: male 135–175 g/L; female 120–155 g/L\npH: arterial blood 7.35–7.45; pO₂: 80–100 mmHg"},
+    {q:"How do you read a basic graph or data table in a medical context?", a:"Identify: title (what is being measured), X-axis (usually time or category), Y-axis (measured value), legend/key.\nLine graph: shows trends over time — look for direction (rising/falling) and rate of change\nBar graph: compares categories\nPie chart: shows proportions of a whole\nTable: rows and columns — identify the header row and find the intersection of interest"},
+    {q:"What is a percentile rank and how is it used clinically?", a:"A percentile rank tells you what percentage of a reference population scored at or below a given value.\nClinical use: growth charts for children — a child at the 25th percentile for weight is heavier than 25% of same-age/sex peers.\nABNORMAL: below 5th or above 95th percentile often warrants investigation.\nAlso used for interpreting standardised test scores."},
+    {q:"What is the normal distribution and the empirical rule?", a:"In a normal distribution (bell curve), data is symmetrically distributed around the mean.\nEmpirical rule (68-95-99.7 rule):\n• 68% of data falls within 1 standard deviation of the mean\n• 95% falls within 2 standard deviations\n• 99.7% falls within 3 standard deviations\nUsed to interpret lab values and define normal reference ranges."},
+    {q:"How do you calculate a patient's BMI?", a:"BMI = weight (kg) ÷ height² (m²)\nExample: weight 70 kg, height 1.75 m → BMI = 70 ÷ (1.75 × 1.75) = 70 ÷ 3.0625 = 22.9\nClassification: Underweight <18.5; Normal 18.5–24.9; Overweight 25–29.9; Obese ≥30\nUsing imperial: BMI = [weight (lb) ÷ height² (in)] × 703"},
+  ],
+  drug_dosages: [
+    {q:"What are the 6 rights of medication administration?", a:"1. Right patient — verify name and date of birth\n2. Right drug — confirm medication name (generic and trade)\n3. Right dose — calculate accurately\n4. Right route — PO, IV, IM, SL, etc.\n5. Right time — correct frequency and schedule\n6. Right documentation — record accurately after administration"},
+    {q:"What is the desired dose formula?", a:"Desired dose formula: D/H × Q = Amount to administer\nD = desired dose (what the order says)\nH = dose on hand (what you have)\nQ = quantity per unit (e.g., mL, tablet)\nExample: Order: 500 mg. On hand: 250 mg/tablet. → 500/250 × 1 = 2 tablets"},
+    {q:"How do you calculate a weight-based drug dose?", a:"Weight-based dosing: mg/kg or mcg/kg body weight\nStep 1: Convert patient weight to kg if in lbs (÷ 2.2)\nStep 2: Multiply by the ordered dose in mg/kg\nStep 3: Calculate volume to administer\nExample: Order 5 mg/kg, patient 60 kg, drug 100 mg/mL\n→ 5 × 60 = 300 mg; 300 ÷ 100 = 3 mL"},
+    {q:"How do you calculate IV flow rate in drops per minute (gtts/min)?", a:"Formula: gtts/min = (volume in mL × drop factor) ÷ time in minutes\nDrop factors (tubing sets): macrodrip = 10, 15, or 20 gtts/mL; microdrip = 60 gtts/mL\nExample: 1000 mL over 8 hours via 15 gtt/mL tubing:\nTime = 8 × 60 = 480 min\n(1000 × 15) ÷ 480 = 15,000 ÷ 480 = 31.25 ≈ 31 gtts/min"},
+    {q:"How do you calculate IV flow rate in mL per hour (for infusion pump)?", a:"Formula: mL/hr = total volume (mL) ÷ total time (hours)\nExample: 500 mL over 4 hours → 500 ÷ 4 = 125 mL/hr\nFor weight-based infusions: mL/hr = (dose in mcg/kg/min × weight in kg × 60) ÷ concentration in mcg/mL"},
+    {q:"What is reconstitution and how do you calculate it?", a:"Reconstitution: adding a diluent (sterile water or saline) to a powdered drug to make a liquid solution.\nFind: final concentration = total drug (mg) ÷ total volume after reconstitution (mL)\nThen use desired dose formula to calculate how many mL to draw up.\nAlways read the package insert or label for the specific diluent type, amount, and resulting concentration."},
+    {q:"How do you interpret a medication label?", a:"A medication label contains:\n• Generic and trade name\n• Dose per unit (strength) — e.g., 500 mg/tablet or 250 mg/5 mL\n• Dosage form (tablet, capsule, liquid)\n• Route of administration\n• Total quantity in container\n• Storage instructions\n• Expiry date\n• Manufacturer name and lot number"},
+    {q:"What are paediatric dosing considerations?", a:"Always calculate based on body weight (mg/kg) — never use adult doses for children.\nYoung's Rule (by age): child dose = (age in years ÷ (age + 12)) × adult dose\nClark's Rule (by weight): child dose = (weight in lbs ÷ 150) × adult dose\nBSA method (most accurate for chemotherapy): dose = BSA (m²) × recommended dose/m²\nAlways double-check paediatric calculations; errors have larger consequences."},
+    {q:"What is heparin and how is it dosed?", a:"Heparin: IV anticoagulant — prevents clot formation and extension.\nDosing: weight-based protocols (units/kg bolus + units/kg/hour infusion)\nUnits — NOT mg; confusion between 'units' and '0' has caused fatal errors\nMonitored by: APTT (activated partial thromboplastin time) — target usually 60–100 seconds (1.5–2.5× normal)\nAntidote: protamine sulphate"},
+    {q:"What is the difference between a scored tablet and an enteric-coated tablet?", a:"Scored tablet: has an indented line — can be safely cut in half for dose adjustment\nEnteric-coated tablet: has a special coating that prevents dissolution in the stomach — must NOT be cut, crushed, or chewed (destroys coating, allowing stomach acid to destroy the drug or damage the stomach lining)\nExtended-release (ER/XR/SR): also must NEVER be crushed"},
+    {q:"What are the types of syringes and when are each used?", a:"Standard syringe: 1–60 mL; various sizes for IM, SC, and IV medications\nTubercutin (TB) syringe: 1 mL; calibrated in 0.01 mL increments; for intradermal skin tests and small-volume medications\nInsulin syringe: calibrated in units (not mL); U-100 = 100 units/mL; U-40 = 40 units/mL (veterinary)\nSafety syringes: needle retracts after use to prevent needlestick injuries"},
+    {q:"What is dimensional analysis in drug dosage calculations?", a:"Set up a series of fractions where unwanted units cancel out, leaving only the desired unit.\nExample: Order 750 mg; on hand 250 mg/5 mL; how many mL?\n750 mg × (5 mL / 250 mg) = 3,750 mL-mg / 250 mg = 15 mL\nThe 'mg' units cancel, leaving only 'mL'.\nAlways include units in the setup — catching errors before they happen."},
+  ],
+  solutions: [
+    {q:"What is the difference between a solute, solvent, and solution?", a:"Solute: the substance being dissolved (solid, liquid, or gas) — e.g., a drug, salt, or sugar\nSolvent (diluent): the liquid that dissolves the solute — e.g., sterile water, normal saline\nSolution: the mixture of solute + solvent\nConcentration = amount of solute in a given amount of solution"},
+    {q:"How do you calculate solution concentration as a percent?", a:"Percent weight per volume (w/v): grams of solute per 100 mL of solution\nExample: 5% dextrose (D5W) = 5 g glucose per 100 mL\nPercent volume per volume (v/v): mL of solute per 100 mL of solution\nExample: 70% isopropyl alcohol = 70 mL alcohol per 100 mL solution\n1% solution = 1 g per 100 mL = 10 mg per mL"},
+    {q:"What is normal saline (0.9% NaCl) and how much solute is in each litre?", a:"Normal saline (NS or 0.9% NaCl) = 0.9 g NaCl per 100 mL = 9 g NaCl per 1000 mL (1 L)\nCommon IV fluid concentrations:\n0.9% NaCl (NS): isotonic — matches blood osmolality\n0.45% NaCl (½ NS): hypotonic\n3% NaCl: hypertonic — used for severe hyponatraemia\nD5W: 5% dextrose — 50 g glucose per litre"},
+    {q:"How do you prepare a dilution?", a:"Dilution formula: C₁V₁ = C₂V₂\nC₁ = concentration of stock solution; V₁ = volume of stock needed\nC₂ = desired concentration; V₂ = final total volume\nExample: Prepare 100 mL of a 10% solution from a 50% stock:\nV₁ = (C₂ × V₂) ÷ C₁ = (10 × 100) ÷ 50 = 20 mL of stock + 80 mL diluent = 100 mL total"},
+    {q:"What is a ratio solution and how is it expressed?", a:"A ratio solution expresses the amount of drug (grams) in a volume (mL) as a ratio.\nExample: 1:1000 = 1 g per 1000 mL = 1 mg per mL\n1:10,000 = 1 g per 10,000 mL = 0.1 mg per mL\nEpinephrine 1:1000 (IM anaphylaxis) vs 1:10,000 (IV cardiac arrest)\nClinically important: wrong ratio can cause 10× dosing error."},
+    {q:"What is the relationship between concentration and dose volume?", a:"Volume to give = desired dose ÷ concentration\nExample: Order 250 mg; stock 500 mg/10 mL (50 mg/mL)\nVolume = 250 ÷ 50 = 5 mL\nNote: as concentration increases, volume to administer decreases.\nWhen reconstituting: adding more diluent = lower concentration = give more mL for the same dose."},
+    {q:"What is an isotonic, hypotonic, and hypertonic IV solution?", a:"Isotonic: same osmolality as blood (~275–295 mOsm/L) — no net fluid movement into/out of cells\nExamples: 0.9% NaCl, Lactated Ringer's, D5W (metabolised quickly, then effectively hypotonic)\nHypotonic (<275 mOsm/L): water moves into cells → cell swelling\nExample: 0.45% NaCl\nHypertonic (>295 mOsm/L): water moves out of cells → cell shrinkage\nExamples: 3% NaCl, D10W"},
+    {q:"How do you calculate the amount of drug in a given volume?", a:"Amount = concentration × volume\nIf concentration is given as %, convert first:\n1% = 10 mg/mL\nExample: How many mg of drug in 250 mL of a 2% solution?\nConcentration = 2% = 20 mg/mL\nAmount = 20 mg/mL × 250 mL = 5,000 mg = 5 g"},
+    {q:"What is a serial dilution?", a:"A series of step-by-step dilutions, each using the product of the previous dilution as the starting material.\nEach step typically reduces concentration by a fixed ratio (often 1:10 or 1:2).\nExample: 1:10 serial dilution × 3 steps from 1 mg/mL:\nStep 1: 0.1 mg/mL; Step 2: 0.01 mg/mL; Step 3: 0.001 mg/mL\nUsed in: microbiology (counting colonies), pharmacology (dose-response curves), blood banking."},
+  ],
+};
+
+// ── FORENSIC SCIENCE ─────────────────────────────────────────────────────
+_hosaDecks.fs = {
+  history_careers: [
+    {q:"What is forensic science?", a:"The application of scientific principles and techniques to matters of law — particularly examining and interpreting civil or criminal evidence. Combines chemistry, medicine, biology, physics, and other disciplines to support the justice system."},
+    {q:"Who is considered the father of forensic toxicology?", a:"Mathieu Orfila (1787–1853): Spanish chemist who systematically studied the effects of poisons on the body and developed methods to detect them. His work establishing that arsenic could be detected in tissues was landmark. Often called the 'Father of Forensic Toxicology.'"},
+    {q:"What is Locard's Exchange Principle?", a:"Every contact leaves a trace — when a person comes into contact with another person, place, or object, a cross-transfer of evidence occurs. Both parties leave something at the scene and take something away. Foundation of forensic evidence collection: 'the criminal always leaves something behind and takes something with them.'"},
+    {q:"What are the major specialisations within forensic science?", a:"Forensic pathology: determines cause and manner of death\nForensic toxicology: analyses drugs/poisons in body\nForensic anthropology: identifies remains from skeletal material\nForensic entomology: uses insects to estimate time of death\nForensic odontology: identifies individuals by dental records\nTrace evidence: fibres, hair, glass, soil\nForensic serology: blood typing and biological fluids"},
+    {q:"What is the Frye standard and the Daubert standard for scientific evidence?", a:"Frye standard (1923): scientific evidence is admissible only if its method is 'generally accepted' within the relevant scientific community.\nDaubert standard (1993): more flexible — federal judges act as gatekeepers evaluating whether evidence is scientifically valid, relevant, and tested. Most US courts now use Daubert.\nCanada: R v Mohan standard — relevance, reliability, necessity, and absence of exclusionary rules."},
+    {q:"What are the classes of physical evidence?", a:"Class evidence: characteristics shared by a group — narrows possibilities but cannot uniquely identify (e.g., type of shoe sole, blood type, paint chip colour)\nIndividual evidence: uniquely links to a single source (e.g., DNA profile, fingerprint, striated toolmark, handwriting)\nClass evidence is more common; individual evidence is more probative."},
+    {q:"What is the chain of custody?", a:"The documented, unbroken chronological record of all persons who have handled a piece of evidence from crime scene collection through court presentation. Ensures evidence has not been tampered with, altered, or contaminated.\nAny break in chain of custody can render evidence inadmissible in court."},
+    {q:"What are the ethical responsibilities of a forensic scientist?", a:"Report findings objectively and impartially — serve the justice system, not prosecution or defence\nMaintain scientific integrity — do not manipulate data\nAcknowledge limitations of findings\nMaintain competence through continuing education\nPrevent confirmation bias — avoid interpreting results to fit a theory\nDocument all procedures and maintain proper chain of custody"},
+    {q:"What is trace evidence?", a:"Trace evidence: small, often microscopic materials transferred between people, objects, and environments during contact (Locard's principle). Examples: hair, fibres, glass fragments, paint chips, soil, pollen, gunshot residue (GSR), feathers, seeds.\nAnalysed using: microscopy, spectrophotometry, scanning electron microscopy (SEM), chromatography."},
+    {q:"What are the major types of fingerprint patterns?", a:"Loop: the most common (~60–65%) — ridges enter from one side, curve around, and exit the same side\nWhorl: concentric circles or spirals (~30–35%)\nArch: ridges flow in from one side and exit the other (~5%)\nEach finger has a unique pattern — no two people have identical fingerprints (including identical twins)."},
+    {q:"What are the three types of fingerprints found at crime scenes?", a:"Latent fingerprints: invisible — deposited from sweat/oils; must be developed using powder, ninhydrin, cyanoacrylate fuming, or luminescence techniques\nPatent fingerprints: visible — left in soft materials (paint, wax, blood, grease)\nPlastic fingerprints: three-dimensional impressions left in soft surfaces (putty, wax, wet paint)"},
+    {q:"What is the difference between questioned documents and handwriting analysis?", a:"Questioned document examination: analysis of documents whose authenticity or origin is disputed — includes handwriting comparison, ink dating, paper analysis, erasure detection, obliterated writing recovery, typewriter/printer identification.\nHandwriting analysis: comparison of characteristic features (letter forms, spacing, pen pressure, connections) between known and unknown writing samples."},
+    {q:"What is the role of an expert witness in forensic science?", a:"An expert witness is qualified by knowledge, skill, experience, or training to provide opinions beyond the understanding of a lay juror. They:\n• Explain scientific methods and findings to the court\n• Render opinions within their area of expertise\n• Can be cross-examined\n• Must remain objective and cannot advocate for either side\nDistinct from a lay witness who can only testify to facts observed."},
+    {q:"What is ballistics and what does it include?", a:"Ballistics: the science of projectiles — particularly firearms and ammunition.\nInternal ballistics: what happens inside the firearm when fired\nExternal ballistics: trajectory of the projectile in flight\nTerminal ballistics: what happens when the projectile hits a target (wound ballistics)\nForensic ballistics: matching fired bullets and cartridge casings to specific firearms using striated toolmark comparison."},
+  ],
+  crime_scene: [
+    {q:"What are the phases of crime scene investigation?", a:"1. Secure and protect the scene — establish perimeter, restrict access\n2. Preliminary survey — initial walk-through, identify key areas\n3. Document the scene — photography, sketching, video\n4. Search for evidence — systematic search patterns\n5. Collect, package, and label evidence — maintain chain of custody\n6. Final survey and release of scene\n7. Lab analysis and report"},
+    {q:"What are the main crime scene search patterns?", a:"Grid pattern: two overlapping straight-line patterns at 90° — thorough, two-person technique\nSpiral pattern: start at centre and spiral outward (or reverse) — one person\nStrip/lane pattern: parallel lanes — efficient for large outdoor areas\nZone/quadrant pattern: divide scene into quadrants — good for large areas\nPoint-to-point: link specific items of evidence"},
+    {q:"What is the difference between a primary and secondary crime scene?", a:"Primary crime scene: the original location where the crime occurred or where most evidence is concentrated.\nSecondary crime scene: any subsequent location connected to the crime — e.g., where the body was transported, where the suspect disposed of evidence, the suspect's vehicle."},
+    {q:"What is algor mortis?", a:"Algor mortis: the cooling of the body after death as body temperature equilibrates with the ambient environment.\nBody cools at approximately 1–1.5°C (1.5–2°F) per hour under standard conditions.\nUsed to estimate time of death in the first 12–24 hours post-mortem.\nAffected by ambient temperature, body size, clothing, and environmental conditions."},
+    {q:"What is rigor mortis?", a:"Rigor mortis: stiffening of muscles after death due to depletion of ATP → myosin-actin cross-bridges cannot release → fixed contraction.\nOnset: 2–6 hours after death; maximum: 12 hours; resolves: 24–48 hours (secondary relaxation from decomposition)\nAffected by temperature: cold slows; heat accelerates. Used to estimate post-mortem interval."},
+    {q:"What is livor mortis (lividity)?", a:"Livor mortis (post-mortem hypostasis): purple-red discolouration of the skin where blood pools in dependent (lowest) areas after circulation stops.\nOnset: 1–2 hours; fully apparent: 6–12 hours; fixed (does not blanch): 8–12 hours.\nFixed lividity in a position inconsistent with where the body was found = body was moved after death."},
+    {q:"What are the four manners of death?", a:"Natural: caused by disease or age\nAccidental: unintentional injury (motor vehicle crash, fall, drowning)\nHomicide: killed by another person (does not imply murder — murder is the legal term)\nSuicide: self-inflicted death\n(+ Undetermined: insufficient information to classify)\nManner of death is determined by the medical examiner/coroner."},
+    {q:"What is the difference between cause of death and mechanism of death?", a:"Cause of death: the disease or injury that initiated the train of events leading to death — e.g., gunshot wound to the chest\nMechanism of death: the physiological derangement that caused the heart to stop — e.g., haemorrhage, cardiac arrhythmia, respiratory failure\nCause is specific; mechanism can occur from multiple causes."},
+    {q:"What is an autopsy and what are its components?", a:"Autopsy (post-mortem examination): systematic examination of a body after death to determine cause and manner of death.\nExternal examination: body surface, injuries, state of decomposition\nInternal examination: chest, abdomen, and skull opened; organs removed, weighed, and examined\nHistology: tissue samples examined microscopically\nToxicology: blood, urine, and vitreous humour tested for drugs/poisons\nConducted by forensic pathologist."},
+    {q:"What is blood spatter analysis?", a:"Analysis of the size, shape, and distribution of bloodstains to reconstruct a crime scene event. Key concepts:\nPassive stains: formed by gravity alone (drips)\nSpatter stains: result from force applied to liquid blood (impact, gunshot)\nDrop shape: circular if falling straight; elliptical if blood hits at an angle — angle of impact calculated from stain shape\nCast-off patterns: blood flung from a moving object"},
+    {q:"What is the difference between ante-mortem, peri-mortem, and post-mortem injuries?", a:"Ante-mortem: injuries occurring BEFORE death — show vital reaction (inflammation, bleeding, healing)\nPeri-mortem: injuries occurring AT OR AROUND the time of death — may show some vital reaction; difficult to distinguish\nPost-mortem: injuries occurring AFTER death — no vital reaction; may include insect activity, scavenging, decomposition changes"},
+    {q:"What is the post-mortem interval (PMI) and what methods estimate it?", a:"PMI: the time elapsed between death and discovery of the body.\nEstimation methods:\n• Algor mortis (body cooling): first 12–24 hours\n• Rigor mortis (stiffening): 2–48 hours\n• Livor mortis (lividity fixation): 8–12 hours\n• Decomposition stages\n• Forensic entomology: insect colonisation (most accurate beyond 48 hours)\n• Stomach contents, vitreous potassium"},
+    {q:"What are defensive wounds and what do they indicate?", a:"Defensive wounds: injuries sustained on the hands, forearms, or upper arms while attempting to defend against an attack.\nCharacteristics: sharp force injuries to the palms, knuckles, and ulnar surface of forearms (from grabbing/blocking a blade); blunt force injuries from blocking blows.\nTheir presence indicates the victim was conscious and aware of the attack and attempted to defend themselves."},
+  ],
+  dna_analysis: [
+    {q:"What is DNA typing (DNA profiling) and why is it powerful?", a:"DNA typing: the analysis of unique genetic markers (short tandem repeats — STRs) at specific chromosomal locations to create an individual's genetic profile.\nPowerful because: each person's STR profile is statistically unique (except identical twins). The probability of two unrelated individuals sharing a full profile is <1 in 1 trillion.\nDNA evidence can include or exclude suspects with extremely high certainty."},
+    {q:"What is the structure of DNA?", a:"DNA (deoxyribonucleic acid): a double-stranded helix composed of nucleotide subunits.\nEach nucleotide: deoxyribose sugar + phosphate + base (Adenine, Thymine, Guanine, Cytosine)\nBase pairing: A–T (2 H-bonds); G–C (3 H-bonds)\nThe sequence is antiparallel — one strand runs 5'→3', the complementary strand runs 3'→5'."},
+    {q:"What are short tandem repeats (STRs)?", a:"STRs: short sequences of 2–7 base pairs that repeat in tandem at specific chromosomal locations (loci). The NUMBER of repeats varies between individuals at each locus.\nForensic DNA profiling (CODIS in the US) uses 20 STR loci + amelogenin (sex determination).\nEach person has two alleles per locus (one from each parent) — the combination across all loci is statistically unique."},
+    {q:"What is PCR and how is it used in forensics?", a:"PCR (Polymerase Chain Reaction): amplifies specific DNA sequences exponentially from very small or degraded samples.\nAllows forensic analysis of: a single hair root, a microscopic blood stain, touch DNA from skin cells on objects.\nProcess: denaturation (94°C) → primer annealing → extension (Taq polymerase) → repeat ~30 cycles → millions of copies.\nRevolutionised forensics — allows analysis of tiny or degraded samples."},
+    {q:"What biological sources can yield forensic DNA?", a:"Any nucleated cell contains DNA.\nSources: blood, semen, saliva, vaginal secretions, skin cells (touch DNA), hair roots (not shafts), bone, teeth, fingernails\nNote: shed hair shafts contain mitochondrial DNA (mtDNA), not nuclear DNA.\nDegraded samples: older, exposed, or damaged samples — STR profiling may fail; mtDNA sequencing may succeed."},
+    {q:"What is mitochondrial DNA (mtDNA) and when is it used in forensics?", a:"mtDNA is found in mitochondria — multiple copies per cell (vs one per cell for nuclear DNA), making it useful for highly degraded or old samples.\nInherited maternally — all maternal relatives share the same mtDNA.\nUsed for: ancient remains, hair shafts (no root), highly degraded bone.\nLimitation: not unique to an individual — all people sharing a maternal lineage have the same mtDNA."},
+    {q:"What is gel electrophoresis and how does it separate DNA?", a:"Agarose gel electrophoresis separates DNA fragments by size using an electric field. DNA is negatively charged → migrates toward the positive electrode. Smaller fragments move faster and farther. A DNA ladder (known size markers) is run alongside to estimate fragment sizes. Visualised under UV light with ethidium bromide or GelRed staining."},
+    {q:"What is CODIS and how does it work?", a:"CODIS (Combined DNA Index System): the US national DNA database maintained by the FBI. Contains DNA profiles from convicted offenders, arrestees, and unsolved crime scene samples.\nAllows: linking crime scenes to each other (forensic index) and to known individuals (offender index).\nCanada uses the National DNA Data Bank (NDDB) with a similar structure."},
+    {q:"What is a DNA mixture and why is it challenging?", a:"A DNA mixture: forensic sample containing DNA from two or more individuals (e.g., sexual assault sample, combined blood stains).\nChallenges: deconvoluting (separating) the profiles of contributors; major vs minor contributor; may not be possible if DNA ratios are very unequal or degraded.\nRequires: statistical analysis; probabilistic genotyping software (e.g., STRmix) now standard."},
+    {q:"What is the difference between inclusion and exclusion in DNA evidence?", a:"Inclusion: the suspect's DNA profile IS consistent with the evidence profile — they cannot be excluded. The probability of another person matching is stated statistically (e.g., 1 in 100 billion).\nExclusion: the suspect's DNA profile does NOT match the evidence profile — they are definitively excluded.\nInclusion is probabilistic; exclusion is definitive."},
+    {q:"What is familial DNA searching?", a:"Familial DNA searching: searching the DNA database for partial matches that may indicate a close biological relative (parent, sibling, child) of the unknown contributor.\nUsed when a full match is not found. Identifies persons of interest who are related to the unknown contributor.\nEthical concerns: privacy implications for relatives who have not committed any crime; not permitted in all jurisdictions."},
+    {q:"What is Y-chromosome DNA analysis?", a:"Y-STR analysis: uses short tandem repeats on the Y chromosome — inherited paternally and shared by all male-line relatives.\nUseful in: sexual assault cases (isolates male DNA from mixed female/male samples); investigating paternal lineages; cases where nuclear DNA is absent or degraded.\nLimitation: Y-STR is not unique to one individual — all paternal-line male relatives share the same Y profile."},
+  ],
+  toxicology: [
+    {q:"What is forensic toxicology?", a:"The study of the effect of drugs, poisons, and other chemicals on the human body in a legal context.\nTwo main roles:\n1. Postmortem toxicology: determine whether drugs or poisons contributed to death\n2. Human performance toxicology: determine drug impairment at the time of driving or criminal act (e.g., DUI)\nAlso includes: workplace drug testing, seized drug analysis."},
+    {q:"What biological specimens are collected for toxicological analysis?", a:"Blood (ante-mortem from living or post-mortem): most important; most accurate for pharmacokinetic interpretation\nUrine: detects parent drugs and metabolites; longer window of detection\nVitreous humour (eye fluid): less affected by post-mortem redistribution; reliable for alcohol and some drugs\nHair: provides long-term history (1 cm ≈ 1 month growth)\nBile, liver, brain: used post-mortem for specific drugs"},
+    {q:"What is post-mortem redistribution?", a:"Post-mortem redistribution (PMR): the movement of drugs from concentrated body tissues (lungs, liver, GI tract) into the blood after death, falsely elevating post-mortem blood drug concentrations.\nMost problematic for: basic lipophilic drugs (tricyclic antidepressants, opioids, some antipsychotics).\nTo minimise: collect blood from peripheral sites (femoral vein) rather than central (heart) — peripheral samples are more reliable."},
+    {q:"What are the major classes of drugs of abuse?", a:"CNS depressants: alcohol (ethanol), benzodiazepines, opioids (heroin, morphine, fentanyl), barbiturates\nCNS stimulants: cocaine, amphetamines (methamphetamine), MDMA (ecstasy), caffeine\nHallucinogens: LSD, psilocybin, mescaline, PCP, ketamine\nCannabinoids: THC (marijuana/cannabis)\nInhalants: solvents, glue, nitrous oxide\nNAT (Novel/new psychoactive substances): synthetic cannabinoids, bath salts"},
+    {q:"What is the legal blood alcohol concentration (BAC) limit for driving?", a:"In most jurisdictions: 80 mg/100 mL (0.08%) for impaired driving\nSome provinces/states have lower limits: 50 mg/100 mL (0.05%) as a warning zone\nFederal commercial drivers in Canada: 40 mg/100 mL (0.04%)\nEffects of alcohol by BAC:\n0.02–0.05%: relaxation, mild impairment\n0.08%: legally impaired\n0.15%: staggering, severe impairment\n>0.30%: possible death"},
+    {q:"What is the difference between a poison and a drug?", a:"The distinction is one of dose and intent, not pharmacology — 'the dose makes the poison' (Paracelsus).\nPoison: any substance capable of causing harm or death, especially at any dose — commonly refers to substances with no medical use (e.g., cyanide, strychnine)\nDrug: a substance used therapeutically — many drugs are toxic at doses above the therapeutic range (e.g., acetaminophen, digoxin, lithium)\nForensic toxicology analyses both."},
+    {q:"What are the signs and effects of opioid toxicity?", a:"Opioid overdose triad: respiratory depression + miosis (pinpoint pupils) + unconsciousness (coma)\nOther signs: bradycardia, hypotension, blue/grey skin (cyanosis), frothy secretions from mouth\nMechanism: bind mu-opioid receptors in brainstem respiratory centres → apnoea → hypoxia → death\nAntidote: naloxone (Narcan) — opioid antagonist; reverses effects"},
+    {q:"What is a toxicology report and what does it show?", a:"A forensic toxicology report presents: the biological specimens analysed, the analytical methods used (immunoassay screening + GC-MS or LC-MS confirmation), the drugs/metabolites detected and their concentrations, and the toxicologist's interpretation.\nPositive screening test must always be confirmed by a second, more specific analytical method (GC-MS or LC-MS) before reporting as positive."},
+    {q:"What is forensic anthropology?", a:"The application of physical anthropology and skeletal biology to forensic problems — primarily identification of human skeletal remains.\nTasks: determine if remains are human; estimate biological profile (sex, age, stature, ancestry) from skeletal features; identify trauma (sharp/blunt force, gunshot); determine post-mortem interval from decomposition and taphonomy."},
+    {q:"How do forensic anthropologists estimate sex from skeletal remains?", a:"Pelvis (most reliable): female pelvis is wider, with a larger pubic angle (>90°), wider sciatic notch, and different sacrum shape (adapted for childbirth)\nSkull: males have more prominent brow ridges, larger mastoid process, squarer chin, and more pronounced nuchal crests\nLong bones: males generally have larger and more robust bones\nCombining pelvic and cranial features allows 90–95% accuracy."},
+    {q:"How do forensic anthropologists estimate age at death from skeletal remains?", a:"Juveniles/children: dental eruption and bone fusion — highly accurate\nYoung adults: degree of epiphyseal (growth plate) fusion; dental wear; closure of cranial sutures\nMiddle-aged: pubic symphysis morphology; sternal rib end changes; acetabular changes\nOlder adults: degenerative changes — arthritic lipping, osteoporosis\nAccuracy decreases with age — ±5 years in young adults; ±10–20 years in older adults."},
+    {q:"What is forensic taphonomy?", a:"The study of post-mortem processes affecting human remains — decomposition, weathering, scavenging, burial, and transportation.\nHelps interpret: the post-mortem interval (time since death), the original vs final deposition site, the sequence of events after death.\nUsed to distinguish: natural decomposition vs post-mortem manipulation of remains; ante-mortem vs post-mortem injuries vs animal scavenging."},
+  ],
+};
+
+// ── BEHAVIOURAL HEALTH ────────────────────────────────────────────────────
+_hosaDecks.bh = {
+  biological_mind: [
+    {q:"What are the two major divisions of the nervous system?", a:"Central nervous system (CNS): brain + spinal cord — integrates and processes information\nPeripheral nervous system (PNS): all neural tissue outside the CNS\n• Somatic (voluntary): conscious control of skeletal muscles + sensory input\n• Autonomic: involuntary control of visceral organs\n  - Sympathetic: 'fight or flight'\n  - Parasympathetic: 'rest and digest'"},
+    {q:"What are the major lobes of the cerebrum and their functions?", a:"Frontal lobe: executive function, planning, voluntary motor control, personality, speech production (Broca's area)\nParietal lobe: somatosensory processing (touch, pain, temperature), spatial awareness\nTemporal lobe: auditory processing, memory formation, language comprehension (Wernicke's area)\nOccipital lobe: visual processing\nInsula: interoception, emotion regulation"},
+    {q:"What is a neuron and how does it communicate?", a:"Neuron: the basic functional unit of the nervous system — receives, processes, and transmits information via electrochemical signals.\nParts: dendrites (receive signals), cell body (soma), axon (transmits signals), myelin sheath (insulates axon for faster conduction), axon terminal/synaptic knob\nCommunication: action potential travels down axon → neurotransmitter released at synapse → binds to postsynaptic receptor → excites or inhibits next neuron"},
+    {q:"What are the major neurotransmitters and their roles?", a:"Dopamine: reward, motivation, motor control (deficiency → Parkinson's; excess → schizophrenia)\nSerotonin: mood, sleep, appetite (low levels → depression and anxiety)\nNorepinephrine (noradrenaline): alertness, arousal, stress response\nAcetylcholine (ACh): muscle activation, memory, learning (deficiency → Alzheimer's)\nGABA: primary inhibitory neurotransmitter — calming; benzodiazepines enhance GABA\nGlutamate: primary excitatory neurotransmitter — memory and learning"},
+    {q:"What is the limbic system and what does it control?", a:"The limbic system: a set of brain structures involved in emotion, motivation, memory, and behaviour.\nKey structures:\nAmygdala: fear, threat detection, emotional memory\nHippocampus: formation of new long-term memories\nHypothalamus: regulates basic drives (hunger, thirst, sex), body temperature, and the stress response; connects nervous and endocrine systems\nCingulate cortex: attention, emotional regulation"},
+    {q:"What is the autonomic nervous system and its two divisions?", a:"Autonomic nervous system (ANS): involuntary control of visceral functions (heart, lungs, digestive organs, glands).\nSympathetic ('fight or flight'): activated by stress → ↑ HR, ↑ BP, dilated pupils, bronchodilation, ↑ blood glucose, redirects blood to muscles\nParasympathetic ('rest and digest'): dominant at rest → ↓ HR, ↓ BP, constricted pupils, stimulates digestion, promotes energy storage"},
+    {q:"What is the HPA axis and its role in stress?", a:"Hypothalamic-Pituitary-Adrenal (HPA) axis: the body's primary stress response system.\nStressor → hypothalamus releases CRH → pituitary releases ACTH → adrenal cortex releases cortisol → mobilises energy, suppresses immune system, and feeds back to hypothalamus to turn off the response.\nChronic stress → persistently elevated cortisol → negative health effects (immune suppression, weight gain, mood disorders)."},
+    {q:"What are the parts of the brain stem and their functions?", a:"Midbrain: eye movement, auditory and visual reflexes, dopamine pathways\nPons: relay between cortex and cerebellum; involved in sleep, arousal, swallowing, and bladder control\nMedulla oblongata: controls vital functions — heart rate, blood pressure, breathing, vomiting\nDamage to the brainstem is often fatal or causes severe disability."},
+    {q:"What is neuroplasticity?", a:"Neuroplasticity: the brain's ability to change its structure and function in response to experience, learning, injury, or disease — by forming new synaptic connections and reorganising neural circuits.\nHebbian plasticity: 'neurons that fire together, wire together'\nClinical importance: basis for rehabilitation after stroke or TBI; explains how therapy changes brain function in mental health conditions."},
+    {q:"What is the difference between grey matter and white matter?", a:"Grey matter: consists of neuronal cell bodies, dendrites, and unmyelinated axons — found in the cerebral cortex, basal ganglia, and cerebellar cortex. Responsible for processing and integration.\nWhite matter: bundles of myelinated axons — transmit signals between brain regions. The myelin sheath (from oligodendrocytes) gives white matter its pale colour and speeds conduction.\nMS destroys myelin → impairs white matter signal transmission."},
+    {q:"What is sensation versus perception?", a:"Sensation: the process by which sensory receptors detect stimuli and send signals to the brain — the physical detection of information (e.g., light hitting the retina)\nPerception: the brain's interpretation and organisation of sensory signals into meaningful experiences — subjective, influenced by attention, expectation, and past experience\nExample: the sound waves hit your eardrum (sensation) and you recognise it as your name (perception)"},
+    {q:"What are the major methods used to study the brain?", a:"Electroencephalography (EEG): measures brain electrical activity — used for epilepsy, sleep disorders\nfMRI (functional MRI): measures blood flow changes indicating neural activity — studies cognitive functions\nPET scan: detects radioactive tracer uptake — maps metabolic activity, neurotransmitter binding\nCT scan: structural imaging — detects haemorrhage, tumours\nAutopsy/histology: post-mortem tissue analysis — examines cellular changes"},
+  ],
+  disorders: [
+    {q:"What is a psychological disorder according to the DSM-5?", a:"A syndrome characterised by clinically significant disturbances in an individual's cognition, emotion regulation, or behaviour that reflects a dysfunction in psychological, biological, or developmental processes underlying mental functioning. Must cause significant distress or impairment in social/occupational functioning. Not merely an expected/culturally sanctioned response."},
+    {q:"What are the main categories of anxiety disorders?", a:"Generalised anxiety disorder (GAD): excessive worry about multiple areas, ≥6 months\nPanic disorder: recurrent unexpected panic attacks; anticipatory anxiety\nAgoraphobia: fear of situations where escape is difficult\nSocial anxiety disorder (SAD): fear of social scrutiny or embarrassment\nSpecific phobia: irrational fear of specific object/situation\nAll involve excessive fear or worry impairing daily function."},
+    {q:"What is obsessive-compulsive disorder (OCD)?", a:"OCD: characterised by obsessions (intrusive, unwanted, recurring thoughts/images/urges) and compulsions (repetitive mental or physical acts performed to reduce distress from obsessions) that are time-consuming (>1 hour/day) or cause significant impairment.\nCommon obsessions: contamination, symmetry, harm\nCommon compulsions: washing, checking, counting, arranging\nTreatment: ERP (exposure and response prevention therapy) + SSRIs"},
+    {q:"What is PTSD and what are its four symptom clusters?", a:"Post-traumatic stress disorder — develops after exposure to actual/threatened death, serious injury, or sexual violence.\n1. Intrusion: flashbacks, nightmares, involuntary distressing memories\n2. Avoidance: of trauma-related thoughts, feelings, reminders\n3. Negative alterations in mood/cognition: guilt, shame, persistent negative emotions, detachment\n4. Hyperarousal/reactivity: hypervigilance, exaggerated startle, aggressive outbursts, sleep disturbance"},
+    {q:"What are the positive and negative symptoms of schizophrenia?", a:"Positive symptoms (additions to normal behaviour):\n• Hallucinations (most commonly auditory — hearing voices)\n• Delusions (fixed false beliefs — persecutory, grandiose, referential)\n• Disorganised speech and behaviour\nNegative symptoms (reductions from normal):\n• Flat affect (reduced emotional expression)\n• Alogia (poverty of speech)\n• Avolition (lack of motivation/goal-directed behaviour)\n• Anhedonia (inability to feel pleasure)"},
+    {q:"What is bipolar disorder and what are the types?", a:"Bipolar disorder: cyclical mood episodes of mania/hypomania and depression.\nManic episode: ≥1 week of elevated/expansive/irritable mood + ↑ energy + ≥3 symptoms (grandiosity, ↓ sleep need, pressured speech, racing thoughts, distractibility, ↑ goal-directed activity, risky behaviour)\nBipolar I: at least one full manic episode\nBipolar II: at least one hypomanic episode + major depressive episode; never full mania\nTreatment: mood stabilisers (lithium, valproate), atypical antipsychotics"},
+    {q:"What are the diagnostic criteria for major depressive disorder (MDD)?", a:"≥5 of the following for ≥2 weeks, including at least #1 or #2:\n1. Depressed mood most of the day\n2. Markedly diminished interest or pleasure (anhedonia)\n3. Significant weight/appetite change\n4. Insomnia or hypersomnia\n5. Psychomotor agitation or retardation\n6. Fatigue or loss of energy\n7. Worthlessness or excessive guilt\n8. Difficulty concentrating or making decisions\n9. Recurrent thoughts of death or suicidal ideation"},
+    {q:"What is autism spectrum disorder (ASD)?", a:"ASD: a neurodevelopmental disorder characterised by:\n1. Persistent deficits in social communication and interaction across contexts\n2. Restricted, repetitive patterns of behaviour, interests, or activities\nMust be present early in development. Severity rated in 3 levels based on support needs.\nFeatures: difficulty reading social cues, literal interpretation of language, sensory sensitivities, insistence on routines, stereotypic movements.\nTreatment: behavioural therapy (ABA), speech therapy, occupational therapy — no cure."},
+    {q:"What is ADHD and how is it classified?", a:"ADHD: neurodevelopmental disorder with persistent pattern of inattention and/or hyperactivity-impulsivity impairing development or function.\nInattentive presentation: difficulty sustaining attention, easily distracted, forgetful, loses things, fails to follow through\nHyperactive-impulsive presentation: fidgets, talks excessively, interrupts, cannot stay seated, acts without thinking\nCombined presentation: both\nMust: symptoms before age 12, in ≥2 settings, impair functioning, not explained by another disorder."},
+    {q:"What are dissociative disorders?", a:"Dissociative disorders: disruption and/or discontinuity in normal integration of consciousness, memory, identity, emotion, perception, or behaviour.\nDissociative amnesia: inability to recall autobiographical information (usually following trauma)\nDissociative identity disorder (DID): ≥2 distinct personality states with amnesia between them\nDepersonalisation/derealisation disorder: persistent feeling of being detached from one's mind/body or surroundings\nUsually linked to severe trauma or abuse."},
+    {q:"What are personality disorders and give examples?", a:"Personality disorder: a pattern of inner experience and behaviour that deviates markedly from cultural expectations, is pervasive, stable, and leads to distress or impairment.\nCluster A (odd/eccentric): paranoid, schizoid, schizotypal\nCluster B (dramatic/emotional): antisocial (ASPD), borderline (BPD), histrionic, narcissistic\nCluster C (anxious/fearful): avoidant, dependent, obsessive-compulsive personality disorder (OCPD)"},
+    {q:"What are the major therapy approaches for psychological disorders?", a:"Cognitive Behavioural Therapy (CBT): challenges distorted thoughts and changes behaviours — effective for depression, anxiety, OCD\nDialectical Behaviour Therapy (DBT): skills for emotional regulation, distress tolerance — BPD\nPsychodynamic therapy: explores unconscious conflicts\nExposure therapy: gradual confrontation of feared stimuli — phobias, PTSD\nACT (Acceptance and Commitment Therapy): psychological flexibility\nIPT (Interpersonal therapy): improves relationships — depression"},
+  ],
+  learning_memory: [
+    {q:"What is learning in psychology?", a:"Learning: a relatively permanent change in behaviour or knowledge that results from experience.\nTypes: classical conditioning, operant conditioning, observational learning, cognitive learning.\nDistinct from temporary changes due to fatigue, drugs, maturation, or sensory adaptation."},
+    {q:"What is classical conditioning?", a:"Classical conditioning (Pavlov): learning through association — a neutral stimulus is paired with an unconditioned stimulus until the neutral stimulus alone produces the conditioned response.\nPavlov's experiment: bell (NS) paired with food (UCS) → salivation (UCR). After conditioning: bell (CS) alone → salivation (CR).\nUS: unconditioned stimulus; UR: unconditioned response; CS: conditioned stimulus; CR: conditioned response."},
+    {q:"What are extinction, spontaneous recovery, and generalisation in classical conditioning?", a:"Extinction: gradual weakening of the CR when the CS is repeatedly presented without the UCS\nSpontaneous recovery: the return of the extinguished CR after a rest period — shows extinction is not 'unlearning' but inhibition\nStimulus generalisation: similar stimuli to the CS also elicit the CR\nStimulus discrimination: the ability to distinguish between similar stimuli — only the specific CS elicits CR"},
+    {q:"What is operant conditioning?", a:"Operant conditioning (Skinner/Thorndike): learning through consequences — behaviours are strengthened (reinforced) or weakened (punished) by their outcomes.\nPositive reinforcement: add something pleasant to increase behaviour\nNegative reinforcement: remove something unpleasant to increase behaviour\nPositive punishment: add something unpleasant to decrease behaviour\nNegative punishment: remove something pleasant to decrease behaviour"},
+    {q:"What are schedules of reinforcement and which is most resistant to extinction?", a:"Fixed ratio (FR): reinforced after a set number of responses — produces high steady rate of responding\nVariable ratio (VR): reinforced after an unpredictable number of responses — highest response rate; MOST resistant to extinction (e.g., gambling)\nFixed interval (FI): reinforced after a fixed time period — scalloping pattern\nVariable interval (VI): reinforced after unpredictable time intervals — steady, moderate rate"},
+    {q:"What is observational learning (modelling)?", a:"Observational learning (Bandura): acquiring behaviours by watching and imitating others — no direct reinforcement required.\nKey components:\n• Attention: observer must notice the model's behaviour\n• Retention: observer must remember what was observed\n• Reproduction: observer must have the ability to perform the behaviour\n• Motivation: observer must want to perform the behaviour\nBandura's Bobo doll experiment: children modelled aggressive behaviour observed in adults."},
+    {q:"What are the three stages of memory (modal model)?", a:"1. Sensory memory: very brief (fraction of a second), high capacity — retains exact sensory impression before it fades\n2. Short-term memory (working memory): 20–30 seconds without rehearsal; limited capacity (~7±2 items)\n3. Long-term memory: potentially unlimited duration and capacity — stores explicit and implicit memories\nInformation moves: sensory → short-term (through attention) → long-term (through encoding/consolidation)"},
+    {q:"What are the types of long-term memory?", a:"Explicit (declarative — conscious recall):\n• Episodic: personal autobiographical memories (your first day of school)\n• Semantic: general world knowledge and facts (the capital of France is Paris)\nImplicit (non-declarative — unconscious):\n• Procedural: motor skills and habits (riding a bike, typing)\n• Priming: increased sensitivity to stimuli due to prior exposure\n• Classical conditioning responses"},
+    {q:"What is the difference between encoding, storage, and retrieval?", a:"Encoding: transforming information into a form that can be stored — elaborative encoding (meaningful associations) is more effective than maintenance (repetitive) rehearsal\nStorage: maintaining encoded information over time — consolidation strengthens memories\nRetrieval: accessing and bringing stored information back into conscious awareness — cued recall (hint provided) vs free recall (no cues) vs recognition (stimulus present)"},
+    {q:"What are the main causes of forgetting?", a:"Decay: memories fade over time without use (trace decay theory)\nInterference: other memories disrupt retrieval\n• Proactive interference: old memories interfere with new ones\n• Retroactive interference: new memories interfere with old ones\nRetrieval failure: information is stored but cannot be accessed without the right cue (tip-of-the-tongue)\nMotivated forgetting (repression): unconscious suppression of painful memories\nConfabulation: unconscious fabrication of false memories"},
+    {q:"What is the serial position effect?", a:"The tendency to remember items at the beginning (primacy effect) and end (recency effect) of a list better than items in the middle.\nPrimacy effect: first items encoded into long-term memory through rehearsal\nRecency effect: last items still in short-term/working memory at recall\nClinical application: patients with anterograde amnesia (hippocampal damage) may lose episodic memory but retain procedural memory — dissociation of memory systems."},
+  ],
+  wellness_stress: [
+    {q:"What is stress in psychology?", a:"Stress: an unpleasant emotional state arising from the perception of a threat, challenge, or demand that exceeds available coping resources.\nStressor: the source/cause of stress (internal or external)\nStress response: physiological and psychological reactions to the stressor\nEustress: positive, manageable stress that motivates performance\nDistress: negative, overwhelming stress that impairs functioning"},
+    {q:"What is Selye's General Adaptation Syndrome (GAS)?", a:"Hans Selye's model of the body's stress response — three stages:\n1. Alarm stage: immediate fight-or-flight response — sympathetic activation, adrenaline/cortisol surge\n2. Resistance stage: body adapts and attempts to cope — physiological resources mobilised, continued cortisol\n3. Exhaustion stage: prolonged stress depletes resources → vulnerability to illness, burnout, organ damage\nChronic stress can lead to immunosuppression, cardiovascular disease, and mood disorders."},
+    {q:"What is the difference between problem-focused and emotion-focused coping?", a:"Problem-focused coping: directly address the source of stress — plan, problem-solve, take action to change the situation. Best when stressor is controllable.\nEmotion-focused coping: manage the emotional response to stress — relaxation, reframing, social support, seeking distraction. Best when stressor is uncontrollable.\nAppraisal: how we evaluate the stressor (primary appraisal: is it a threat?) and our resources (secondary appraisal: can I cope?) determines which strategy is used."},
+    {q:"What is the health belief model?", a:"A psychological framework explaining health behaviour decisions — whether someone will take action to prevent or treat illness:\n1. Perceived susceptibility: belief they are at risk for the condition\n2. Perceived severity: belief the condition is serious\n3. Perceived benefits: belief the action will reduce risk or severity\n4. Perceived barriers: obstacles to taking action\n5. Cues to action: trigger that prompts behaviour (symptoms, media, advice)\n6. Self-efficacy: confidence in ability to take action"},
+    {q:"What are the health effects of chronic stress?", a:"Cardiovascular: hypertension, atherosclerosis, increased MI and stroke risk\nImmune: immunosuppression → increased susceptibility to infection; may exacerbate autoimmune conditions\nMetabolic: increased cortisol → insulin resistance, central obesity, hyperglycaemia\nMental health: depression, anxiety, burnout, PTSD\nGastrointestinal: IBS, peptic ulcers (via cortisol and H. pylori)\nMusculoskeletal: tension headaches, back pain, bruxism"},
+    {q:"What are defence mechanisms according to Freud?", a:"Unconscious strategies the ego uses to protect against anxiety from unacceptable thoughts or impulses.\nRepression: pushing threatening material into the unconscious\nDenial: refusing to acknowledge reality\nProjection: attributing one's own unacceptable impulses to others\nRationalisation: making logical excuses for unacceptable behaviour\nDisplacement: redirecting emotions to a safer target\nSublimation: channelling impulses into socially acceptable activities\nRegression: reverting to earlier stage of development under stress"},
+    {q:"What are the dimensions of wellness?", a:"Multiple dimensions of optimal health and well-being:\n1. Physical: exercise, nutrition, sleep, avoiding harmful substances\n2. Emotional: self-awareness, managing feelings, resilience\n3. Social: meaningful relationships, communication\n4. Intellectual: lifelong learning, creativity, curiosity\n5. Spiritual: meaning, values, purpose\n6. Occupational: satisfaction from work\n7. Environmental: safe, supportive surroundings\n8. Financial: managing resources, financial security"},
+    {q:"What are the major risk factors for substance use disorders?", a:"Biological: genetic predisposition (family history of addiction), neurobiological vulnerability\nPsychological: mental health disorders (dual diagnosis), low self-esteem, trauma history, sensation-seeking\nSocial/environmental: peer pressure, easy access to substances, normalisation of use\nDevelopmental: early age of first use is a strong predictor\nSubstances target the mesolimbic dopamine reward pathway — creating intense pleasure and driving compulsive use despite consequences."},
+    {q:"What is positive psychology?", a:"A branch of psychology focused on studying and promoting human flourishing, well-being, strengths, and positive emotions — rather than focusing exclusively on pathology and deficits.\nMartin Seligman's PERMA model of well-being:\n• Positive emotions\n• Engagement (flow)\n• Relationships\n• Meaning\n• Achievement\nApplications: resilience training, mindfulness, gratitude practice, character strengths-based interventions."},
+    {q:"What are common signs of burnout?", a:"Burnout: a state of chronic occupational stress leading to:\n• Emotional exhaustion: depleted, drained feeling\n• Depersonalisation: cynical, detached attitude toward work/clients\n• Reduced personal accomplishment: feeling ineffective and incompetent\nCommon in healthcare workers, teachers, caregivers.\nPrevention: work-life balance, social support, autonomy, realistic workload, self-care practices, mindfulness."},
+    {q:"What is the difference between substance abuse and substance dependence?", a:"Substance use disorder (DSM-5 combines both on a spectrum): problematic pattern of substance use causing significant impairment or distress.\nMild/abuse: recurrent use causing role failure, hazardous use, legal problems, continued use despite social problems\nModerate-Severe/dependence: tolerance (need more for same effect), withdrawal (physical symptoms when stopping), loss of control, compulsive use\nAddiction = severe SUD with compulsive drug-seeking behaviour despite negative consequences."},
+  ],
+};
+
+// ── MEDICAL SPELLING ──────────────────────────────────────────────────────
+_hosaDecks.ms = {
+  prefixes_suffixes: [
+    {q:"Spell and define: the prefix meaning 'against, opposite'", a:"anti-\nExample: antibiotic (against bacteria), antiseptic (against infection), anticoagulant (against clotting)"},
+    {q:"Spell and define: the suffix meaning 'surgical removal'", a:"-ectomy\nExample: appendectomy (removal of appendix), cholecystectomy (removal of gallbladder), tonsillectomy (removal of tonsils)"},
+    {q:"Spell and define: the suffix meaning 'pertaining to or study of'", a:"-ology\nExample: cardiology, neurology, dermatology, haematology, pathology"},
+    {q:"Spell and define: the suffix meaning 'inflammation'", a:"-itis\nExample: appendicitis, arthritis, bronchitis, meningitis, tendinitis"},
+    {q:"Spell and define: the suffix meaning 'visual examination'", a:"-scopy\nExample: colonoscopy, endoscopy, bronchoscopy, arthroscopy, cystoscopy"},
+    {q:"Spell and define: the suffix meaning 'disease or disorder of'", a:"-pathy\nExample: neuropathy (nerve disease), cardiomyopathy (heart muscle disease), nephropathy (kidney disease)"},
+    {q:"Spell and define: the prefix meaning 'slow'", a:"brady-\nExample: bradycardia (slow heart rate), bradykinesia (slowness of movement)"},
+    {q:"Spell and define: the prefix meaning 'excessive, too much'", a:"hyper-\nExample: hypertension (high blood pressure), hyperglycaemia (high blood sugar), hyperthyroidism"},
+    {q:"Spell and define: the suffix meaning 'breathing or breathing condition'", a:"-pnea (or -pnoea in British spelling)\nExample: dyspnea (difficult breathing), apnea (absence of breathing), tachypnea (fast breathing)"},
+    {q:"Spell and define: the suffix meaning 'surgical repair'", a:"-plasty\nExample: rhinoplasty (nose reshaping), arthroplasty (joint reconstruction), angioplasty (vessel repair)"},
+    {q:"Spell and define: the prefix meaning 'within, inside'", a:"intra-\nExample: intravenous (within a vein), intramuscular (within muscle), intracranial (within the skull)"},
+    {q:"Spell and define: the suffix meaning 'blood condition'", a:"-emia (or -aemia in British spelling)\nExample: anaemia (low red blood cells), leukaemia (cancer of WBCs), hyperglycaemia (high blood sugar)"},
+    {q:"Spell and define: the prefix meaning 'difficult, painful, bad, or abnormal'", a:"dys-\nExample: dysphagia (difficult swallowing), dysuria (painful urination), dysrhythmia (abnormal rhythm)"},
+    {q:"Spell and define: the suffix meaning 'new opening created surgically'", a:"-ostomy\nExample: colostomy (new opening in colon), ileostomy (new opening in ileum), tracheostomy (new opening in trachea)"},
+    {q:"Spell and define: the suffix meaning 'rupture of'", a:"-rrhexis\nExample: cardiorrhexis (rupture of the heart)\nRelated: -rrhage/-rrhagia = excessive flow/haemorrhage (e.g., haemorrhage); -rrhaphy = suturing"},
+  ],
+  body_systems: [
+    {q:"Spell these cardiovascular terms correctly: heart inflammation, hardening of arteries, recording of heart's electrical activity", a:"Carditis or myocarditis (heart inflammation)\nArteriosclerosis (hardening of arteries) — note: 2 'r's, ends in -osis\nElectrocardiogram or ECG/EKG — not 'eletroc...'"},
+    {q:"Spell these respiratory terms: inflammation of bronchi, collapsed lung, blood clot in pulmonary artery", a:"Bronchitis — 'bronch' + '-itis'\nAtelectasis — a-tel-ec-ta-sis (collapsed or incomplete expansion)\nPulmonary embolism — 'pulmon' + '-ary'; 'embol-' + '-ism'"},
+    {q:"Spell these gastrointestinal terms: inflammation of stomach/intestine, liver inflammation, removal of gallbladder", a:"Gastroenteritis — 'gastr/o' + 'enter/o' + '-itis'\nHepatitis — 'hepat/o' + '-itis'\nCholecystectomy — 'chole/o' + 'cyst/o' + '-ectomy'"},
+    {q:"Spell these neurological terms: inflammation of the brain, inflammation of meninges, disease of peripheral nerves", a:"Encephalitis — 'encephal/o' + '-itis'\nMeningitis — 'mening/o' + '-itis'\nPeripheral neuropathy — 'neur/o' + '-pathy'"},
+    {q:"Spell these musculoskeletal terms: inflammation of a joint, bone disease, inflammation of a tendon", a:"Arthritis — 'arthr/o' + '-itis'\nOsteopathy — 'oste/o' + '-pathy' — or osteitis/osteoporosis\nTendinitis (also tendonitis) — note the '-din-' not '-don-' in preferred spelling"},
+    {q:"Spell these urinary terms: kidney inflammation, surgical creation of bladder opening, blood in urine", a:"Nephritis — 'nephr/o' + '-itis'\nCystostomy — 'cyst/o' + '-ostomy'\nHaematuria — 'haemat/o' + '-uria' (US: hematuria)"},
+    {q:"Spell these obstetric terms: inflammation of the uterus, surgical removal of uterus, condition of after birth", a:"Endometritis — 'endo-' + 'metr/o' + '-itis'\nHysterectomy — 'hyster/o' + '-ectomy'\nPostpartum — 'post-' + 'partum' (Latin: after birth)"},
+    {q:"Spell these endocrine terms: disease of thyroid, excessive thyroid activity, underactive thyroid", a:"Thyroiditis — 'thyroid' + '-itis'\nHyperthyroidism — 'hyper-' + 'thyroid' + '-ism'\nHypothyroidism — 'hypo-' + 'thyroid' + '-ism'"},
+    {q:"Spell these skin terms: redness of the skin, skin inflammation, fungal infection of the skin", a:"Erythema — e-ry-the-ma (redness)\nDermatitis — 'dermat/o' + '-itis'\nDermatophytosis or tinea — common dermatophyte infection (e.g., ringworm, athlete's foot)"},
+    {q:"Spell these ophthalmology/ENT terms: inflammation of the cornea, inflammation of the middle ear, nasal inflammation", a:"Keratitis — 'kerat/o' + '-itis'\nOtitis media — 'ot/o' + '-itis'; media = middle\nRhinitis — 'rhin/o' + '-itis'"},
+    {q:"Spell these cancer terms: cancer of bone, cancer of skin, cancer of lymph tissue", a:"Osteosarcoma — 'oste/o' + 'sarc/o' + '-oma'\nMelanoma — 'melan/o' + '-oma'\nLymphoma — 'lymph/o' + '-oma'"},
+    {q:"Spell these blood/haematology terms: abnormal increase in white blood cells, deficiency of red blood cells, malignant WBC cancer", a:"Leukocytosis — 'leuk/o' + 'cyt/o' + '-osis'\nAnaemia — an- + haem/aemia (US: anemia)\nLeukaemia — 'leuk/o' + '-aemia' (US: leukemia)"},
+    {q:"Spell these procedure terms: visual examination of colon, surgical incision of abdomen, X-ray image of blood vessels", a:"Colonoscopy — 'col/o' + 'nos/o' + '-scopy'\nLaparotomy — 'lapar/o' + '-otomy'\nAngiography — 'angi/o' + '-graphy'"},
+    {q:"Spell these commonly misspelled medical words", a:"Haemorrhage (not haemorhage) — two r's\nPneumonia (not neumonia) — silent 'p'\nPhysician (not physician — correctly spelled: p-h-y-s-i-c-i-a-n)\nPsychiatry (not psychiatry — silent 'p')\nDiarrhoea (not diarrhea — British); diarrhea (US spelling)"},
+  ],
+  procedures: [
+    {q:"Spell these diagnostic procedure terms: recording of brain waves, sound wave imaging, X-ray of breasts", a:"Electroencephalogram (EEG) — 'electro' + 'encephalo' + '-gram'\nUltrasonography or ultrasound — 'ultra-' + 'son/o' + '-graphy'\nMammography — 'mamm/o' + '-graphy'"},
+    {q:"Spell these cardiac procedure terms: opening blocked coronary arteries, replacement of heart valve, recording of heart sounds", a:"Percutaneous coronary intervention (PCI) or angioplasty — 'angi/o' + '-plasty'\nValvuloplasty or valve replacement — 'valvul/o' + '-plasty'\nEchocardiography — 'echo' + 'cardi/o' + '-graphy'"},
+    {q:"Spell these surgical terms: removal of a limb, repair of hernia, removal of a lymph node", a:"Amputation — am-pu-ta-tion\nHerniorrhaphy — 'hernia' + '-rrhaphy' (surgical repair of hernia)\nLymphadenectomy — 'lymph' + 'aden/o' + '-ectomy'"},
+    {q:"Spell these orthopaedic terms: replacement of knee joint, fracture of collarbone, inflammation of shoulder bursa", a:"Total knee arthroplasty — 'arthr/o' + '-plasty'\nClavicle fracture — clav-i-cle (the collarbone)\nSubacromial bursitis — 'sub-' + 'acromi/o' + 'burs' + '-itis'"},
+    {q:"Spell these obstetric procedure terms: birth by incision, surgical removal of uterus and tubes, examination of uterine cavity", a:"Caesarean section (C-section) — Cae-sar-e-an\nSalpingo-oophorectomy — 'salping/o' + 'oophor/o' + '-ectomy'\nHysteroscopy — 'hyster/o' + '-scopy'"},
+    {q:"Spell these gastrointestinal procedure terms: surgical removal of stomach, creation of stomach opening, viewing inside the stomach", a:"Gastrectomy — 'gastr/o' + '-ectomy'\nGastrostomy — 'gastr/o' + '-ostomy'\nGastroscopy or upper endoscopy — 'gastr/o' + '-scopy'"},
+    {q:"Spell these commonly confused medical terms: 'serous' vs 'serious'; 'ileum' vs 'ilium'", a:"Serous: relating to serum or a serous membrane (thin, fluid-secreting lining) — e.g., serous pericardium\nSerious: not medical; means 'grave or important'\nIleum: the final section of the small intestine — one 'i', ends in '-um'\nIlium: the largest pelvic bone — two 'i's, ends in '-um'"},
+    {q:"Spell these commonly confused medical terms: 'mucous' vs 'mucus'; 'palpation' vs 'palpitation'", a:"Mucous: the adjective — describes membranes that secrete mucus (e.g., mucous membrane)\nMucus: the noun — the secretion itself\nPalpation: physical examination technique of using hands to feel body structures\nPalpitation: awareness of one's own heartbeat (often abnormally fast or irregular)"},
+    {q:"Spell these laboratory terms: complete blood count, cerebrospinal fluid, culture and sensitivity", a:"Complete blood count — abbreviated CBC\nCerebrospinal fluid — cere-bro-spi-nal; abbreviated CSF\nCulture and sensitivity — abbreviated C&S; determines what antibiotic a pathogen is sensitive to"},
+    {q:"Spell these pharmacology terms: inflammation reliever that is not steroidal, clot-preventing drug, high blood pressure drug", a:"Non-steroidal anti-inflammatory drug — abbreviated NSAID\nAnticoagulant — 'anti-' + 'coagul' + '-ant'\nAntihypertensive — 'anti-' + 'hyper' + 'tens' + '-ive'"},
+    {q:"Spell these infection control terms: the process of killing all microorganisms, reducing microbial count to safe levels, preventing infection through clean technique", a:"Sterilisation — ster-il-is-a-tion (kills ALL including spores)\nDisinfection — dis-in-fec-tion (reduces pathogens but not spores)\nAsepsis or aseptic technique — a-sep-sis (without infection/contamination)"},
+    {q:"Spell these mental health terms: inability to feel pleasure, abnormal compulsive preoccupation, intense episode of elevated mood", a:"Anhedonia — an-he-do-ni-a\nObsession — ob-ses-sion (the thought); compulsion — com-pul-sion (the behaviour)\nMania — ma-ni-a; manic episode"},
+    {q:"Spell these endocrine/metabolic terms: excessive sugar in blood, sugar in urine, low blood sugar", a:"Hyperglycaemia — hyper-glyc-aem-ia (US: hyperglycemia)\nGlycosuria — glyc-os-ur-ia (sugar in urine)\nHypoglycaemia — hypo-glyc-aem-ia (US: hypoglycemia)"},
+    {q:"Spell these common abbreviations when written out in full: MI, CVA, COPD", a:"MI: myocardial infarction — my-o-car-di-al in-farc-tion\nCVA: cerebrovascular accident — ce-re-bro-vas-cu-lar ac-ci-dent\nCOPD: chronic obstructive pulmonary disease — chron-ic ob-struc-tive pul-mo-na-ry dis-ease"},
+  ],
+};
+
+// ── HUMAN GROWTH AND DEVELOPMENT ──────────────────────────────────────────
+_hosaDecks.hg = {
+  theories: [
+    {q:"What is the difference between growth and development?", a:"Growth: an increase in physical size — quantitative; measurable in inches, centimetres, pounds, kilograms.\nDevelopment: the progressive acquisition of skills and the capacity to function — qualitative; results from learning and maturation.\nBoth occur simultaneously and are interdependent. Development results from experience AND maturation."},
+    {q:"What is maturation?", a:"Maturation: the biological process by which skills and potential emerge independent of practice or training — attainment of the full development of a particular skill. Occurs as part of the natural developmental sequence. E.g., walking emerges when neural pathways are mature enough, not just from practice."},
+    {q:"What are Erikson's 8 stages of psychosocial development?", a:"1. Trust vs Mistrust (0–1): hope\n2. Autonomy vs Shame & Doubt (1–3): will\n3. Initiative vs Guilt (3–6): purpose\n4. Industry vs Inferiority (6–12): competence\n5. Identity vs Role Confusion (12–18): fidelity\n6. Intimacy vs Isolation (18–40): love\n7. Generativity vs Stagnation (40–65): care\n8. Integrity vs Despair (65+): wisdom"},
+    {q:"What are Piaget's 4 stages of cognitive development?", a:"1. Sensorimotor (0–2): learns through senses and motor actions; develops object permanence\n2. Preoperational (2–7): symbolic thinking, language; egocentric; no conservation\n3. Concrete operational (7–11): logical thinking about concrete objects; conservation mastered\n4. Formal operational (12+): abstract reasoning, hypothetical thinking, systematic problem-solving"},
+    {q:"What is Freud's theory of psychosexual development?", a:"Freud proposed personality develops through 5 stages focusing on erogenous zones:\n1. Oral (0–1): feeding\n2. Anal (1–3): toilet training\n3. Phallic (3–6): Oedipus/Electra complex\n4. Latency (6–12): suppressed sexuality; social skills\n5. Genital (12+): sexual maturity\nUnresolved conflicts at any stage produce fixations affecting adult personality."},
+    {q:"What is Maslow's hierarchy of needs?", a:"A motivational theory in which lower-level needs must be largely met before higher-level needs become motivating:\n1. Physiological: food, water, shelter, sleep\n2. Safety: security, stability, freedom from fear\n3. Love/belonging: relationships, acceptance\n4. Esteem: achievement, recognition, self-respect\n5. Self-actualisation: reaching full potential\nHealth care workers address basic needs first."},
+    {q:"What is Kohlberg's theory of moral development?", a:"Three levels, each with two stages:\nPreconventional (children): morality based on punishment/reward\n• Stage 1: avoid punishment; Stage 2: satisfy own needs\nConventional (adolescents/adults): morality based on social rules\n• Stage 3: please others; Stage 4: maintain law and order\nPostconventional (some adults): morality based on principles\n• Stage 5: social contract; Stage 6: universal ethical principles"},
+    {q:"What are cephalocaudal and proximodistal development patterns?", a:"Cephalocaudal: development proceeds from head downward toward the feet. Infants gain head/neck control before trunk, then leg control.\nProximodistal: development proceeds from the centre of the body outward toward the extremities. Trunk control develops before shoulder control, then arm, then hand, then fine finger motor control."},
+    {q:"What are the two major influences on growth and development?", a:"1. Nature (heredity/genetics): genetic blueprint from parents — determines potential for height, intelligence, temperament, and biological development. Sex is determined by XX (female) or XY (male) chromosomes.\n2. Nurture (environment): prenatal environment, nutrition, stimulation, culture, education, relationships, and experiences — shapes how genetic potential is expressed."},
+    {q:"What are the common defence mechanisms as defined in psychology?", a:"Repression: pushing threatening thoughts into the unconscious\nDenial: refusing to accept reality\nRationalisation: logical excuses for unacceptable behaviour\nProjection: attributing own impulses to others\nDisplacement: redirecting emotions to a safer target\nSublimation: channelling impulses into socially acceptable activities\nRegression: reverting to earlier behaviour under stress"},
+    {q:"What is Vygotsky's sociocultural theory?", a:"Lev Vygotsky emphasised social interaction and culture in cognitive development — disagreed with Piaget's individual-focused model.\nZone of Proximal Development (ZPD): the gap between what a child can do independently and what they can achieve with guidance from a more knowledgeable other.\nScaffolding: temporary support provided by a teacher/parent that is gradually removed as the child becomes capable.\nLanguage is central to cognitive development."},
+    {q:"What is Bronfenbrenner's ecological systems theory?", a:"Development is shaped by multiple nested environmental systems:\nMicrosystem: immediate environment — family, school, peers, neighbourhood\nMesosystem: interactions between microsystems — parent-school relationship\nExosystem: settings that indirectly affect child — parent's workplace, community services\nMacrosystem: culture, laws, values, customs\nChronosystem: time — historical events and life transitions\nAll systems interact to shape development."},
+    {q:"What are the 5 common characteristics of growth and development?", a:"1. Occurs in orderly sequence (predictable progression)\n2. Continuous throughout the lifespan\n3. Proceeds from simple to complex (head to toe, proximal to distal)\n4. Rate varies among individuals — all children develop at their own pace\n5. Each stage builds on previous stages (interdependence of stages)"},
+    {q:"What is attachment theory (Bowlby)?", a:"John Bowlby's theory that infants have a biological drive to form close emotional bonds with caregivers for safety and security.\nSecure attachment: responsive caregiver → child explores freely, uses caregiver as safe base\nInsecure-avoidant: unresponsive caregiver → child suppresses need for comfort\nInsecure-ambivalent/resistant: inconsistent caregiver → clingy, anxious\nDisorganised: frightening caregiver → inconsistent behaviour\nEarly attachment patterns affect later relationships and mental health."},
+  ],
+  prenatal_infancy: [
+    {q:"What are the three stages of prenatal development?", a:"Germinal stage (weeks 0–2): fertilisation to implantation — rapid cell division, blastocyst forms\nEmbryonic stage (weeks 3–8): formation of major organ systems, embryo most vulnerable to teratogens\nFoetal stage (week 9 – birth): rapid growth and refinement of organ systems — heartbeat detectable by 6–7 weeks; viability at ~22–24 weeks"},
+    {q:"What is a teratogen?", a:"A teratogen is any environmental agent (physical or chemical) that can cause birth defects or developmental abnormalities when the foetus is exposed during prenatal development.\nExamples: alcohol (foetal alcohol spectrum disorder), tobacco, most recreational drugs, certain prescription medications, radiation, rubella virus, toxoplasmosis, lead, mercury.\nMost harmful during the embryonic stage when organ systems are forming."},
+    {q:"What is foetal alcohol spectrum disorder (FASD)?", a:"FASD: a range of permanent birth defects caused by prenatal alcohol exposure.\nEffects: intellectual disability, facial abnormalities (thin upper lip, flat philtrum, small eye openings), microcephaly, behaviour/learning problems, growth restriction.\nNo safe amount of alcohol during pregnancy has been established.\nFASD is entirely preventable by abstaining from alcohol during pregnancy."},
+    {q:"What is the APGAR score?", a:"A rapid assessment of a newborn's condition at 1 and 5 minutes after birth.\nFive criteria, each scored 0–2:\nA — Appearance (skin colour)\nP — Pulse (heart rate): >100 = 2\nG — Grimace (reflex irritability)\nA — Activity (muscle tone)\nR — Respiration\nTotal 7–10: normal; 4–6: needs assistance; 0–3: resuscitation needed"},
+    {q:"What are the normal reflexes present in newborns?", a:"Rooting: touch cheek → turns toward touch and opens mouth (feeding reflex)\nSucking: object in mouth → rhythmic sucking\nMoro (startle): sudden movement or noise → arms extend outward, then embrace\nPalmar grasp: touch palm → fingers curl and grip\nPlantar grasp: touch sole → toes curl\nBabinski: stroke outer sole → big toe extends up, others fan out (normal in infants; abnormal in adults)"},
+    {q:"What is the normal sequence of motor development in infancy?", a:"Follows cephalocaudal pattern:\n1 month: lifts head briefly when prone\n2–3 months: holds head steady; social smile\n4–5 months: rolls over; grasps objects\n6 months: sits with support; transfers objects between hands\n9 months: sits independently; pulls to stand; pincer grasp developing\n12 months: stands alone; first words; walks (range: 9–15 months)"},
+    {q:"What is the difference between gross and fine motor development?", a:"Gross motor: large muscle movements involving the whole body — rolling, sitting, crawling, walking, running.\nFine motor: small precise movements of hands and fingers — grasping, pinching, writing, drawing.\nGross motor develops before fine motor (proximodistal pattern). Fine motor requires both muscular control and visual coordination."},
+    {q:"What are normal cognitive milestones in infancy?", a:"Object permanence: understanding that objects continue to exist when out of sight — develops ~4–8 months. Before this, 'out of sight = out of mind.'\nCause and effect: infant learns actions cause predictable responses\nImitation: begins 4–6 months; deferred imitation (copying after delay) develops ~9–12 months\nLanguage: cooing (2 months), babbling (6 months), first words (~12 months)"},
+    {q:"What is failure to thrive (FTT)?", a:"A condition in which an infant or young child fails to gain adequate weight, grow appropriately, or develop physically and cognitively as expected.\nOrganic FTT: underlying medical condition (cardiac, digestive, metabolic)\nNon-organic FTT: inadequate nutrition/stimulation — often related to neglect, poverty, feeding difficulties, or caregiver attachment issues.\nConsequences: delayed development, compromised immune function, long-term cognitive effects."},
+    {q:"What are the immunisation schedule milestones in infancy?", a:"Key vaccines in infancy (general schedule):\nBirth: Hepatitis B\n2 months: DTaP, Hib, IPV, PCV, Hep B, Rotavirus\n4 months: DTaP, Hib, IPV, PCV, Rotavirus\n6 months: DTaP, Hib, IPV, PCV, Hep B, Influenza\n12–15 months: MMR, Varicella, Hep A, Hib booster, PCV booster\nNote: schedules vary by country and jurisdiction."},
+    {q:"What is sudden infant death syndrome (SIDS)?", a:"SIDS: the sudden, unexplained death of an apparently healthy infant under 1 year of age that remains unexplained after thorough investigation.\nRisk factors: prone sleeping position, soft bedding, overheating, secondhand smoke exposure, prematurity, male sex.\nPrevention: 'Back to Sleep' (supine position), firm flat mattress, no loose bedding, no sharing sleep surface with adults who smoke, avoid overheating."},
+    {q:"What are the dominant and recessive inheritance patterns?", a:"Dominant gene: expresses its trait whether paired with another dominant OR a recessive gene (only one copy needed)\nRecessive gene: only expresses its trait when paired with another recessive gene (two copies needed)\nXX = biological female; XY = biological male\nSex-linked traits: carried on the X chromosome — affect males more often (they have only one X)\nExamples: dominant — Huntington's disease; recessive — cystic fibrosis, sickle cell, PKU"},
+    {q:"What is the prenatal period and what determines sex?", a:"The prenatal period spans from fertilisation to birth — approximately 38–40 weeks (266 days from fertilisation; 280 days from last menstrual period).\nSex determination: the ovum always carries an X chromosome. Sperm carries either X or Y.\n• XX = female; XY = male\nDominant vs recessive genes determine other inherited traits.\nTeratogens are most harmful during weeks 3–8 (embryonic stage) when organ systems form."},
+  ],
+  childhood_adoles: [
+    {q:"What are Erikson's psychosocial stages during childhood?", a:"Ages 1–3 (Autonomy vs Shame & Doubt): toddler develops sense of independence and self-control\nAges 3–6 (Initiative vs Guilt): preschooler initiates activities and develops purpose; excessive restriction leads to guilt\nAges 6–12 (Industry vs Inferiority): school-age child masters skills and gains competence; failure leads to inferiority\nHealthy resolution: autonomy, initiative, and competence build a positive self-concept."},
+    {q:"What are the major physical changes during early childhood (1–6 years)?", a:"Age 12–15 months: walking\nAge 2: can run; knock-knee appearance; 20 primary teeth\nAge 3: rides tricycle; climbs stairs alternating feet\nAge 4: hops on one foot\nAge 5: skips; draws a person with 6 body parts\nBrain: myelination completes at 6–7 years → increased coordination and fine motor control\nAnterior fontanel closes at 18 months"},
+    {q:"What are Piaget's preoperational and concrete operational stages?", a:"Preoperational (2–7): uses symbols (words and images), intuitive thinking; key limitations:\n• Egocentrism: cannot take another's perspective\n• Centration: focuses on one aspect at a time\n• Lack of conservation: doesn't understand quantity stays same when appearance changes\n\nConcrete operational (7–12): logical, systematic thinking about concrete objects; masters conservation, classification, and seriation; less egocentric"},
+    {q:"What are the nutritional recommendations for young children?", a:"1–3 years: ~1,000–1,400 kcal/day; transition from formula/breast milk to whole cow's milk; chopped table foods; small frequent meals\n4–6 years: ~1,200–1,600 kcal/day\nImportant nutrients: calcium (bone growth), iron (prevents anaemia), vitamin D\nAvoid: honey in infants <1 year (botulism), whole nuts (choking), excessive juice\nNew food introduction: one new food at a time, multiple exposures, avoid using food as reward/punishment"},
+    {q:"What are the physical and hormonal changes during puberty?", a:"Girls (average onset 8–13 years):\n• Breast development (thelarche) — first sign\n• Pubic/axillary hair, growth spurt, menstruation (menarche)\n• Oestrogen drives changes\n\nBoys (average onset 9–14 years):\n• Testicular enlargement — first sign\n• Pubic/axillary/facial hair, growth spurt, voice deepening, spermarche\n• Testosterone drives changes\n\nGH surge in both sexes during growth spurt"},
+    {q:"What is Erikson's adolescent stage?", a:"Identity vs Role Confusion (ages 12–18): the adolescent explores and consolidates a sense of personal identity — who they are, their values, beliefs, and future role.\nFidelity (loyalty/commitment) is the strength developed in successful resolution.\nRole confusion: failure to form a cohesive identity → uncertainty about self and role in society\nAdolescents experiment with different roles, peer groups, and ideologies as part of healthy identity formation."},
+    {q:"What are the cognitive and moral changes during adolescence?", a:"Cognitive: enters Piaget's formal operational stage — abstract reasoning, hypothetical thinking, systematic problem-solving, metacognition (thinking about one's own thinking)\nMoral: may reach Kohlberg's conventional or postconventional level — reasoning based on social contracts or universal principles (not just rules)\nPersonal fable: adolescent belief in their own uniqueness and invulnerability — contributes to risk-taking\nImaginary audience: belief that others are always watching and judging them"},
+    {q:"What are common health and safety concerns in school-age children?", a:"Injury prevention: motor vehicle safety (seat belts), bicycle helmets, water safety, fire safety\nNutrition: childhood obesity risk — encourage fruits, vegetables, limit processed foods and sugar-sweetened beverages\nScreening: vision and hearing, dental check-ups, BMI monitoring\nVaccinations: boosters per schedule\nMental health: bullying, school anxiety, ADHD, depression in older school-age\nPhysical activity: 60 min moderate-vigorous activity/day recommended"},
+    {q:"What are the socioemotional changes during middle childhood (6–12 years)?", a:"Peer relationships become increasingly important — compare themselves to peers\nSelf-concept becomes more realistic and complex\nDevelop empathy and perspective-taking\nCo-operative play; team sports; rule-following\nErikson: industry stage — mastery of academic and social skills\nChildren can understand the permanence of death (~8–9 years)"},
+    {q:"What disciplinary approaches are recommended for children?", a:"Effective discipline:\n• Set clear, consistent, and developmentally appropriate expectations\n• Positive reinforcement: praise and reward desired behaviour\n• Natural/logical consequences: let child experience appropriate consequences\n• Brief time-outs (1 min per year of age) for young children\n• Remove privileges for older children\nAvoid: harsh physical punishment (linked to aggression and poor outcomes); shaming; inconsistency"},
+    {q:"What are effective teaching strategies for children at different ages?", a:"Preschool/early childhood: play-based, concrete hands-on activities, repetition, short attention spans\nSchool-age: structured learning, peer collaboration, feedback, building on prior knowledge\nAdolescents: abstract discussion, relate content to real life, encourage autonomy, problem-based learning\nAll ages benefit from: clear expectations, positive reinforcement, respect, appropriate challenge level, safe learning environment"},
+    {q:"What is the role of peer relationships in adolescent development?", a:"Peers become the primary social reference group in adolescence — for support, values, and identity formation.\nFunctions: provide emotional support, feedback on developing identity, model social behaviours, increasing independence from family.\nRisks: peer pressure (substance use, risk-taking), bullying, social media comparisons.\nPositive peer relationships are protective — associated with better academic and mental health outcomes."},
+  ],
+  geriatrics: [
+    {q:"How is 'old age' defined?", a:"Old age is generally defined as age 65 and older. Advanced old age refers to those over 75.\nSenescence: the biological process of gradual ageing and weakening — a signal of the final stage of the lifespan.\nThe term 'seniors' is preferred over 'elderly.'\nSince ageing is not a disease, the definition varies — people now live longer with better healthcare."},
+    {q:"What are the major biological theories of ageing?", a:"Wear-and-tear theory: cumulative damage to cells and organs over time\nFree radical theory: reactive oxygen species damage DNA, proteins, and membranes\nCellular senescence/Hayflick limit: cells can only divide ~50 times before stopping\nTelomere shortening: telomeres shorten with each division → cell ageing\nGenetic/programmed theory: genes determine maximum lifespan\nImmune decline: reduced immune function with age → ↑ cancer, infection"},
+    {q:"What are the physiological changes of ageing?", a:"Cardiovascular: ↓ cardiac output, ↑ peripheral resistance, arteriosclerosis\nRespiratory: ↓ lung capacity, ↓ cough effectiveness, ↑ pneumonia risk\nMusculoskeletal: sarcopenia (muscle mass loss), osteoporosis, joint stiffness\nNervous: ↓ reaction time, short-term memory decline, ↓ sensory acuity\nRenal: ↓ GFR, ↓ drug clearance → drug toxicity risk\nDigestive: ↓ motility, ↓ absorption, ↓ stomach acid\nIntegumentary: wrinkles, ↓ elasticity, ↓ wound healing, ↓ vitamin D synthesis"},
+    {q:"What are the psychological changes associated with ageing?", a:"Cognitive: processing speed slows; short-term memory may decline; long-term memory and wisdom generally preserved\nPersonality: relatively stable in older adulthood\nMental health: depression and anxiety common but NOT a normal part of ageing — require treatment\nErikson's stage 8 (Ego integrity vs Despair): older adults reflect on their lives — if they find meaning → integrity; if filled with regret → despair"},
+    {q:"What is dementia and what are its types?", a:"Dementia: an acquired, progressive decline in cognitive function affecting memory, thinking, behaviour, and the ability to perform daily activities.\nAlzheimer's disease: 60–80% — amyloid plaques and tau tangles → neuron death\nVascular dementia: 10–20% — series of small strokes\nLewy body dementia: abnormal protein deposits; hallucinations, Parkinsonism\nFrontotemporal dementia: behavioural and language changes; younger onset\nNOT a normal part of ageing."},
+    {q:"What is the difference between delirium and dementia?", a:"Delirium: acute, sudden onset; reversible; fluctuating consciousness; often has identifiable cause (infection, medication, electrolyte imbalance) — a medical emergency in the elderly.\nDementia: gradual onset; progressive; consciousness typically clear until late stages; no single reversible cause.\nDelirium superimposed on dementia: common and worsens outcomes — always look for a treatable cause when acute confusion occurs in a person with dementia."},
+    {q:"What are the options for end-of-life care?", a:"Palliative care: specialised medical care focused on relief from symptoms, pain, and stress of serious illness — can occur alongside curative treatment at any stage.\nHospice care: a form of palliative care for those with terminal illness and a prognosis of 6 months or less — focuses on comfort rather than cure.\nGoal: improve quality of life for patient and family through symptom management, emotional support, and dignity in dying."},
+    {q:"What are the advance directives and their types?", a:"Advance directive: a legal document stating a person's wishes for medical care when they cannot speak for themselves.\nLiving will: written instructions about specific medical treatments (e.g., no ventilator, no CPR)\nDurable power of attorney for healthcare (healthcare proxy): designates another person to make decisions\nDNR (Do Not Resuscitate): specific order not to perform CPR\nPOLST (Physician Orders for Life-Sustaining Treatment): a medical order (not just a preference)"},
+    {q:"What are Kübler-Ross's five stages of grief?", a:"Elisabeth Kübler-Ross's model of grief and dying (not necessarily sequential or all experienced):\n1. Denial: 'This isn't happening'\n2. Anger: 'Why me? This isn't fair'\n3. Bargaining: 'I'll do anything if...'\n4. Depression: profound sadness and withdrawal\n5. Acceptance: coming to terms with the reality\nPeople move between stages and not everyone experiences all five."},
+    {q:"How do children understand death at different ages?", a:"Under 3 years: do not understand death; may sense absence and become anxious\n3–5 years: see death as temporary or reversible; magical thinking; may ask same questions repeatedly\n6–8 years: begin to understand death is permanent and universal; fear of dying themselves\n9–12 years: understand death is inevitable for all; more realistic; may worry about family members dying\nAdolescents: adult understanding but may react with risk-taking or existential questioning"},
+    {q:"What are the characteristics of healthy ageing and successful ageing?", a:"Rowe and Kahn model of successful ageing:\n1. Low probability of disease and disease-related disability\n2. Maintenance of high physical and cognitive function\n3. Active engagement with life (social relationships and productive activities)\nHealth promotion in older adults: regular physical activity (reduces fall risk), healthy diet, social engagement, cognitive stimulation, vaccinations, medication management, fall prevention."},
+    {q:"What are the special geriatric care considerations?", a:"Polypharmacy: use of ≥5 medications — ↑ risk of adverse drug reactions and interactions; medication review essential\nFall prevention: assess for fall risk (balance, vision, footwear, medications); modify environment\nPressure injuries (pressure ulcers): ↑ risk due to ↓ mobility, ↓ skin integrity, ↑ time in bed; stage I–IV\nMalnutrition and dehydration: ↓ thirst sensation, ↓ appetite, ↓ absorption\nAbuse and neglect: older adults are vulnerable; mandatory reporting in most jurisdictions"},
+  ],
+};
+
+// ── MEDICAL LAW AND ETHICS ────────────────────────────────────────────────
+_hosaDecks.ml = {
+  law_ethics_basics: [
+    {q:"What is the difference between law and ethics?", a:"Law: societal rules and regulations enacted by governments — failure to comply results in criminal or civil penalties. Medical laws regulate licensure, safety, liability, and insurance.\nEthics: moral principles governing right and wrong conduct — cultural and individual; violations may be professional misconduct but not necessarily illegal.\nIn healthcare, law sets the minimum standard; ethics sets the ideal."},
+    {q:"What are the four principles of bioethics (principlism)?", a:"Autonomy: respect the patient's right to make informed decisions about their own care\nBeneficence: act in the patient's best interest — 'do good'\nNon-maleficence: avoid causing harm — 'do no harm' (primum non nocere)\nJustice: fair and equitable distribution of healthcare resources and treatment\nThese four principles form the foundation of modern medical ethics (Beauchamp and Childress)."},
+    {q:"What is the Hippocratic Oath?", a:"A foundational ethical oath attributed to Hippocrates (~400 BC), known as the 'Father of Medicine.' The original oath included principles of confidentiality, non-maleficence, and the obligation to help the sick.\nModern versions retain core principles: patient welfare first, confidentiality, non-maleficence.\nMany medical schools administer a form of the oath at graduation.\nKey principle: 'First, do no harm' (primum non nocere)"},
+    {q:"What is the difference between criminal law and civil law in healthcare?", a:"Criminal law: concerns offences against society — prosecuted by the state. Examples: fraud, criminal negligence, assault, drug diversion. Results in criminal penalties (fines, imprisonment).\nCivil law (tort law): concerns disputes between individuals — plaintiff sues defendant. Examples: malpractice, breach of contract. Results in monetary damages.\nMost medical-legal issues are civil, but criminal charges can result from gross negligence or intentional acts."},
+    {q:"What is malpractice and what must be proven?", a:"Medical malpractice: professional negligence — a healthcare provider fails to meet the standard of care, causing harm.\nFour elements (all must be proven):\n1. Duty: a professional relationship existed\n2. Breach: the provider deviated from the standard of care\n3. Causation: the breach directly caused the harm\n4. Damages: actual harm (physical, financial, emotional) resulted"},
+    {q:"What is the standard of care?", a:"The standard of care is the level and type of care that a reasonably competent healthcare professional with similar training and experience would provide in the same or similar circumstances.\nDetermining factors: medical specialty, current evidence, professional guidelines, technology available.\nExpert witnesses testify to establish the standard of care in malpractice cases."},
+    {q:"What is respondeat superior?", a:"Latin for 'let the master answer' — a legal doctrine making an employer (e.g., a hospital or clinic) legally responsible for the negligent acts of their employees performed within the scope of their employment.\nImplication: healthcare organisations can be sued for the actions of their staff members acting in their professional capacity."},
+    {q:"What is professional negligence vs ordinary negligence?", a:"Professional negligence (malpractice): negligence by a licensed professional that violates the standard of care — e.g., a nurse administering the wrong medication, a physician misdiagnosing a condition.\nOrdinary negligence: failure to exercise ordinary reasonable care — e.g., a hospital employee leaving a wet floor without a warning sign.\nBoth can result in civil liability; malpractice involves the professional standard."},
+    {q:"What is the healthcare provider-patient relationship and how does it begin?", a:"A provider-patient relationship (an implied contract for services) begins when a healthcare provider agrees to examine or treat a patient and the patient accepts. Once begun:\n• Provider must continue care as long as needed (no abandonment)\n• Provider must maintain confidentiality\n• Patient must provide truthful history\n• Either party can end the relationship with proper notice (the provider cannot abandon a patient without adequate notice and time to find alternative care)."},
+    {q:"What are the nine AMA principles of medical ethics?", a:"The American Medical Association lists nine principles including:\n1. Compassionate care\n2. Honesty and integrity\n3. Respect for law and patients\n4. Respect for colleagues\n5. Continued study and application of knowledge\n6. Freedom of association\n7. Patient and community health responsibility\n8. Access to medical care\n9. Support for quality improvements"},
+    {q:"What is the difference between a misdemeanour and a felony?", a:"Misdemeanour: a less serious criminal offence — punishable by fines or imprisonment <1 year (e.g., minor traffic violations, some drug offences)\nFelony: a serious criminal offence — punishable by imprisonment >1 year (e.g., criminal negligence causing death, assault, fraud)\nIn healthcare: a nurse convicted of a felony typically loses their professional licence."},
+    {q:"What is defamation and what are its two types?", a:"Defamation: making false statements that harm a person's reputation.\nSlander: spoken defamation — verbal statements\nLibel: written defamation — written, printed, or published statements (including social media)\nIn healthcare: making false statements about a patient's condition or falsely accusing a colleague of misconduct can constitute defamation."},
+    {q:"What is the difference between expressed and implied consent?", a:"Expressed consent: clearly stated — verbally or in writing (e.g., a signed surgical consent form)\nImplied consent: inferred from a person's actions or the circumstances:\n• Implied by conduct: holding out your arm for a blood draw\n• Emergency implied consent: when a patient is unconscious and unable to consent, the law presumes they would consent to life-saving treatment\nImplied consent does NOT cover invasive procedures requiring detailed explanation."},
+    {q:"What is informed consent?", a:"Informed consent: the patient's voluntary, competent agreement to a treatment after receiving adequate information including:\n• The nature of the proposed treatment\n• Expected benefits\n• Material risks and potential complications\n• Reasonable alternatives\n• Consequences of refusing treatment\nRequirements: the patient must be competent, adequately informed, and the consent must be voluntary (no coercion)."},
+  ],
+  legal_environment: [
+    {q:"What are the three branches of the US government and their roles?", a:"Legislative branch: Congress (Senate + House of Representatives) — creates laws (legislation)\nExecutive branch: President, cabinet, and administrative agencies — enforces and implements laws\nJudicial branch: Federal and Supreme Court judges — interprets laws and the Constitution\nFederal system: power is divided between the federal (national) and state governments (checks and balances)."},
+    {q:"What is a statute and how does it become law?", a:"A statute is a law passed by a legislative body (Congress or state legislature).\nProcess: bill introduced → committee review → floor debate and vote in both chambers → signed by the executive (President/Governor) → becomes law.\nHealthcare statutes: HIPAA (1996), Affordable Care Act (2010), Medicare/Medicaid Act (1965), Emergency Medical Treatment and Labor Act (EMTALA)"},
+    {q:"What are administrative agencies and their role in healthcare?", a:"Administrative agencies are government bodies created by legislation to implement and enforce specific laws. Examples:\nFDA (Food and Drug Administration): drug and food safety\nCDC (Centers for Disease Control): public health\nCMS (Centers for Medicare and Medicaid Services): healthcare financing\nOSHA: workplace safety\nJoint Commission: hospital accreditation\nThey create regulations that have the force of law."},
+    {q:"What is HIPAA and what are its main requirements?", a:"HIPAA (Health Insurance Portability and Accountability Act, 1996): federal law protecting patient health information.\nPrivacy Rule: restricts who can access and share Protected Health Information (PHI)\nSecurity Rule: safeguards electronic PHI (ePHI)\nBreaches: covered entities must notify affected individuals and HHS of breaches\nCivil and criminal penalties for violations\nPatients have rights to access their records and request amendments."},
+    {q:"What is EMTALA?", a:"Emergency Medical Treatment and Labor Act (1986): federal law requiring hospitals with emergency departments to:\n• Provide a medical screening examination to any person who comes for emergency care, regardless of ability to pay\n• Stabilise any emergency medical condition before transferring or discharging\n• Not refuse care based on insurance status, race, ethnicity, or ability to pay\nViolations: substantial fines and potential loss of Medicare participation."},
+    {q:"What is a healthcare tort and what are the main types?", a:"Tort: a civil wrong causing harm to another — basis of most malpractice claims.\nNegligence: unintentional; failure to meet the standard of care (most common healthcare tort)\nIntentional torts: deliberate harmful acts:\n• Assault: threat of harm\n• Battery: unlawful touching without consent (e.g., performing surgery without informed consent)\n• False imprisonment: unlawful restraint or confinement\n• Invasion of privacy, defamation"},
+    {q:"What is abandonment in healthcare?", a:"Abandonment: the unilateral termination of a provider-patient relationship by the healthcare provider without giving the patient reasonable notice or time to obtain alternative care.\nTo legally end a patient relationship: provide written notice, allow reasonable time to find another provider, transfer records.\nAbandonment is a form of negligence and can result in licence revocation, civil liability, and malpractice claims."},
+    {q:"What is vicarious liability?", a:"Vicarious liability: one party is held legally responsible for the negligent or wrongful acts of another party.\nIn healthcare: hospitals are vicariously liable for the negligent acts of their employees (respondeat superior doctrine).\nExtended to: supervising physicians for medical students and residents; staffing agencies for their personnel.\nAn independent contractor is generally not covered — only employees working within their scope."},
+    {q:"What is the Patient Self-Determination Act (PSDA)?", a:"The Patient Self-Determination Act (1990): federal law requiring healthcare facilities receiving Medicare/Medicaid funding to:\n• Inform adult patients of their right to make medical decisions\n• Inform patients of their right to create advance directives\n• Ask patients if they have an advance directive\n• Not discriminate based on whether a patient has an advance directive\n• Educate staff and community about advance directives"},
+    {q:"What are the types of advance directives?", a:"Living will: a written document specifying what medical interventions a person does or does not want if incapacitated (e.g., no ventilator, no CPR, no tube feeding)\nHealthcare proxy / Durable Power of Attorney for Healthcare: designates a specific person to make medical decisions\nDNR order: do not resuscitate — physician order that CPR should not be attempted\nDNI: do not intubate\nPOLST/MOLST: medical orders (more specific and immediately actionable than advance directives)"},
+    {q:"What is the healthcare professional's duty to report?", a:"Healthcare professionals are legally mandated to report certain conditions:\nChild abuse and neglect: mandatory in all jurisdictions\nElder abuse: mandatory in most jurisdictions\nCommunicable/notifiable diseases: to public health authorities (e.g., TB, HIV in some places, COVID-19)\nGunshotWounds: to police in most jurisdictions\nChild abduction: to law enforcement\nSuspected domestic violence: mandatory in some jurisdictions"},
+    {q:"What is res ipsa loquitur?", a:"Latin for 'the thing speaks for itself' — a legal doctrine applied when negligence is self-evident without requiring expert testimony.\nConditions: (1) the injury would not normally occur without negligence, (2) the defendant had exclusive control over the cause, (3) the plaintiff did not contribute to the injury.\nExample: a surgical sponge left inside a patient after surgery — it is self-evident that someone was negligent without needing extensive expert analysis."},
+    {q:"What is a subpoena in a healthcare context?", a:"A subpoena is a legal order requiring a person to appear in court or produce documents.\nSubpoena ad testificandum: requires a person to appear and testify\nSubpoena duces tecum: requires a person to produce documents or records (e.g., medical records, billing records)\nHealthcare providers are legally required to comply with a subpoena. Medical records subpoenaed through proper legal channels can be released without violating HIPAA."},
+  ],
+  bioethical_issues: [
+    {q:"What is bioethics?", a:"Bioethics: the branch of ethics concerned with moral questions arising from biological science and medicine. Encompasses: clinical ethics (individual patient care decisions), research ethics (human and animal subjects), public health ethics, and healthcare policy.\nKey questions: When does human life begin? Who has the right to make healthcare decisions? How should scarce resources be allocated?"},
+    {q:"What is the principle of autonomy in healthcare?", a:"Autonomy: the patient's right to make informed, voluntary decisions about their own medical care — including the right to refuse treatment.\nRequirements for valid autonomous decision-making:\n1. The patient must be competent (have decision-making capacity)\n2. The patient must be adequately informed\n3. The decision must be voluntary (free from coercion)\nHealthcare providers must respect patient autonomy even when they disagree with the decision."},
+    {q:"What is patient competence (decision-making capacity)?", a:"Competence (legal term) / Decision-making capacity (clinical term): the ability to make an informed healthcare decision.\nFour components:\n1. Understanding: ability to comprehend information\n2. Appreciation: recognising the personal implications of the decision\n3. Reasoning: ability to weigh options and consequences\n4. Expression: ability to communicate the decision\nLegal competence is determined by courts; clinical capacity is assessed by clinicians."},
+    {q:"What ethical issues surround organ transplantation?", a:"Allocation: how are scarce organs distributed fairly? (UNOS in the US uses waiting lists based on medical need, blood type, time waiting, and geographic location)\nConsent: opt-in vs opt-out (presumed consent) donation systems\nDefinition of death: brain death as the legal standard allows organ retrieval\nLiving donation: ethical when truly voluntary and fully informed\nOrgan trafficking: illegal sale of organs — violates autonomy and exploits vulnerable populations"},
+    {q:"What ethical issues surround genetic testing?", a:"Privacy: genetic information is highly personal — can reveal predisposition to disease for the individual AND family members\nDiscrimination: fear of insurance or employment discrimination based on genetic results\nPredictive testing: knowing you carry a gene for a fatal disease with no treatment (e.g., Huntington's) raises psychological and autonomy issues\nGenetic counselling: recommended before and after testing\nPrenatal genetic testing: raises issues of selective abortion and disability rights"},
+    {q:"What is the 7-step ethical decision-making model?", a:"1. Identify the ethical problem or dilemma\n2. Gather all relevant information (medical facts, patient values, legal requirements)\n3. Identify all stakeholders affected\n4. List all possible options/alternatives\n5. Analyse each option using ethical principles (autonomy, beneficence, non-maleficence, justice)\n6. Select the option that best balances competing principles\n7. Implement the decision and evaluate the outcome"},
+    {q:"What ethical issues surround end-of-life care?", a:"Withdrawal of treatment: removing life-sustaining interventions at the patient's or family's request — legal and ethical when the patient is terminal or has expressed this wish.\nPalliative sedation: sedating a patient to relieve intractable suffering — ethically permissible (doctrine of double effect)\nAid in dying (euthanasia/physician-assisted suicide): active hastening of death — legal in some jurisdictions (Canada's MAID, Oregon's Death with Dignity Act) but highly controversial."},
+    {q:"What is the difference between active and passive euthanasia?", a:"Active euthanasia: deliberately causing death through a direct action — e.g., administering a lethal injection at the patient's request. Illegal in most jurisdictions; legal as MAID in some.\nPassive euthanasia: withdrawing or withholding life-sustaining treatment — e.g., removing a ventilator, not starting dialysis. Legal and ethically accepted when it respects the patient's wishes.\nPhysician-assisted suicide: a physician provides the means (e.g., a prescription for a lethal dose) but the patient self-administers."},
+    {q:"What ethical issues surround abortion?", a:"Central ethical conflict: pro-life position prioritises the right to life of the foetus; pro-choice position prioritises the woman's autonomy over her own body.\nReligious, cultural, and political dimensions.\nLegal status varies widely by country and jurisdiction (e.g., post-Roe v. Wade 2022 in the US, individual states regulate abortion).\nHCP conscience rights: providers may legally refuse to perform procedures that violate their conscience — but cannot abandon patients and must provide referrals."},
+    {q:"What is research ethics and what are its principles?", a:"Principles governing human subjects research (Belmont Report, 1979):\n1. Respect for persons: autonomous participation, protect vulnerable subjects (informed consent, IRB)\n2. Beneficence: maximise benefits, minimise harms\n3. Justice: fair selection of subjects — don't burden vulnerable populations while benefiting others\nNuremberg Code: established standards after WWII research atrocities\nDeclaration of Helsinki: international standards for medical research involving humans"},
+    {q:"What is an Institutional Review Board (IRB)?", a:"An IRB (or Research Ethics Board — REB in Canada): an independent committee that reviews, approves, and monitors research involving human participants to ensure:\n• Participants' rights and welfare are protected\n• Research is ethically sound and scientifically valid\n• Informed consent procedures are appropriate\n• Risks are minimised and reasonable relative to benefits\nRequired by federal law in the US for any research receiving federal funding."},
+    {q:"What ethical issues surround resource allocation in healthcare?", a:"Scarcity: some healthcare resources (organs, ICU beds, ventilators) are limited — how are they fairly distributed?\nTriage: prioritise care based on medical need and likelihood of benefit\nRationing: formal system of limiting access to specific services\nPandemic ethics: allocation of scarce vaccines or ventilators\nJustice principle guides allocation: fair, equitable, based on need not ability to pay or social worth\nUtilitarian approach: greatest good for greatest number vs egalitarian: equal treatment regardless of outcome"},
+    {q:"What ethical issues surround confidentiality and when can it be breached?", a:"Patient confidentiality: healthcare providers have a duty to keep patient information private. Protects trust and encourages disclosure.\nPermissible disclosures without consent:\n• Other treating providers (need to know)\n• Mandatory reporting (abuse, notifiable diseases, gunshot wounds)\n• Court-ordered subpoena\n• Tarasoff duty to warn: if a patient credibly threatens to harm a specific identifiable person, the provider has a duty to warn/protect that person\nHIPAA codifies confidentiality obligations."},
+  ],
+  healthcare_env: [
+    {q:"What is the Patient Bill of Rights?", a:"A statement of rights that patients are entitled to when receiving healthcare. Key rights include:\n• Right to be informed of diagnosis, treatment, and prognosis\n• Right to informed consent\n• Right to refuse treatment\n• Right to privacy and confidentiality\n• Right to a respectful care environment\n• Right to access their medical records\n• Right to be informed of hospital policies\n• Right to receive emergency care regardless of ability to pay"},
+    {q:"What is credentialing and licensure?", a:"Licensure: a state/provincial government process granting permission to practice a regulated healthcare profession after meeting educational and examination requirements. Required for physicians, nurses, pharmacists, dentists, etc.\nCredentialing: a healthcare organisation's process of verifying a provider's qualifications, training, licensure, and experience before granting privileges to work there.\nScope of practice: the specific duties and procedures a licensed professional is permitted to perform based on their training and licensure."},
+    {q:"What is the difference between a registered nurse (RN) and a licensed practical nurse (LPN/LVN)?", a:"Registered Nurse (RN): 2–4 year degree; can perform assessments, develop care plans, administer medications, perform complex procedures, and supervise LPNs and unlicensed assistants.\nLicensed Practical/Vocational Nurse (LPN/LVN): 1-year program; provides basic nursing care under RN or physician supervision; limited scope of practice (varies by jurisdiction).\nNurse Practitioner (NP): advanced practice; master's or doctoral level; can diagnose, prescribe, and treat independently in many jurisdictions."},
+    {q:"What is accreditation in healthcare?", a:"Accreditation: a voluntary process in which an independent accrediting body (e.g., The Joint Commission in the US) evaluates a healthcare facility against established quality and safety standards.\nBenefits: enhances reputation, required for Medicare/Medicaid reimbursement, improves patient safety culture.\nThe Joint Commission (TJC): accredits hospitals, long-term care, and other healthcare facilities.\nHealthcare Accreditation Canada (Accreditation Canada): Canadian equivalent."},
+    {q:"What is the healthcare team and how does it function?", a:"Interdisciplinary healthcare team: providers from different disciplines working collaboratively to provide comprehensive patient care.\nMembers: physicians, nurses, pharmacists, physiotherapists, occupational therapists, social workers, dietitians, respiratory therapists, case managers, chaplains.\nKey principles: communication, mutual respect, shared goal of patient-centred care, defined roles and responsibilities."},
+    {q:"What is a scope of practice violation?", a:"A scope of practice violation occurs when a healthcare professional performs a procedure or makes a decision beyond what their licence and training authorise.\nExamples: an LPN performing a task reserved for RNs; a medical assistant diagnosing a patient; a pharmacy technician counselling a patient on drug therapy.\nConsequences: disciplinary action, licence revocation, civil liability, potential patient harm."},
+    {q:"What is the doctrine of charitable immunity and how has it changed?", a:"Historically, charitable institutions (including many hospitals) were immune from malpractice lawsuits (charitable immunity).\nModern standard: most jurisdictions have abolished charitable immunity — hospitals and other non-profit healthcare institutions are now subject to malpractice liability.\nSovereign immunity: government-run healthcare facilities retain some protection from lawsuits, though this has also been limited in many jurisdictions."},
+    {q:"What are the Nurse Practice Acts?", a:"Nurse Practice Acts (NPAs): state/provincial statutes that define the legal scope of nursing practice — what activities an RN, LPN, and advanced practice nurse may perform.\nKey elements: definition of nursing, educational requirements for licensure, scope of practice for each level, grounds for disciplinary action, and role of the State Board of Nursing.\nViolating an NPA can result in discipline by the State Board of Nursing, up to licence revocation."},
+    {q:"What is JCAHO (The Joint Commission) and what does it do?", a:"The Joint Commission (formerly JCAHO — Joint Commission on Accreditation of Healthcare Organizations): the largest healthcare accreditation body in the US.\nAccredits: hospitals, long-term care facilities, labs, ambulatory care, home health.\nSets: National Patient Safety Goals (NPSGs) — evidence-based safety standards that accredited facilities must meet.\nConducts: unannounced inspections every 3 years.\nCMS ties accreditation to Medicare/Medicaid participation."},
+    {q:"What is healthcare reform and what is the Affordable Care Act?", a:"The Affordable Care Act (ACA, 2010): US federal healthcare reform law aiming to:\n• Expand health insurance coverage (individual mandate, Medicaid expansion)\n• Protect patients with pre-existing conditions\n• Allow young adults to stay on parents' insurance until age 26\n• Create health insurance exchanges\n• Reduce overall healthcare costs\nRising healthcare costs are driven by: aging population, technology, chronic disease, administrative costs, and defensive medicine."},
+    {q:"What is primary, secondary, and tertiary healthcare?", a:"Primary care: first point of contact — prevention, routine check-ups, management of common conditions. Providers: family physicians, nurse practitioners, paediatricians.\nSecondary care: specialist care following referral from primary — e.g., cardiologist, orthopaedic surgeon.\nTertiary care: highly specialised, often complex care — e.g., cancer centres, cardiac surgery, neurosurgery, transplant centres.\nQuaternary care: highly experimental or new interventions — research hospitals."},
+    {q:"What are the major types of healthcare facilities?", a:"Acute care hospitals: treat sudden illness and injuries requiring short-term intensive care\nLong-term care facilities (nursing homes): care for individuals who cannot live independently due to chronic illness or disability\nRehabilitation centres: restore function after illness/injury (stroke rehab, orthopaedic rehab)\nAmbulatory care centres: outpatient procedures and same-day surgery\nHome health agencies: medical services delivered in the patient's home\nHospice: end-of-life comfort care (inpatient or home-based)"},
+  ],
+};
+
+// ── BUILD 'all' DECKS ────────────────────────────────────────────────────
+(function() {
+  // Include ALL event IDs that use loadHosaDeck — was previously missing emt/sm/rx/pt/cl/ds/vs/bt
+  const eids = ['mt','pp','mm','fs','bh','ms','hg','ml','emt','sm','rx','pt','cl','ds','vs','bt'];
+  eids.forEach(function(eid) {
+    if (!_hosaDecks[eid]) return;
+    if (_hosaDecks[eid].all && _hosaDecks[eid].all.length) return; // already built
+    var all = [];
+    Object.keys(_hosaDecks[eid]).forEach(function(k) {
+      if (k === 'all') return;
+      _hosaDecks[eid][k].forEach(function(c) {
+        all.push({q: c.q, a: c.a, deck: k});
+      });
+    });
+    _hosaDecks[eid].all = all;
+  });
+})();
+
+// ── UPDATE _hosaLabels and _panelToEid ───────────────────────────────────
+(function() {
+  // Add new labels
+  var newLabels = {
+    word_parts:'Word Parts: Roots, Prefixes & Suffixes',
+    body_systems:'Body Systems Terminology', pathology:'Pathology & Disease Terms',
+    abbreviations:'Medical Abbreviations', disease_concepts:'Disease Concepts & Terminology',
+    cardiovascular:'Cardiovascular & Circulatory', nervous_musculo:'Nervous System & Musculoskeletal',
+    endocrine_mental:'Endocrine System & Mental Disorders', math_essentials:'Math Essentials',
+    measurement:'Measurement & Conversion', drug_dosages:'Drug Dosages & IV Solutions',
+    solutions:'Dilutions & Concentrations', history_careers:'History, Careers & Evidence',
+    crime_scene:'Crime Scene & Death Investigation', dna_analysis:'DNA Analysis Techniques',
+    toxicology:'Forensic Toxicology & Anthropology', biological_mind:'The Biological Mind',
+    disorders:'Psychological Disorders', learning_memory:'Learning & Memory',
+    wellness_stress:'Wellness, Stress & Coping', prefixes_suffixes:'Prefixes & Suffixes',
+    procedures:'Procedures & Conditions', theories:'Theories of Development',
+    prenatal_infancy:'Prenatal Development & Infancy', childhood_adoles:'Childhood & Adolescence',
+    geriatrics:'Adulthood, Geriatrics & Grief', law_ethics_basics:'Law, Ethics & Bioethics Basics',
+    legal_environment:'The Legal Environment', bioethical_issues:'Bioethical Issues',
+    healthcare_env:'The Healthcare Environment'
+  };
+  Object.assign(_hosaLabels, newLabels);
+
+  // Add new panel-to-eid mappings
+  var newPanels = {
+    'medical-terminology':'mt', 'pathophysiology':'pp', 'medical-math':'mm',
+    'forensic-science':'fs', 'behavioral-health':'bh', 'medical-spelling':'ms',
+    'human-growth':'hg', 'medical-law':'ml'
+  };
+  Object.assign(_panelToEid, newPanels);
+})();
+
+// ─────────────────────────────────────────
+//  NEW EVENT DECKS: Clinical Nursing, Epidemiology, Nutrition,
+//  Creative Problem Solving, HOSA Bowl
+// ─────────────────────────────────────────
+
+_hosaDecks.cn = {
+  assessment: [
+    {q:"What is pulse deficit and how is it measured?", a:"Pulse deficit = the difference between the apical pulse and radial pulse rates. Measured by having one nurse count the apical pulse while another counts the radial pulse simultaneously for one minute. Indicates ineffective cardiac contractions — common in atrial fibrillation."},
+    {q:"What is the correct rectal temperature equivalent to an oral temperature of 100.6°F?", a:"101.5°F. Rectal temperature is typically 0.5–1°F (0.3–0.5°C) higher than oral temperature. Axillary temperature is 0.5–1°F lower than oral."},
+    {q:"What tool should a clinical nurse use when the brachial artery pulse is too weak to palpate for BP?", a:"An ultrasonic stethoscope (Doppler). This device uses ultrasound waves to detect blood-flow sounds when conventional auscultation is insufficient due to very weak or distant pulses."},
+    {q:"What is pulse oximetry used for?", a:"To measure arterial blood oxygen saturation (SpO₂) — the percentage of haemoglobin saturated with oxygen in arterial blood. Normal SpO₂ is 95–100%. Values <90% indicate significant hypoxemia."},
+    {q:"What is the SOAP format for clinical documentation?", a:"S — Subjective: patient complaints/symptoms\nO — Objective: measurable clinical data (vitals, exam findings)\nA — Assessment: clinical interpretation/diagnosis\nP — Plan: proposed treatments and interventions"},
+    {q:"What are the three phases of the discharge planning process?", a:"1. Acute phase — begins at admission\n2. Transitional phase — preparing for discharge\n3. Continuing care phase — post-discharge support\n('Rehabilitation' is NOT one of the three phases per Perry.)"},
+    {q:"What is orthostatic hypotension and why are bed-rest patients at risk?", a:"Orthostatic (postural) hypotension = a drop in blood pressure ≥20 mmHg systolic or ≥10 mmHg diastolic when moving from lying to standing. Bed-rest patients are at risk because prolonged immobility causes cardiovascular deconditioning and venous pooling in the legs."},
+    {q:"What is the correct pinna traction technique for adult ear drop instillation?", a:"For adults and children over age 3: pull the pinna upward and backward to straighten the auditory canal. For children under age 3: pull downward and backward. This ensures drops reach the eardrum."},
+    {q:"Where are eye drops correctly instilled?", a:"Into the conjunctival sac (lower conjunctival fornix) — gently pull down the lower eyelid to expose the sac, then instil drops. Never place directly on the cornea, as this triggers the blink reflex and is uncomfortable."},
+    {q:"What are the standard droplet precautions for meningococcal pneumonia?", a:"Droplet precautions — surgical mask within 1 metre, private room or cohorting, limited patient transport. Meningococcal infection spreads via respiratory droplets, so droplet (not airborne) precautions are appropriate."},
+    {q:"What are the earliest clinical signs of hypovolemia?", a:"Thirst (one of the earliest signs), followed by tachycardia, decreased urine output, and restlessness. Later signs include hypotension, prolonged capillary refill, and decreased skin turgor."},
+    {q:"What are the classic signs of polycythemia vera (iron-deficiency anaemia presentation)?", a:"Reduced energy/fatigue, dyspnoea on exertion, tachycardia, and pallor — all resulting from reduced oxygen-carrying capacity of the blood due to low haemoglobin and haematocrit."},
+    {q:"What is the most typical characteristic of malignant cells?", a:"Malignant cells are undifferentiated (anaplastic) — they bear little resemblance to the normal cells they originated from. They lose specialised structure and function, grow uncontrollably, and can invade surrounding tissues."},
+    {q:"What is the nursing priority for a PACU patient after general anaesthesia?", a:"Maintaining a patent airway — the highest priority. General anaesthesia depresses protective reflexes (cough, gag) and muscle tone, making airway obstruction the immediate life-threatening risk."},
+  ],
+  medications: [
+    {q:"What is the minimum number of patient identifiers required before medication administration?", a:"At least TWO identifiers. In non-acute settings, one identifier should be the patient's full name; the second may be date of birth, medical record number, or address. This prevents medication errors."},
+    {q:"What is a basic principle of withdrawing medication from a vial?", a:"Hold the injector (syringe) at a vertical position with the vial inverted. Inject air equal to the desired volume into the vial first (creates positive pressure), then withdraw the medication. Check for air bubbles and remove them before administration."},
+    {q:"Which intramuscular injection site is limited to no more than 2 mL?", a:"The vastus lateralis muscle (anterolateral thigh) has a capacity of up to 2 mL in adults. The ventrogluteal site is preferred for volumes up to 3 mL. The deltoid accepts only 0.5–1 mL."},
+    {q:"What is a contraindicated clinical nursing measure in a preoperative seizure patient?", a:"Using an oral thermometer to obtain temperature — poses a risk of injury if a seizure occurs. Also contraindicated: padded tongue blades (now outdated), restrictive restraints during seizure. Safe alternatives include axillary or tympanic thermometers."},
+    {q:"What are the key elements of proper PPE use in a sterile OR procedure?", a:"Perform a surgical hand scrub, then apply sterile gloves using an aseptic technique. Sterile gloves go on last. The gown's front from chest to waist, and sleeves from cuff to elbow, are considered sterile fields. Back and below waist are non-sterile."},
+    {q:"Why are older adults more vulnerable to adverse drug effects?", a:"Older adults commonly experience polypharmacy (multiple medications), which increases drug interaction risk. Age-related changes reduce renal clearance, hepatic metabolism, and albumin binding, causing drugs to accumulate and produce toxic effects at standard doses."},
+    {q:"What is the appropriate long-term home oxygen delivery device?", a:"An oxygen-conserving cannula (also called a reservoir cannula) — conserves oxygen and is suitable for long-term home use. Standard nasal cannulas are simple but wasteful. Non-rebreather masks are for acute settings, not home use."},
+    {q:"What is polypharmacy and why is it a concern in older adults?", a:"Polypharmacy = the concurrent use of multiple medications (typically ≥5). It increases risk of adverse drug reactions, drug-drug interactions, falls, and non-adherence. Older adults often have multiple chronic conditions requiring separate treatments, making polypharmacy common."},
+    {q:"What is the proper technique for passive range-of-motion (PROM) exercises?", a:"Move each joint through its complete range slowly and gently; support the extremity above and below the joint; never force beyond resistance; exercise each joint 5× daily. Do NOT apply warm compresses first or massage vigorously — only move through ROM."},
+    {q:"What assistive device is best for patients with permanent paraplegia?", a:"A wheelchair (not a cane or walker) is most appropriate for permanent lower-extremity paralysis. Patients with partial ability may use Lofstrand (forearm) crutches. Axillary crutches can cause brachial plexus injury with long-term use."},
+    {q:"Which infection control precautions apply to a toddler with meningococcal pneumonia?", a:"Droplet precautions — surgical mask when within 1 metre, private room or cohorting. Meningococcal disease spreads via large respiratory droplets (not airborne/aerosol), so standard + droplet precautions are used, not airborne (negative-pressure room)."},
+    {q:"What is the purpose of continuous bladder irrigation (CBI) after TURP?", a:"CBI uses a three-way catheter to continuously flush the bladder with sterile irrigating solution, preventing blood clot formation in the bladder and catheter following transurethral resection of the prostate, where bleeding and clots are expected."},
+    {q:"What are the three classic symptoms of diabetes mellitus (DM)?", a:"The three Ps:\n1. Polyuria — excessive urination\n2. Polydipsia — excessive thirst\n3. Polyphagia — excessive hunger\nDysphasia (swallowing difficulty) is NOT a classic symptom of DM."},
+    {q:"What is a sickle cell crisis and its consequence of inadequate oxygen?", a:"In sickle cell disease, RBCs become rigid and sickle-shaped under low oxygen. Sickle cells occlude blood vessels, causing localised ischemia, severe pain (vaso-occlusive crisis), and potential tissue infarction in organs such as the spleen, bones, and kidneys."},
+  ],
+  patient_care: [
+    {q:"Why do immobilised patients with ischemic stroke develop pressure injuries?", a:"Immobility eliminates the normal reflex to reposition, causing sustained pressure over bony prominences. This compresses capillaries, causes ischaemia, and leads to tissue necrosis (pressure injuries). Stroke patients also have impaired sensation and cannot feel discomfort."},
+    {q:"What is body mechanics and why is it important in patient care?", a:"Body mechanics = using the body efficiently and safely to prevent musculoskeletal injury. Key principles: keep low centre of gravity, use leg muscles (not back), face direction of movement, keep patient close to body. Rolling/turning requires LESS work than lifting (not more)."},
+    {q:"How should a nurse position a chair when transferring a patient with CNS damage and unilateral paralysis?", a:"Position the chair on the patient's unaffected (strong) side. The patient leads with the stronger side, pivots, and sits. This reduces fall risk and uses the patient's intact strength to guide the transfer."},
+    {q:"How does a nurse reduce hospitalised children's anxiety?", a:"Ensure the child knows what to expect by explaining procedures in age-appropriate language BEFORE starting; let the child handle equipment (e.g., stethoscope); involve parents; maintain routine. Begin teaching when child is calm, not immediately upon admission."},
+    {q:"What is the most common cognitive condition affecting home-care clients besides depression?", a:"Dementia — a progressive decline in cognitive function (memory, language, judgment). Nurses assess cognitive status, monitor for safety risks, and adapt communication. The MMSE (Mini-Mental State Examination) is a common screening tool."},
+    {q:"Why are children particularly vulnerable to environmental chemicals and toxins?", a:"Children have higher metabolic rates, more rapid breathing and skin absorption, immature detoxification systems, and smaller body mass. Behaviours (hand-mouth) and developmental stages (brain development windows) further increase susceptibility. They are NOT more likely to develop superinfections specifically."},
+    {q:"What is the Kubler-Ross model of grief (5 stages)?", a:"1. Denial\n2. Anger\n3. Bargaining (the third stage)\n4. Depression\n5. Acceptance\nThese stages are not linear; patients may move through them in any order. Used to understand end-of-life and loss responses."},
+    {q:"What is therapeutic communication?", a:"Therapeutic communication uses deliberate verbal and nonverbal techniques to promote the patient's health and wellbeing. Techniques include active listening, open-ended questions, reflection, clarification, and silence. Focus technique keeps communication goal-directed around central issues."},
+    {q:"What are the key principles of surgical hand scrub?", a:"Use antimicrobial surgical scrub brush; scrub each surface (fingers, hand, forearm) for at least 3 minutes each hand; rinse with hands up so water flows away from clean hands; dry with sterile towels; apply sterile gloves immediately."},
+    {q:"What is the purpose of a PACU (Post-Anaesthesia Care Unit)?", a:"Provides intensive monitoring and care immediately after surgery/anaesthesia. Priorities: patent airway, adequate ventilation/oxygenation, haemodynamic stability, pain management, fluid/electrolyte balance, level of consciousness assessment. Patient is discharged when Aldrete score ≥9."},
+    {q:"What causes hyponatremia and what is NOT a cause?", a:"Hyponatremia (Na+ <135 mEq/L) is caused by: excessive water intake, syndrome of inappropriate ADH (SIADH), vomiting/diarrhoea, diuretics, heart/liver/kidney failure. High fever is NOT a cause (fever causes hypernatremia through dehydration/water loss)."},
+    {q:"What is the nursing role in managing multiple myeloma?", a:"Monitor haematologic status; prevent falls and pathological fractures (skeletal involvement); assess for infections (immunosuppression); administer prescribed chemotherapy/steroids; monitor renal function; provide pain management; increase mobility while preventing falls."},
+    {q:"What is the significance of streptococcal throat infections in children?", a:"Untreated Group A beta-haemolytic streptococcal (GABHS) pharyngitis can lead to rheumatic fever — an autoimmune complication causing carditis (permanent valve damage), polyarthritis, and chorea. Parents should ensure children complete the full antibiotic course for strep throat."},
+    {q:"What are the therapeutic communication principles for cancer diagnosis discussion?", a:"Be aware of nonverbal body language (open posture, eye contact); use silence and pauses to allow patient to process; avoid false reassurance; use empathy; let the patient lead the pace. Nurses should not use closed, dismissive, or defensive body language."},
+  ],
+  special_populations: [
+    {q:"What are the signs of depression in an older adult patient having difficulty coping?", a:"Persistent sadness, loss of interest in activities, changes in sleep/appetite, fatigue, worthlessness, difficulty concentrating, withdrawal. Atypical presentations in older adults: irritability, somatic complaints, cognitive changes. 'Selective attention' is NOT a sign of depression."},
+    {q:"What is constipation in older adults and what is NOT a common cause?", a:"Constipation = infrequent/difficult defecation, often <3×/week. Common causes: low fibre/fluid intake, immobility, medications (opioids, antacids), ignoring the urge. Obesity is NOT a primary cause of constipation."},
+    {q:"What is the connection between sickle cell crisis and tissue ischemia?", a:"When sickled RBCs obstruct microvasculature, distal tissue receives inadequate oxygen. This causes localised ischemia leading to severe pain (the hallmark), and if prolonged, tissue infarction — especially in the spleen (autosplenectomy), bones (avascular necrosis), and kidneys."},
+    {q:"What are the home ventilation exclusion criteria (reasons a client would NOT be on home mechanical ventilation)?", a:"Dysphasia (swallowing difficulty) is NOT a reason for home mechanical ventilation. Indications include neuromuscular diseases, chronic respiratory failure, spinal cord injury, and conditions where weaning is impossible. Dysphagia increases aspiration risk but doesn't require ventilation."},
+    {q:"How does decreased mobility from bed rest affect older adults specifically?", a:"Older adults on bed rest are at elevated risk for: orthostatic hypotension, DVT/PE, pressure injuries, urinary incontinence, muscle atrophy, pneumonia (from reduced cough/breathing), constipation, depression, and delirium. Early mobilisation reduces all these risks."},
+    {q:"What is Parkinson's disease and its clinical signs relevant to clinical nursing?", a:"A progressive neurodegenerative disorder (dopamine deficiency in substantia nigra). Clinical signs: tremor at rest (pill-rolling), bradykinesia (slow movement), rigidity (cogwheel), postural instability. Nursing concerns: fall prevention, swallowing safety (dysphagia), medication timing (levodopa must be timed consistently)."},
+    {q:"What are the early and late signs of increased intracranial pressure (ICP)?", a:"Early: headache, nausea, vomiting, pupil changes (slow/asymmetric reaction), altered LOC. Late: Cushing's triad — hypertension, bradycardia, irregular respirations; fixed dilated pupils; coma. Echocardiogram is NOT used to detect ICP; CT scan and ICP monitoring are standard."},
+    {q:"Why are preoperative patients with seizure history at risk with oral thermometers?", a:"If a seizure occurs during oral temperature measurement, the glass/rigid thermometer can break and injure the mouth, throat, or tongue. Alternative: tympanic, temporal artery, or axillary thermometry is safe and avoids injury risk."},
+    {q:"What is hypoxaemia and how does it present in a cardiac patient?", a:"Hypoxaemia = low arterial blood oxygen. In cardiac patients (e.g., congestive heart failure), inadequate cardiac output reduces tissue oxygenation. Patients present with dyspnoea, restlessness, cyanosis, tachycardia, confusion — best detected by echocardiogram (cardiac function) and ABG or pulse oximetry (oxygenation)."},
+    {q:"What is the clinical presentation of iron-deficiency anaemia?", a:"Iron-deficiency anaemia presents with: fatigue and reduced energy (from reduced oxygen-carrying capacity), dyspnoea, tachycardia, pallor (conjunctival, nail beds, oral mucosa), koilonychia (spoon nails), glossitis, and pica (craving non-food items) in severe cases."},
+    {q:"What is the most common cognitive condition in elderly homecare clients?", a:"Dementia is the most common cognitive impairment in homecare clients after depression. It involves progressive decline in memory, reasoning, language. Assessment includes MMSE, functional status, caregiver support. Safety in the home environment is a key nursing focus."},
+    {q:"What are the key nursing interventions for patients with cancer?", a:"Pain management; infection prevention (neutropenic precautions if immunosuppressed); nutritional support; fatigue management; psychosocial support; monitoring for chemotherapy side effects (nausea, mucositis, alopecia, anaemia); patient and family education."},
+    {q:"What is dysphagia and the nursing approach?", a:"Dysphagia = difficulty swallowing. Nursing approach: sit patient upright at 90°, tuck chin when swallowing, use thickened liquids per speech therapy recommendation, offer small frequent meals of appropriate consistency, monitor for aspiration signs (coughing, wet voice after eating)."},
+    {q:"What are the key considerations for paediatric medication administration?", a:"Weight-based dosing (mg/kg); use appropriate calibrated devices (oral syringe not household spoon); two patient identifiers; age-appropriate communication; consider developmental stage; involve parents; monitor for unique paediatric reactions; note that organ immaturity affects drug metabolism."},
+  ],
+};
+
+_hosaDecks.epid = {
+  study_types: [
+    {q:"What is a retrospective cohort study?", a:"A study where researchers identify a cohort (defined group) whose exposure history is available in existing records, then follow outcomes forward from that point. Useful for studying exposures that occurred in the past. Best for investigating outbreaks in small, well-defined populations."},
+    {q:"What is the difference between incidence and prevalence?", a:"Incidence = rate of NEW cases arising in a given period in a population at risk.\nPrevalence = proportion of existing cases (new + old) at a point in time.\nBoth use 'population at risk' as the denominator. Prevalence = incidence × disease duration."},
+    {q:"What are the main types of epidemiological study designs?", a:"Descriptive: case reports, cross-sectional surveys (describe who, what, where, when)\nAnalytic: cohort (prospective/retrospective), case-control (retrospective), cross-sectional\nExperimental: randomised controlled trials (RCTs), community trials\nObs vs. experimental: observational studies don't assign exposure; RCTs do."},
+    {q:"What is a case-control study?", a:"A retrospective analytic study that starts with cases (people with the disease) and controls (without disease), then looks backwards to compare exposures. Good for rare diseases and quick results. Measures odds ratio (OR) as estimate of association. Prone to recall bias."},
+    {q:"What is external validity (generalizability) in epidemiology?", a:"The extent to which study findings can be applied to populations beyond the study sample. High external validity means results are broadly applicable. Threats: non-representative samples, unique exposure settings. Contrasts with internal validity (accuracy within the study itself)."},
+    {q:"What is bias in epidemiology and what is selection bias?", a:"Bias = systematic error that distorts study results in a consistent direction. Selection bias occurs when there is a systematic difference in who is included in the study vs. excluded — producing a non-representative sample. Types include healthy worker effect, volunteer bias, and loss-to-follow-up bias."},
+    {q:"What is confounding in epidemiological research?", a:"Confounding occurs when a third variable (confounder) is associated with both the exposure and the outcome, distorting the apparent relationship between them. Example: age may confound the relationship between smoking and cardiovascular disease. Controlled by matching, stratification, or multivariate analysis."},
+    {q:"What is the difference between epidemic, endemic, pandemic, and outbreak?", a:"Endemic: disease consistently present at expected/baseline levels in a region.\nEpidemic: disease occurrence clearly exceeds expected baseline levels.\nPandemic: epidemic spread across multiple countries/continents.\nOutbreak: same as epidemic but often localised (within a community or facility)."},
+    {q:"What is an attack rate and how is it calculated?", a:"Attack rate = number of people who developed illness ÷ number of people exposed × 100%.\nUsed in outbreak investigations. Secondary attack rate measures spread within households after primary case. A 49% attack rate means 49 of every 100 exposed people became ill."},
+    {q:"Who is considered the 'Father of Epidemiology'?", a:"John Snow (1813–1858) — established the link between contaminated water and cholera during the 1854 Broad Street pump outbreak in London, before germ theory was accepted. He used spot maps and systematic data collection, founding modern field epidemiology.\n(William Farr is credited as pioneer of health statistics.)"},
+    {q:"What is a cohort study?", a:"A prospective analytic study that follows a group (cohort) of exposed and unexposed people over time to compare disease incidence. Measures relative risk (RR). Strengths: clear temporal sequence, good for rare exposures. Weaknesses: expensive, time-consuming, loss to follow-up."},
+    {q:"What is a prognosis in epidemiology?", a:"The prediction of the likely course of a disease in an individual or population — expressed as probability of survival, recovery, or specific outcomes. Distinguished from: diagnosis (identifying the disease), etiology (cause), treatment (managing disease)."},
+    {q:"What is a pandemic vs. an epidemic with mixed features?", a:"An epidemic with both common-source (point-source) and propagated features is a mixed epidemic. Example: a foodborne outbreak (common source) where some secondary cases then spread person-to-person. This pattern shows initial spike (point source) followed by secondary cases."},
+    {q:"What are the key differences between a clinical trial and observational study?", a:"Clinical trials (RCTs): researcher assigns intervention/exposure; strongest evidence for causation; has control group; randomisation minimises confounding.\nObservational: researcher observes without assigning exposure; subject to confounding and bias; includes cohort, case-control, cross-sectional."},
+  ],
+  outbreak: [
+    {q:"What are the steps in an outbreak investigation?", a:"1. Prepare field investigation\n2. Establish existence of an outbreak\n3. Verify the diagnosis\n4. Define and identify cases (case definition)\n5. Describe data (person, place, time — epidemic curve)\n6. Develop hypotheses\n7. Evaluate hypotheses (analytic study)\n8. Implement control measures\n9. Communicate findings (interpretation/report)"},
+    {q:"What information is NOT needed to verify a case definition in an outbreak?", a:"Mode of transmission is NOT part of verifying the case definition — it is determined AFTER cases are found. Case definition criteria include: clinical information (signs/symptoms, outcome, duration, date of onset, laboratory confirmation), NOT transmission route."},
+    {q:"What is surveillance in public health?", a:"Surveillance = systematic, ongoing collection, analysis, and interpretation of health data for planning, implementing, and evaluating public health interventions. Includes: passive surveillance (reports from clinicians), active surveillance (health dept seeks reports), sentinel surveillance, and syndromic surveillance."},
+    {q:"What is disaster epidemiology?", a:"The systematic collection, analysis, and interpretation of deaths, injuries, and illnesses during and after a disaster to assess human health impacts and guide response. Includes rapid needs assessments, mortality surveillance, and tracking disease outbreaks in displaced populations."},
+    {q:"What is the case definition in an outbreak investigation?", a:"A case definition is a set of standard criteria (clinical, laboratory, epidemiological) used to classify whether a person has the disease being investigated. Components: suspected, probable, confirmed cases. Applied consistently to count cases and identify the extent of the outbreak."},
+    {q:"What is an epidemic curve and what does it tell you?", a:"A histogram showing number of cases by date/time of onset. Shapes suggest transmission type:\n• Sharp peak = point-source (common exposure)\n• Multiple peaks = propagated (person-to-person spread)\n• Plateau = continuous common source\nHelpful for identifying exposure window and incubation period."},
+    {q:"What are the 'person, place, time' descriptors in epidemiology?", a:"The three core descriptive dimensions of who gets disease, where it occurs, and when:\n• Person: age, sex, race, socioeconomic status, behaviours\n• Place: geographic clustering, urban/rural, health facility\n• Time: epidemic curve, seasonality, trends over years\nHelps generate hypotheses about disease etiology."},
+    {q:"What is herd immunity and what threshold is needed?", a:"Herd immunity = when enough of a population is immune (through vaccination or prior infection) to prevent epidemic spread, protecting even unimmunised individuals. Threshold varies: measles requires ~95% immunity; polio ~80–85%. Formula: herd immunity threshold = 1 − (1/R₀)."},
+    {q:"What are services provided through disaster epidemiology?", a:"Disaster epidemiology services include: rapid mortality surveillance, tracking displaced populations' health, monitoring disease outbreaks in emergency settings, coordinating public health response, evaluating interventions. It does NOT replace local emergency care — it complements it by providing data."},
+    {q:"What is the role of an Environmental Health Scientist in epidemiology?", a:"Environmental Health Scientists investigate links between environmental exposures (chemicals, pollutants, physical hazards) and human health outcomes. They use indirect methods (death certificates, geographic data, environmental sampling) to ascertain biomedical causes of death or disease in communities."},
+    {q:"What is a sporadic case vs. endemic disease?", a:"Sporadic case: an isolated case with no apparent link to other cases or outbreaks; occurs occasionally, irregularly.\nEndemic: the constant, baseline level of a disease in a region; expected 'normal' occurrence.\nEpidemic = above expected baseline; pandemic = worldwide epidemic."},
+    {q:"What is lysozyme and what role does it play in immunity?", a:"Lysozyme is an enzyme found in tears, saliva, and mucus that breaks down bacterial cell walls (specifically peptidoglycan), providing innate non-specific defence against bacterial invasion. It is a first-line barrier defence, part of the innate immune system."},
+    {q:"What is SARS-CoV-2 and key epidemiological features of COVID-19?", a:"SARS-CoV-2 is the novel coronavirus causing COVID-19. Key epidemiological features: R₀ of original strain ~2–3 (highly contagious); primarily transmitted via respiratory droplets and aerosols; incubation 2–14 days; presymptomatic and asymptomatic transmission; vulnerable groups: elderly, immunocompromised."},
+    {q:"What are the key measures used to quantify disease burden?", a:"Years of Life Lost (YLL): premature mortality impact.\nDisability-Adjusted Life Years (DALYs): YLL + Years Lived with Disability (YLD).\nQuality-Adjusted Life Years (QALYs): used in health economics.\nCase fatality rate (CFR): proportion of cases that die.\nMortality rate: deaths per population per time."},
+  ],
+  measures: [
+    {q:"What is the difference between incidence rate and prevalence rate?", a:"Incidence rate: new cases / population at risk / time unit → measures RATE of developing disease\nPrevalence rate: existing cases (new + old) / total population → measures PROPORTION with disease at a point in time\nPrevalence is influenced by both incidence and disease duration."},
+    {q:"What is sensitivity and specificity of a diagnostic test?", a:"Sensitivity = proportion of true positives correctly identified (TP / (TP+FN)) — good for screening; high sensitivity = few false negatives.\nSpecificity = proportion of true negatives correctly identified (TN / (TN+FP)) — good for confirmation; high specificity = few false positives."},
+    {q:"What is relative risk (RR)?", a:"Relative risk = incidence in exposed group ÷ incidence in unexposed group. Used in cohort studies. RR > 1 = increased risk with exposure; RR < 1 = protective; RR = 1 = no association. RR of 2.0 means exposed individuals are twice as likely to develop the disease."},
+    {q:"What is odds ratio (OR) and when is it used?", a:"Odds ratio = (odds of exposure in cases) / (odds of exposure in controls). Used in case-control studies where incidence cannot be directly calculated. OR approximates RR when disease is rare. OR > 1 = higher odds of exposure in cases; suggests exposure-disease association."},
+    {q:"What is the number needed to treat (NNT)?", a:"NNT = 1 / absolute risk reduction (ARR). The average number of patients who need to be treated with the intervention to prevent one additional bad outcome. Lower NNT = more effective treatment. NNT of 10 means treat 10 patients to prevent 1 adverse outcome."},
+    {q:"What is the p-value and significance threshold in epidemiology?", a:"The p-value is the probability of observing results as extreme as those obtained by chance alone, assuming the null hypothesis is true. Conventional threshold: p < 0.05 (5% false positive rate). P < 0.05 is 'statistically significant' — unlikely to be due to chance. Does not equal clinical significance."},
+    {q:"What is a confidence interval (CI)?", a:"A range of values within which the true population parameter likely lies, at a specified probability (usually 95%). A 95% CI means: if the study were repeated 100 times, 95 of the CIs would contain the true value. CIs that don't cross 1.0 for OR/RR indicate statistical significance."},
+    {q:"What is age-standardisation (age-adjustment)?", a:"A statistical method to remove the effect of different age distributions when comparing disease rates between populations. Direct standardisation applies study-specific rates to a standard population. Indirect standardisation calculates a standardised mortality ratio (SMR). Necessary because age is a major confounder."},
+    {q:"What are the modes of disease transmission?", a:"Direct contact: person-to-person (skin, mucous membrane, droplets <1m)\nIndirect contact: fomites, vehicles (food, water), vectors (mosquitoes, ticks)\nAirborne: droplet nuclei travelling >1m (TB, measles)\nCommon vehicle: single source infecting many (contaminated food/water)\nVector-borne: biological (pathogen replicates in vector) or mechanical"},
+    {q:"What is the chain of infection?", a:"1. Infectious agent (pathogen)\n2. Reservoir (human, animal, environment)\n3. Portal of exit (respiratory, GI, urinary, skin)\n4. Mode of transmission (contact, airborne, vehicle, vector)\n5. Portal of entry (respiratory, GI, mucous membranes, wounds)\n6. Susceptible host\nBreaking any link interrupts transmission."},
+    {q:"What is recall bias and how does it affect case-control studies?", a:"Recall bias occurs when cases (with disease) remember past exposures more accurately or completely than controls (without disease) — because having a disease prompts them to search for causes. This can overestimate the exposure-disease association. Minimised by using objective records."},
+    {q:"What is the basic reproductive number (R₀)?", a:"R₀ (R-naught) = the average number of secondary cases generated by one infectious case in a fully susceptible population. R₀ > 1 = epidemic growth; R₀ < 1 = epidemic decline; R₀ = 1 = endemic steady state. Measles R₀ ≈ 12–18; influenza R₀ ≈ 2–3; COVID-19 original strain ≈ 2–3."},
+    {q:"What is the interpretation phase of an analytic epidemiological study?", a:"Interpretation is the final step: putting findings into perspective by identifying key messages, acknowledging limitations (bias, confounding), contextualising with prior literature, and making sound actionable recommendations for public health practice or policy."},
+    {q:"What are the steps to calculate and interpret an attack rate from an outbreak?", a:"Attack rate = (ill exposed ÷ total exposed) × 100%\nExample: 49 of 100 exposed became ill → AR = 49%\nUsed to measure how efficiently a pathogen or foodborne agent causes illness in an exposed group. High attack rates suggest a highly infectious agent or widespread exposure."},
+  ],
+  surveillance: [
+    {q:"What is active vs. passive surveillance?", a:"Passive surveillance: health providers report cases to health authorities voluntarily or mandatorily — less resource-intensive, may under-report.\nActive surveillance: health authorities regularly contact providers to solicit case reports — more complete but resource-intensive.\nSentinel surveillance: selected sites monitor specific conditions (influenza-like illness)."},
+    {q:"What is a notifiable disease and give examples?", a:"A notifiable (reportable) disease requires mandatory reporting to public health authorities so they can monitor and respond to trends. Examples: TB, measles, salmonellosis, HIV/AIDS, hepatitis B, meningococcal disease, COVID-19. Reporting timelines vary: immediate (24h) vs. weekly vs. monthly."},
+    {q:"What are social determinants of health (SDOH)?", a:"Non-medical factors that influence health outcomes: education, income, employment, housing, food security, social support, access to healthcare, neighbourhood safety, transportation. SDOH account for 30–55% of health outcomes. Epidemiologists study these to address health disparities."},
+    {q:"What is the public health approach to disease prevention (Leavell and Clark levels)?", a:"Primary prevention: prevent disease before it occurs (vaccination, health promotion, removing exposure)\nSecondary prevention: early detection and treatment (screening, contact tracing)\nTertiary prevention: limiting disability/complications in established disease (rehabilitation, managing chronic disease)"},
+    {q:"What is an Institutional Review Board (IRB) and its role in epidemiology?", a:"An IRB (or Research Ethics Board) reviews research involving human subjects to ensure ethical standards: informed consent, minimised risk, equitable subject selection, and protection of vulnerable populations. Required for all federally funded and most institutional research involving humans."},
+    {q:"What is syndromic surveillance?", a:"Real-time monitoring of health indicators (ER visits, pharmacy sales, absenteeism, internet search trends) to detect unusual patterns suggesting outbreaks before laboratory confirmation. Used for early warning systems — particularly for bioterrorism, influenza, and emerging infections."},
+    {q:"What is a cross-sectional study?", a:"A study measuring both exposure and outcome at the same point in time in a defined population — a 'snapshot.' Good for measuring prevalence and generating hypotheses. Cannot establish temporal sequence (which came first). Prone to prevalence-incidence bias. Also called a prevalence study."},
+    {q:"What are the determinants of health in the epidemiological triad (host-agent-environment)?", a:"Host: age, sex, immune status, genetics, behaviour\nAgent: infectivity, virulence, pathogenicity (for infectious disease); toxicity, dose (for environmental disease)\nEnvironment: physical (climate, sanitation), biological (vectors), social (poverty, crowding)\nDisease occurs when agent, host, and environment interact unfavourably."},
+    {q:"What is quarantine vs. isolation?", a:"Isolation: separates and restricts movement of people KNOWN to be infected (to prevent spreading to others).\nQuarantine: separates and restricts movement of people EXPOSED to infectious disease but not yet showing symptoms (to see if they become infectious).\nBoth are public health tools used to contain outbreaks."},
+    {q:"What is the role of vaccines in population epidemiology?", a:"Vaccines reduce disease incidence, prevent epidemics, and when coverage is sufficient, create herd immunity. Vaccination programmes are measured by coverage rates, efficacy (RCT setting), and effectiveness (real-world). Interruption of vaccine programmes (e.g., COVID-era disruptions) can cause resurgence of vaccine-preventable diseases."},
+    {q:"What is a population-attributable risk (PAR)?", a:"PAR (population attributable fraction) = the proportion of disease in the total population attributable to a specific exposure. It combines the relative risk with how common the exposure is. PAR helps prioritise public health interventions — high PAR suggests eliminating the exposure would prevent a large portion of cases."},
+    {q:"What is the role of contact tracing in outbreak control?", a:"Contact tracing identifies people exposed to a confirmed case, notifies them, offers testing/prophylaxis, and quarantines if needed. It interrupts transmission chains. Critical for STIs, TB, and COVID-19. Effectiveness depends on speed, completeness, and voluntary compliance."},
+    {q:"What are the Healthy People 2030 goals framework objectives?", a:"Healthy People 2030 focuses on improving health and well-being over the next decade with objectives across five domains: Economic Stability, Education, Social/Community Context, Health & Healthcare, Neighbourhood/Built Environment. Core principle: social determinants of health drive health equity. Epidemiologists use these targets to benchmark progress."},
+    {q:"What is a systematic review and meta-analysis?", a:"Systematic review: comprehensive, reproducible search and synthesis of all available evidence on a specific question. Meta-analysis: statistical pooling of data from multiple studies to produce a single weighted estimate. Highest level of evidence in the evidence hierarchy (above RCTs for population questions)."},
+  ],
+};
+
+_hosaDecks.nu = {
+  macronutrients: [
+    {q:"What are the macronutrients and their caloric values?", a:"Carbohydrates: 4 kcal/g — primary energy source\nProtein: 4 kcal/g — structure, enzymes, immunity\nFats (lipids): 9 kcal/g — most concentrated energy source\nAlcohol: 7 kcal/g (not a nutrient)\nFibre: technically carbohydrate but provides 0–2 kcal/g (indigestible)"},
+    {q:"What is the major function of carbohydrates in the diet?", a:"Provide a constant, readily available supply of energy (glucose) for all cells, especially the brain and RBCs which depend exclusively on glucose. Carbohydrates also spare protein from being used as energy, and support fibre functions (bowel regularity, blood sugar control)."},
+    {q:"In healthy people, what percentage of carbohydrates, fats, and proteins are absorbed?", a:"Over 90% — the digestive system is highly efficient in healthy individuals. Carbohydrates absorbed as monosaccharides, proteins as amino acids, fats as fatty acids and monoglycerides via micelles. Malabsorption disorders (celiac, IBD, pancreatic insufficiency) reduce these percentages."},
+    {q:"What are saturated fatty acids?", a:"Saturated fatty acids carry all the hydrogen atoms possible on their carbon chain (no double bonds). Solid at room temperature (e.g., butter, lard, coconut oil). Saturated fat raises LDL ('bad') cholesterol and is associated with increased cardiovascular disease risk when consumed in excess."},
+    {q:"What are the essential fatty acids (EFAs)?", a:"Linoleic acid (omega-6) and linolenic acid (omega-3) — cannot be synthesised by the body and must be obtained from diet. Essential for cell membrane integrity, prostaglandin synthesis, brain development, and inflammation regulation. Found in vegetable oils, fish, nuts, and seeds."},
+    {q:"What is the difference between complete and incomplete proteins?", a:"Complete proteins contain all 9 essential amino acids in adequate amounts. Found in animal products (meat, fish, eggs, dairy) and soy.\nIncomplete proteins lack one or more essential amino acids. Found in most plant foods. Vegetarians must combine complementary proteins (e.g., rice + beans)."},
+    {q:"What is the most important macronutrient for post-operative patients?", a:"Protein — essential for wound healing, tissue repair, immune function, enzyme synthesis, and combating the hypermetabolic state of surgery/trauma. The body's protein requirements increase significantly post-operatively. Adequate protein prevents muscle catabolism."},
+    {q:"What is pectin and its function in nutrition?", a:"Pectin is a soluble dietary fibre (thickening agent) found in fruits, soluble in water. It forms a gel in the intestines that slows digestion and glucose absorption, lowers cholesterol, and provides bulk. Used commercially as a thickener in jams and jellies."},
+    {q:"What is the role of dietary fibre?", a:"Insoluble fibre (cellulose, wheat bran): adds bulk, accelerates intestinal transit, prevents constipation and diverticulitis.\nSoluble fibre (pectin, beta-glucan, psyllium): slows absorption, lowers blood cholesterol and glucose, feeds beneficial gut bacteria.\nAdequate fibre reduces risk of colon cancer, CVD, and T2DM."},
+    {q:"What is pinocytosis in the context of nutrient absorption?", a:"Pinocytosis (cell drinking) = a form of endocytosis where cells engulf small droplets of extracellular fluid containing nutrients. Relevant in intestinal absorption — fat-soluble vitamins (A, D, E, K) and large molecules are absorbed this way in addition to passive and active transport mechanisms."},
+    {q:"What is the role of lipids (fats) in the body beyond energy storage?", a:"Structural: phospholipids form cell membranes; cholesterol is a membrane component and precursor to steroid hormones and bile acids.\nFunctional: transport fat-soluble vitamins (A, D, E, K); insulate nerves (myelin sheath); cushion organs; regulate inflammation (prostaglandins from EFAs); hormone synthesis."},
+    {q:"What is BMR (basal metabolic rate)?", a:"Basal metabolic rate = the rate at which energy is needed for basic body maintenance at rest — breathing, circulation, cellular repair, temperature regulation. Accounts for ~60–70% of total daily energy expenditure. Influenced by: body composition (muscle > fat), age (declines with age), thyroid function, sex."},
+    {q:"What is the Acceptable Macronutrient Distribution Range (AMDR)?", a:"Recommended ranges for macronutrient intake as % of total calories:\n• Carbohydrates: 45–65%\n• Protein: 10–35%\n• Fat: 20–35%\nAMDRs reflect ranges associated with reduced chronic disease risk while providing adequate essential nutrients."},
+    {q:"What is anaerobic metabolism and which substrate does it use?", a:"Anaerobic metabolism (glycolysis without oxygen) uses carbohydrates (glucose) exclusively — it cannot metabolise fat or protein without oxygen. It produces lactic acid as a byproduct and generates only 2 ATP (vs. 36–38 ATP in aerobic respiration). Occurs in high-intensity exercise."},
+  ],
+  vitamins_minerals: [
+    {q:"What are the fat-soluble vitamins and their key functions?", a:"A (retinol): vision, epithelial integrity, immune function\nD (calciferol): calcium absorption, bone metabolism\nE (tocopherol): antioxidant, cell membrane protection\nF (essential fatty acids — sometimes grouped here)\nK (phylloquinone): blood clotting, bone mineralisation\nExcess fat-soluble vitamins accumulate (toxicity possible)."},
+    {q:"What is the role of Vitamin C and its deficiency disease?", a:"Vitamin C (ascorbic acid) is essential for collagen synthesis (wound healing), iron absorption (converts Fe³⁺ to Fe²⁺), immune function, and antioxidant protection. Deficiency causes scurvy — characterised by perifollicular haemorrhages, bleeding gums, poor wound healing, and fatigue."},
+    {q:"What is the role of Vitamin D and its deficiency?", a:"Vitamin D regulates calcium and phosphorus absorption from the intestine, supports bone mineralisation, immune modulation, and cell growth. Deficiency: rickets (children — soft bones, bowing of legs) and osteomalacia (adults — soft bones, pain). Sunlight is the main source; supplementation needed in northern climates."},
+    {q:"What is the role of calcium and its dietary sources?", a:"Calcium is essential for bone and tooth mineralisation (99% of body calcium is in bone), muscle contraction, nerve transmission, and blood clotting. Best absorbed with Vitamin D. Dietary sources: dairy, fortified plant milks, leafy greens (kale, bok choy), fortified orange juice, canned fish with bones."},
+    {q:"What is iron and what is the role of Vitamin C in iron absorption?", a:"Iron is a component of haemoglobin (O₂ transport) and myoglobin (muscle O₂ storage), and essential for cytochrome enzymes (energy production). Vitamin C converts non-haem iron (Fe³⁺, plant-based) to the more absorbable Fe²⁺ form. Animal haem iron is absorbed 2–3× more efficiently."},
+    {q:"What is scurvy and who is at risk?", a:"Scurvy = Vitamin C deficiency, historically seen in sailors without fresh fruit/vegetables (e.g., Captain Jack Sparrow after 2 years at sea). Symptoms: bleeding gums, perifollicular haemorrhages, poor wound healing, fatigue, joint pain, corkscrew hairs. Treated with Vitamin C supplementation."},
+    {q:"What are the B-vitamins and their general roles?", a:"B1 (Thiamine): carbohydrate metabolism; deficiency = beriberi, Wernicke's\nB2 (Riboflavin): FAD coenzyme\nB3 (Niacin): NAD coenzyme; deficiency = pellagra (dermatitis, diarrhoea, dementia)\nB6 (Pyridoxine): amino acid metabolism\nB9 (Folate): DNA synthesis, NTD prevention\nB12 (Cobalamin): myelin synthesis, pernicious anaemia\nAll are water-soluble."},
+    {q:"What is the role of sodium in the body and its relationship to hypertension?", a:"Sodium (Na⁺) regulates extracellular fluid volume, blood pressure, and nerve/muscle function. Excess sodium retains water, increasing blood volume and pressure. DASH diet: limit sodium to <2300 mg/day (ideal <1500 mg). High sodium intake is a major modifiable risk factor for hypertension."},
+    {q:"What is folate (folic acid) and why is it critical in pregnancy?", a:"Folate (B9) is essential for DNA synthesis and cell division. Critical in the first 4 weeks of pregnancy for proper neural tube closure. Folate deficiency causes neural tube defects (spina bifida, anencephaly). All women of reproductive age should take 400–800 μg folic acid daily."},
+    {q:"What are the best dietary sources of omega-3 fatty acids and their health benefits?", a:"Sources: fatty fish (salmon, mackerel, sardines), flaxseed, chia seeds, walnuts, hemp seeds.\nBenefits: reduce triglycerides, lower inflammation, support brain/eye development, reduce CVD risk, and may reduce symptoms of depression. EPA and DHA are the active forms; ALA from plants is converted inefficiently."},
+    {q:"What is the role of iodine and what happens when it is deficient?", a:"Iodine is required for synthesis of thyroid hormones (T3, T4) which regulate metabolism, growth, and brain development. Deficiency: goitre (enlarged thyroid), hypothyroidism, and cretinism (severe intellectual disability) in infants born to iodine-deficient mothers. Iodised salt prevents deficiency."},
+    {q:"What is potassium and its role in cardiovascular health?", a:"Potassium (K⁺) is the primary intracellular cation; essential for action potentials in muscle and nerves, heart rhythm, fluid balance, and blood pressure regulation. High dietary potassium (from fruits, vegetables) helps reduce blood pressure and risk of stroke. Hypokalaemia causes cardiac arrhythmias."},
+    {q:"What is zinc and its clinical significance in wound healing and immunity?", a:"Zinc is essential for enzyme function (>100 zinc metalloenzymes), protein synthesis, wound healing, immune function, taste/smell, and cell division. Deficiency: impaired wound healing, increased infection susceptibility, growth retardation, dermatitis, anosmia. Important in post-surgical and burn patients."},
+    {q:"What is the role of Vitamin K in the body?", a:"Vitamin K (phylloquinone from plants, menaquinone from gut bacteria) is essential for synthesis of clotting factors II, VII, IX, X, and proteins C and S. Also supports bone mineralisation (osteocalcin synthesis). Deficiency causes bleeding diathesis. Warfarin works by blocking Vitamin K recycling."},
+  ],
+  clinical_nutrition: [
+    {q:"What is the most important nutrient for post-operative patients and why?", a:"Protein — post-operative catabolism breaks down muscle for wound repair, immune response, and enzyme synthesis. Adequate protein intake (1.2–2.0 g/kg/day post-op) prevents protein-energy malnutrition, supports anastomosis healing, and maintains immune function. Post-op patients also need increased Vitamin C and zinc."},
+    {q:"What is the nutritional management of severe burns?", a:"Severe burns cause massive hypermetabolism, protein catabolism, and fluid/electrolyte loss. ~2 days post-burn: sudden diuresis as capillary leak resolves and fluid reabsorbs — monitor for dehydration or overhydration. Key: very high protein and calorie intake (enteral nutrition preferred), high Vitamin C and zinc for wound healing."},
+    {q:"What dietary modifications are needed for Type 2 Diabetes Mellitus?", a:"Avoid high-glycaemic index foods; distribute carbohydrate evenly across meals; focus on complex carbohydrates with fibre; limit added sugars and sugary drinks. DASH/Mediterranean diet recommended. Monitor carbohydrate intake (consistent carb counting). Weight management central — 5–10% weight loss improves glycaemic control."},
+    {q:"What is the most serious and deadly form of skin cancer?", a:"Melanoma — arises from melanocytes; most aggressive type due to rapid metastasis. Risk factors: UV exposure, fair skin, family history, multiple moles. Treatment: surgical excision, immunotherapy (checkpoint inhibitors), targeted therapy (BRAF inhibitors). Nutritional relevance: Vitamin D may play a protective role; sun protection is primary prevention."},
+    {q:"What is the nutritional approach to cardiovascular disease (CVD)?", a:"Reduce: saturated fat, trans fat, sodium, added sugars, dietary cholesterol, processed meats.\nIncrease: soluble fibre (oats, legumes), omega-3 fatty acids, fruits and vegetables, whole grains, nuts.\nMediterranean diet and DASH diet reduce CVD risk. Achieving healthy BMI and physical activity are also key."},
+    {q:"What is the nutritional approach to cancer patients?", a:"Cancer patients are at high risk of malnutrition (tumour cachexia, treatment side effects — nausea, mucositis, anorexia). Goals: maintain body weight and lean mass, adequate protein (1.0–1.5 g/kg), adequate calories. Use oral supplements or enteral/parenteral nutrition as needed. Avoid extreme dietary restrictions."},
+    {q:"What is enteral vs. parenteral nutrition?", a:"Enteral nutrition (EN): delivery of nutrients directly into the GI tract (nasogastric tube, PEG). Preferred when GI tract is functional — maintains gut integrity, cheaper, fewer infections.\nParenteral nutrition (PN): IV delivery of nutrients when GI tract cannot be used (short bowel syndrome, ileus). Risk: catheter infections, metabolic complications."},
+    {q:"What are the medical nutrition therapy (MNT) goals for chronic kidney disease (CKD)?", a:"CKD nutrition goals: restrict protein (to reduce nitrogen waste and slow progression), limit potassium and phosphorus (as kidneys can't excrete them), control sodium and fluid intake (to manage hypertension/oedema), ensure adequate calories to prevent catabolism. Dialysis patients have higher protein needs."},
+    {q:"What is the glycaemic index (GI)?", a:"Glycaemic index measures how rapidly a food raises blood glucose compared to pure glucose (GI=100). Low GI (<55): slow glucose release; better for blood sugar control (legumes, oats, non-starchy vegetables). High GI (>70): rapid spike (white bread, potatoes, sugary drinks). Important for diabetes, metabolic syndrome management."},
+    {q:"What is sarcopenia and how is it nutritionally managed?", a:"Sarcopenia = age-related loss of skeletal muscle mass and strength. Nutritional management: adequate protein intake (1.0–1.2 g/kg/day for older adults, higher if active), Vitamin D supplementation, leucine-rich foods (to stimulate muscle protein synthesis), combined with resistance exercise. Prevents falls and disability."},
+    {q:"What are food allergies vs. food intolerances?", a:"Food allergy: immune-mediated reaction (IgE-mediated); can be life-threatening (anaphylaxis); common allergens: milk, eggs, wheat, soy, peanuts, tree nuts, fish, shellfish.\nFood intolerance: non-immune digestive reaction; not life-threatening; examples: lactose intolerance (missing lactase enzyme), gluten sensitivity (non-celiac)."},
+    {q:"What is coeliac disease and its dietary management?", a:"Coeliac disease is an autoimmune disorder triggered by gluten (wheat, barley, rye), causing small intestinal villous atrophy, malabsorption, and deficiencies (iron, folate, calcium, B12). Treatment: strict lifelong gluten-free diet. Oats are controversial. Monitor for nutritional deficiencies with supplementation."},
+    {q:"What is the role of nutrition in wound healing?", a:"Wound healing requires: protein (tissue synthesis, immune function), Vitamin C (collagen cross-linking), zinc (enzyme function, cell proliferation), adequate calories (spare protein), adequate hydration, and Vitamin A. Malnutrition significantly impairs wound healing and increases infection risk, especially post-surgery."},
+    {q:"What is the DASH diet and its primary indication?", a:"DASH (Dietary Approaches to Stop Hypertension) diet: high in fruits, vegetables, whole grains, low-fat dairy, lean proteins, nuts; low in saturated fat, sodium, and added sugars. Recommended for: hypertension management (reduces systolic BP by ~11 mmHg), CVD prevention, and metabolic syndrome. Also beneficial for CKD and diabetes."},
+  ],
+  lifespan_nutrition: [
+    {q:"What are the nutritional needs during pregnancy?", a:"Increased needs: folate (400–800 μg — neural tube development), iron (+27 mg/day — RBC production for fetus), calcium (1000 mg/day), iodine, DHA (brain development), and total calories (+~300 kcal/day 2nd/3rd trimester). Avoid: alcohol, high-mercury fish, unpasteurised products, raw meat/eggs, excess Vitamin A."},
+    {q:"What is breastfeeding and its nutritional advantages?", a:"Breast milk provides ideal nutrition for infants up to 6 months: antibodies (IgA — passive immunity), enzymes, hormones, and optimal nutrient ratios. Reduces infant risk of: infections, allergies, obesity, SIDS. Mother benefits: uterine involution, weight loss, reduced breast/ovarian cancer risk, bonding."},
+    {q:"What are the nutritional needs of preschool-aged children (ages 2–5)?", a:"Preschoolers have high nutritional needs relative to body size for growth and brain development. Key nutrients: calcium and Vitamin D (bone development), iron (anaemia prevention), zinc (growth). Practical challenges: food jags (food selectivity/neophobia), small stomach capacity — offer frequent small nutritious meals."},
+    {q:"What nutritional changes occur with aging that affect dietary needs?", a:"Decreased basal metabolism, reduced lean mass, decreased absorption (B12, calcium, Vitamin D), reduced thirst sensation (dehydration risk), dental problems limiting food choices, polypharmacy affecting nutrient absorption. Older adults need: adequate protein, Vitamin D/calcium, B12, fibre, and water — despite lower overall calorie needs."},
+    {q:"What is childhood obesity and its nutritional approach?", a:"Childhood obesity: BMI ≥95th percentile for age/sex. Causes: excessive calorie intake, reduced activity, sugary drinks, fast food, screen time, genetic predisposition. Approach: family-centred lifestyle modification; increase fruits/vegetables/whole grains; limit screen time; daily physical activity (60 min/day); avoid restrictive dieting."},
+    {q:"What is the relationship between diet and Type 2 Diabetes prevention?", a:"High-risk individuals can reduce T2DM risk by 58% (Diabetes Prevention Program): 5–7% weight loss through diet and 150 min/week physical activity. Diet: reduce refined carbohydrates and added sugars, increase fibre, achieve/maintain healthy BMI, Mediterranean or DASH pattern. Metformin is pharmacological prevention for highest-risk."},
+    {q:"What is the nutritional management of gastrointestinal disease?", a:"Crohn's disease: avoid trigger foods, high-nutrient low-residue diet during flares, supplementation (B12, folate, iron, D, zinc).\nUlcerative colitis: low-residue during flares; probiotic consideration.\nIBS: low-FODMAP diet (reduces fermentable carbohydrates causing bloating/pain). General: adequate hydration and fibre modification."},
+    {q:"What are the special nutritional needs of clients with disabilities?", a:"Clients with physical disabilities may have altered energy needs (paraplegia: reduced), dysphagia (texture-modified diet, thickened liquids), pressure injury risk (high protein, Vitamin C, zinc), constipation (fibre and fluids), medication-nutrient interactions, and reduced access to preparing food. Person-centred nutrition planning is essential."},
+    {q:"What is the nutritional impact of renal disease (CKD)?", a:"CKD progressively loses the ability to excrete potassium (K⁺), phosphorus (PO₄), and nitrogenous waste. Dietary restrictions: protein, potassium (avoid bananas, oranges, tomatoes), phosphorus (dairy, nuts, dark colas), sodium, and fluid. Vitamin D and EPO supplementation often needed. Dialysis patients require different restrictions."},
+    {q:"What are cultural patterns in food habits and their relevance to nutrition care?", a:"Culture shapes food choices, preparation methods, meal timing, food beliefs and taboos. Nutritionists must assess cultural context before recommending changes — making suggestions that respect cultural identity and are practical within the patient's cultural norms. Avoid ethnocentrism; use cultural humility."},
+    {q:"What is medical nutrition therapy (MNT)?", a:"MNT is the use of specific nutrition services to treat illness, injury, or condition. Delivered by Registered Dietitians (RDs). Process: nutrition assessment → diagnosis → intervention → monitoring/evaluation. Evidence-based guidelines exist for diabetes, CKD, CVD, cancer, malnutrition, and many other conditions."},
+    {q:"What is digestion and how does it relate to nutrient absorption?", a:"Digestion = mechanical (chewing, peristalsis) and chemical (enzymes, bile) breakdown of food into absorbable units. Absorption occurs primarily in the small intestine (duodenum/jejunum for most nutrients, ileum for B12/bile salts). Over 90% of macronutrients absorbed in healthy individuals. Large intestine absorbs water and electrolytes."},
+    {q:"What is the role of water in the body?", a:"Water makes up ~60% of body weight. Functions: solvent for biochemical reactions, temperature regulation (sweating), nutrient transport, waste removal, joint lubrication, cell volume maintenance. Daily needs: ~2–3L/day total (food + fluids). Signs of dehydration: dark urine, dry mouth, decreased skin turgor, tachycardia."},
+    {q:"What is protein-energy malnutrition (PEM)?", a:"Two forms:\nKwashiorkor: protein deficiency with adequate calories → oedema, fatty liver, skin/hair changes, irritability.\nMarasmus: severe calorie and protein deficiency → severe muscle wasting, growth retardation.\nMixed forms common in hospitalised patients. Treatment: gradual refeeding (risk of refeeding syndrome — acute electrolyte shifts)."},
+  ],
+};
+
+_hosaDecks.cp = {
+  creative_thinking: [
+    {q:"What is the outcome of creative thinking according to Adair?", a:"New ideas — creative thinking generates original, novel ideas that didn't exist before. This is distinguished from critical thinking (which evaluates existing ideas) and analytical thinking (which breaks problems into parts). Creative thinking is the foundation of innovation."},
+    {q:"What are latent consequences in decision-making?", a:"Latent consequences are consequences that are not probable and might not be seen by a reasonable person — hidden, non-obvious outcomes that could emerge from a decision. Distinguishable from: evident consequences (obvious and visible), veiled consequences (hidden but plausible). Important to consider in risk assessment."},
+    {q:"What is lateral thinking?", a:"Lateral thinking is the process of abandoning a step-by-step logical approach and thinking 'sideways' — generating creative solutions by reframing problems and looking from unconventional angles. Coined by Edward de Bono. Contrasts with vertical thinking (logical, sequential). Used to break habitual thinking patterns."},
+    {q:"What is induction in reasoning?", a:"Induction = the process of inferring a general law or principle from specific observations or cases. Example: observing that patient A, B, and C all recovered faster with Therapy X → inferring Therapy X helps recovery. Contrasts with deduction (applying general rules to specific cases). Inductive reasoning is fundamental to scientific discovery."},
+    {q:"What is the optimum time for a brainstorming session according to Adair?", a:"40 minutes — long enough to generate a substantial flow of ideas after initial warm-up, but short enough to maintain focus and energy before diminishing returns set in. Key brainstorming rules: defer judgment, quantity over quality initially, build on others' ideas, encourage wild ideas."},
+    {q:"Why does creative thinking benefit from involving others?", a:"Different people have differing mental strengths — analytical, creative, intuitive, critical, etc. Teams with diverse cognitive styles identify blind spots, generate more ideas, challenge assumptions, and improve decision quality. Groupthink is a risk; psychological safety encourages authentic contribution."},
+    {q:"What is the ability to 'analyze' in problem solving?", a:"Analyze = to separate a whole into its constituent parts to understand structure and relationships. One of the core thinking skills: observe → describe → compare → analyze → infer. Analysis is essential for understanding root causes, identifying variables, and framing problems accurately."},
+    {q:"What is divergent thinking vs. convergent thinking?", a:"Divergent thinking: generating many possible ideas, solutions, or alternatives (brainstorming, mind mapping) — explores breadth. Used in ideation phase.\nConvergent thinking: narrowing options and selecting the best solution based on criteria — explores depth. Used in evaluation phase.\nEffective creative problem solving uses both."},
+    {q:"What are the mental roadblocks to effective decision making?", a:"Common mental roadblocks include: lack of conviction (not trusting your judgment), lack of motivation (not driving toward a goal), lack of perspective (seeing only one viewpoint).\n'Lack of direction' is NOT one of the standard roadblocks. Roadblocks prevent clear, confident decisions."},
+    {q:"What is the systems problem strategy in Adair's model?", a:"The main strategy for systems problems is to find the point of deviation and establish what caused it — identify where the system diverged from expected performance, trace back to the root cause, and address it directly rather than only treating symptoms."},
+    {q:"What is abduction in reasoning?", a:"Abduction = inference to the best explanation — selecting the simplest, most likely hypothesis that accounts for all available evidence. Used in medical diagnosis: observing symptoms, then identifying the most probable diagnosis. Related to but distinct from induction and deduction."},
+    {q:"What is the difference between a problem and a puzzle in Adair's framework?", a:"A puzzle has one correct answer and a clear solution path. A problem is open-ended, with multiple possible solutions and no single 'right answer'. Healthcare challenges are typically problems (complex, context-dependent) rather than puzzles, requiring creative rather than algorithmic approaches."},
+    {q:"What are the 6 thinking hats (de Bono) and their uses?", a:"White hat: facts and data\nRed hat: emotions and intuition\nBlack hat: caution and critical judgment\nYellow hat: optimism and benefits\nGreen hat: creativity and new ideas\nBlue hat: process and meta-thinking (facilitator)\nUsed to structure parallel thinking in teams, separating emotional from analytical reasoning."},
+    {q:"What is framing a problem and why does it matter?", a:"Framing defines how a problem is perceived — which aspects are highlighted, which solutions are considered viable. Reframing shifts perspective to reveal new solutions. A problem framed as 'how do we reduce costs?' vs. 'how do we maximise value?' generates very different solutions. How a problem is framed strongly influences the outcome."},
+  ],
+  problem_solving: [
+    {q:"What is the bridge model for problem solving and the 'discerning' skill?", a:"The bridge model represents moving from the current situation (one bank) to the desired outcome (other bank) via structured problem-solving steps. 'Discerning' is the defining skill that identifies and clearly articulates what the problem actually is — you must define the problem before solving it."},
+    {q:"What is the 5-6 range in Adair's problem-solving context?", a:"The optimal team size for creative problem solving is 5–6 members. Small enough for efficient communication and individual contribution; large enough for diverse perspectives and division of tasks. Teams larger than ~7 tend toward reduced cohesion and social loafing."},
+    {q:"What are the steps of the creative problem-solving (CPS) model?", a:"1. Identify/Define the challenge (clarification)\n2. Gather facts and data\n3. Generate ideas (divergent thinking — brainstorming)\n4. Develop solution (convergent thinking — evaluate & refine)\n5. Plan for action (implementation planning)\n6. Execute and review\nBased on Osborn-Parnes CPS model."},
+    {q:"What is root cause analysis (RCA)?", a:"A systematic process to identify the fundamental ('root') cause of a problem or adverse event, rather than just treating symptoms. Methods: 5 Whys (asking 'why' repeatedly until root cause is found), fishbone (Ishikawa) diagram (categorises causes: man, machine, method, material, environment). Common in healthcare quality improvement."},
+    {q:"What is a fishbone (Ishikawa) diagram?", a:"A cause-and-effect diagram that visually organises potential causes of a problem into categories (the 6Ms: Man, Machine, Method, Material, Measurement, Mother Nature/Environment). The 'fish head' = the problem/effect; 'bones' = categories of causes. Helps teams systematically identify root causes."},
+    {q:"What is a SWOT analysis and how is it applied to problem solving?", a:"SWOT = Strengths, Weaknesses, Opportunities, Threats.\nInternal: Strengths (advantages) and Weaknesses (limitations)\nExternal: Opportunities (favourable conditions) and Threats (risks)\nUsed to assess an organisation's or team's position before planning strategy. Helps align solutions with available resources."},
+    {q:"What is the difference between reactive and proactive problem solving?", a:"Reactive problem solving responds after a problem has already occurred — damage control.\nProactive problem solving anticipates potential problems before they arise — prevention-focused, uses risk assessment, scenario planning, and early warning systems.\nHealthcare quality improvement emphasises proactive approaches (FMEA — Failure Mode Effects Analysis)."},
+    {q:"What is design thinking in healthcare?", a:"Design thinking = human-centred approach to innovation: Empathise (understand the patient's experience) → Define (articulate the problem) → Ideate (generate solutions) → Prototype (build low-cost models) → Test (gather feedback and refine). Emphasises user needs and iterative development."},
+    {q:"What is PDCA (Plan-Do-Check-Act) / PDSA cycle?", a:"Quality improvement cycle: Plan (identify problem, plan change) → Do (implement change on small scale) → Check/Study (measure results) → Act (standardise if effective or try again). Used in healthcare for continuous quality improvement. Also called Deming cycle."},
+    {q:"What is force field analysis?", a:"A technique developed by Kurt Lewin that identifies driving forces (factors pushing toward change) and restraining forces (factors resisting change). To implement change: strengthen driving forces and/or weaken restraining forces. Visual tool for understanding change dynamics."},
+    {q:"What is brainstorming and the rule of deferred judgment?", a:"Brainstorming = group ideation technique to generate many ideas quickly. Key rule: deferred judgment (evaluation is postponed until the idea generation phase is complete) prevents premature evaluation from inhibiting creative expression. Other rules: build on others' ideas, quantity over quality initially."},
+    {q:"What are cognitive biases that affect problem solving?", a:"Confirmation bias: seeking information that confirms existing beliefs.\nAnchoring bias: over-relying on first information encountered.\nAvailability heuristic: judging probability by how easily examples come to mind.\nStatus quo bias: preference for the current state.\nSunk cost fallacy: continuing a failing strategy because of past investment."},
+    {q:"What is the difference between simple, complicated, and complex problems?", a:"Simple: known solution, routine (following a checklist).\nComplicated: expertise needed but solution determinable (engineering a bridge).\nComplex: multiple interdependent variables, no single solution, emergent behaviour (healthcare systems, social change). Most real-world healthcare problems are complex — requiring adaptive, iterative approaches rather than single 'solutions'."},
+    {q:"What is the Pareto principle (80/20 rule) in problem solving?", a:"The Pareto principle states that roughly 80% of problems come from 20% of causes. In healthcare quality improvement: 80% of adverse events may stem from 20% of processes or human errors. Focus improvement efforts on the vital few causes (20%) that drive most outcomes, rather than spreading efforts thin."},
+  ],
+  decision_making: [
+    {q:"What are the key steps in a rational decision-making process?", a:"1. Define the decision to be made\n2. Gather relevant information\n3. Identify alternatives\n4. Weigh evidence and consequences (including latent consequences)\n5. Choose among alternatives\n6. Take action\n7. Review decision (feedback loop)\nRational models assume information availability and analytical capacity."},
+    {q:"What is bounded rationality?", a:"Bounded rationality (Herbert Simon) = decision-making is limited by available information, cognitive limitations, and time constraints — humans cannot achieve perfect rationality. We 'satisfice' (select the first satisfactory option) rather than optimise. Explains why heuristics (mental shortcuts) are used in practice."},
+    {q:"What is a decision matrix and how is it used?", a:"A decision matrix evaluates multiple options against multiple weighted criteria. Steps: list options (rows), list criteria (columns), assign weights to criteria, score each option on each criterion, multiply score by weight, total scores. Option with highest weighted score is optimal. Removes subjectivity from group decisions."},
+    {q:"What is ethical decision making in healthcare?", a:"Framework: 1) identify the ethical issue; 2) apply ethical principles (autonomy, beneficence, non-maleficence, justice); 3) consider stakeholders and legal obligations; 4) identify options and consequences; 5) choose and justify the best action.\nEthics committees, patient advocates, and legal counsel support complex decisions."},
+    {q:"What is consensus building in team decision making?", a:"Consensus = all team members can accept the decision (not necessarily 100% agreement). Process: ensure all voices heard, integrate different perspectives, identify common ground, find solutions that address key concerns. Consensus builds ownership and commitment to implementation. Distinct from voting (majority wins) or compromise."},
+    {q:"What is scenario planning?", a:"A strategic planning method that develops multiple plausible future scenarios to prepare for uncertainty. Not predicting the future but building flexible strategies. Process: identify driving forces → build scenarios → develop strategies for each → identify 'robust' strategies that work across multiple scenarios."},
+    {q:"What is the difference between programmed and non-programmed decisions?", a:"Programmed (routine): repetitive, well-defined problems with established procedures (clinical protocols, order sets). Non-programmed (novel): unique, complex, high-stakes problems requiring creative problem-solving and judgment (ethics consultations, resource allocation in disasters). Healthcare requires both types."},
+    {q:"What is risk assessment in healthcare decision making?", a:"Risk assessment identifies potential harms, estimates their probability and severity, and guides decisions about acceptable risk. Tools: FMEA (proactive — identifies failure modes before they occur), RCA (reactive — analyses events after they occur), risk matrix (probability × severity grid). Informed consent requires patient-level risk communication."},
+    {q:"What is groupthink and how does it impair decisions?", a:"Groupthink occurs when a cohesive group prioritises harmony over critical evaluation — leading to poor decisions. Symptoms: illusion of invulnerability, collective rationalisation, belief in group's morality, stereotyping outsiders, self-censorship. Prevention: devil's advocate role, anonymous input (Delphi), diverse teams, open challenge culture."},
+    {q:"What are heuristics in decision making?", a:"Mental shortcuts (rules of thumb) that simplify complex decisions under uncertainty. Often efficient but can lead to systematic errors (biases):\n• Availability heuristic: frequency judged by how easily examples come to mind\n• Representativeness: judging probability by similarity to prototype\n• Anchoring: over-reliance on first information\nRecognising heuristic biases improves decision quality."},
+    {q:"What is the precautionary principle in healthcare decision making?", a:"When an action raises threats of harm to human health or the environment, precautionary measures should be taken even if some cause-and-effect relationships are not fully established scientifically. Used in public health (new vaccine safety monitoring), environmental health, and emerging infection response."},
+    {q:"What is Kepner-Tregoe (KT) analysis?", a:"A structured problem-solving and decision-making framework with four steps: Situation Appraisal (clarify, prioritise concerns) → Problem Analysis (identify and describe the deviation, find root cause) → Decision Analysis (evaluate alternatives against objectives) → Potential Problem Analysis (anticipate risks in planned action). Used in complex healthcare and organisational decisions."},
+  ],
+  team_process: [
+    {q:"What are Tuckman's stages of team development?", a:"1. Forming: polite, exploratory; team members get acquainted\n2. Storming: conflict emerges as roles and working styles clash\n3. Norming: team develops shared norms, cohesion builds\n4. Performing: team functions efficiently and creatively\n5. Adjourning: task complete; team disbands\nLeaders must guide teams through each stage."},
+    {q:"What is psychological safety in teams?", a:"Psychological safety (Amy Edmondson) = team members feel safe to speak up, take risks, and make mistakes without fear of punishment or humiliation. Essential for creative problem solving, learning from errors, and quality improvement in healthcare. Leaders create safety through modelling curiosity and embracing uncertainty."},
+    {q:"What is the role of a facilitator in creative problem solving?", a:"The facilitator manages the CPS process without contributing to content: creating a safe environment, ensuring all voices are heard, keeping focus on the problem, managing time, balancing divergent and convergent phases, preventing premature judgment, and documenting ideas. Does not advocate for particular solutions."},
+    {q:"What are the key roles in a problem-solving team?", a:"Common team roles: Facilitator (manages process), Devil's Advocate (challenges assumptions), Recorder (documents ideas), Timekeeper (manages time), Domain Expert (provides technical knowledge), Creative Thinker (generates novel ideas), Critical Thinker (evaluates feasibility). Balance of roles improves team performance."},
+    {q:"What is collaborative problem solving vs. competitive?", a:"Collaborative: team members share information, build on each other's ideas, focus on shared goals, create win-win outcomes. Produces higher quality, more creative solutions than individual work for complex problems.\nCompetitive: individuals withhold information, compete for recognition. Can inhibit creative problem solving."},
+    {q:"What is the nominal group technique (NGT)?", a:"A structured group decision-making method: each member silently generates ideas → ideas are shared round-robin (no discussion) → ideas are clarified → each member privately ranks ideas → ranks are tallied. Prevents dominant voices from suppressing minority views, gives equal weight to all contributions."},
+    {q:"What is action planning in problem solving?", a:"After identifying a solution, action planning specifies: What will be done? Who is responsible? By when? What resources are needed? How will success be measured? Converts creative ideas into implementable change. Without action planning, even excellent solutions remain theoretical. SMART goals guide action planning."},
+    {q:"What is the difference between symptomatic and root-cause solutions?", a:"Symptomatic solutions address visible symptoms without fixing the underlying cause — problems recur. Root-cause solutions identify and fix the fundamental source of the problem — sustainable improvement. Healthcare example: providing more medication for chronic pain (symptomatic) vs. addressing opioid prescribing protocols (root cause)."},
+    {q:"What is diversity of thought and its value in problem solving?", a:"Diversity of thought (cognitive diversity) = different ways of processing information, different knowledge bases, and different assumptions. Teams with cognitive diversity generate more creative solutions, identify more risks, and avoid groupthink. Doesn't require demographic diversity but is often associated with it."},
+    {q:"What is the Delphi method?", a:"A structured communication technique to reach consensus among a panel of experts through iterative rounds of anonymous questionnaires. After each round, a facilitator summarises responses and feeds them back to the group; members refine their views. Used for complex forecasting, policy analysis, and controversial healthcare decisions."},
+    {q:"What is a logic model in healthcare problem solving?", a:"A logic model visually maps the relationship between resources (inputs), activities (interventions), outputs, and outcomes (short/medium/long-term). It is a tool for planning, communicating, and evaluating healthcare programmes. Forces clarity about how activities will produce desired outcomes and what assumptions are embedded in the programme."},
+    {q:"What are barriers to creative problem solving in healthcare organisations?", a:"Organisational barriers: rigid hierarchy, blame culture, time pressure, risk aversion, lack of resources, siloed departments.\nIndividual barriers: fear of judgment, perfectionism, cognitive biases, mental set/fixation.\nSolutions: psychological safety, protected innovation time, cross-functional teams, human-centred design, leadership that values experimentation."},
+  ],
+};
+
+_hosaDecks.hb = {
+  hosa_org: [
+    {q:"What is HOSA's mission statement?", a:"To empower HOSA-Future Health Professionals to become leaders in the global health community, through education, collaboration, and experience."},
+    {q:"What are the HOSA national colours?", a:"Maroon, Medical White, and Navy Blue. These represent professional pride, healthcare, and loyalty respectively. HOSA motto: 'The Hands of HOSA Mold the Health of Tomorrow.'"},
+    {q:"What does the HOSA emblem symbolise?", a:"Circle: the continuity of health care.\nTriangle: three aspects of humankind's well-being — social, physical, and mental.\nHands: the caring of each HOSA member."},
+    {q:"When and where was HOSA founded?", a:"HOSA was founded in November 1975 at the organising meeting in Cherry Hill, New Jersey. Six charter states: Alabama, New Jersey, New Mexico, North Carolina, Oklahoma, and Texas. Originally called AHOESO (American Health Occupations Education Student Organization)."},
+    {q:"Who was the first National HOSA President?", a:"Lynne McGee of North Carolina — the first National HOSA President after HOSA's founding in 1975. Helen K. Powers was the first Health Occupations Program Specialist of the U.S. Office of Education, key in expanding health occupations programming."},
+    {q:"What are HOSA's three event categories?", a:"1. Health Science Events (academic knowledge tests)\n2. Health Professions Events (hands-on clinical skills)\n3. Teamwork Events (collaborative problem-solving)\nAlso: Emergency Preparedness Events and Leadership Events. HOSA now has 60+ competitive events."},
+    {q:"What are the three regions of HOSA and their VPs (2024–25)?", a:"Eastern Region VP: Shriya Kunam\nCentral Region VP: Aaron Summerall\nWestern Region VP: Matthew Kim\nHOSA is divided into Eastern, Central, and Western regions across the U.S. and international chapters."},
+    {q:"What are HOSA's major annual conferences?", a:"International Leadership Conference (ILC): held annually in June — major competitive event and leadership gathering. Washington Leadership Academy (WLA): held in September in Washington D.C. for state officers and chapter leaders.\n2025 ILC: Nashville, TN, June 18–29. 2026 ILC: Indianapolis, IN, June 17–20."},
+    {q:"What three sections does the HOSA Handbook contain?", a:"Section A: HOSA History\nSection B: Competitive Events\nSection C: Chapter Management\nThe HOSA Handbook is the authoritative guide to HOSA organisation, member rights, event rules, and chapter governance."},
+    {q:"How many members does HOSA have and how many chartered associations?", a:"Over 260,000 members through 54 chartered HOSA Associations, spanning American Samoa, Canada, China, District of Columbia, and Puerto Rico. HOSA has grown steadily since its founding in 1975."},
+    {q:"What competitive events were offered at HOSA's founding in 1976?", a:"Informative and Extemporaneous Speaking; Job Interviews; Medical Terminology; Poster; Emblem; Motto. HOSA's event categories have expanded greatly since then to now include 60+ events across Health Science, Health Professions, Teamwork, Emergency Preparedness, and Leadership."},
+    {q:"What is HOSA Canada and when does the 2026–2027 guideline update release?", a:"HOSA Canada is the Canadian affiliate of HOSA–Future Health Professionals, operating competitive events for secondary (high school) and post-secondary students. The 2026–2027 competitive event guidelines are updated by October 2026."},
+    {q:"What is the current theme of HOSA (2025 ILC)?", a:"The 2025 ILC theme was 'Powered by People.' The 2024 ILC theme was 'Dare to Create!' Themes guide the direction of HOSA's programming, emphasising collaboration, innovation, and student empowerment."},
+    {q:"What categories does the HOSA Bowl written exam cover?", a:"The HOSA Bowl written exam is divided into content areas including: HOSA-Related topics (20% of round one), Parliamentary Procedure (10%), Current Health Topics (10%), and Health Science knowledge. Teams must be proficient across all areas to succeed."},
+  ],
+  parliamentary: [
+    {q:"What is parliamentary procedure and its purpose?", a:"Parliamentary procedure is a set of rules every participant must follow when part of a meeting, used to facilitate meetings most efficiently. Ensures orderly, fair decision-making. When gatherings reach 12–15 people, a chairman must maintain order. Robert's Rules of Order (RRO) is the most commonly used standard."},
+    {q:"What is Robert's Rules of Order (RRO)?", a:"A specific set of rules originally codified by U.S. Army General Henry M. Robert in 1876, commonly used during committee, council, bylaw, and board meetings. Derived from English Parliament practices. Experts in RRO are called parliamentarians. Provides a parliamentary authority (governing rules) for organisations."},
+    {q:"What is a deliberative assembly?", a:"A meeting where members gather to consider and decide on actions to be taken. Requires quorum (minimum attendance), a chairman to preside, and a secretary to record minutes. Parliamentary procedure governs deliberative assemblies to ensure all voices are heard and decisions are made fairly."},
+    {q:"What is quorum and why is it required?", a:"Quorum = the minimum number of members who must be present for business to be conducted. A common requirement: 50% of voting members + 1. Without quorum, no official business can be transacted. Ensures decisions represent the organisation's membership, not just a small minority."},
+    {q:"What is the standard order of business at a meeting?", a:"1. Reading and approval of minutes\n2. Reports (officer, committee)\n3. Unfinished (old) business\n4. New business\n5. Announcements\n6. Adjournment\nSome groups use an agenda setting out items at exact times instead of this standard order."},
+    {q:"What are the four categories of motions in parliamentary procedure?", a:"1. Main motions: introduce new business to the assembly\n2. Subsidiary motions: help treat or dispose of a main motion (amend, postpone, table)\n3. Privileged motions: urgent matters of overriding importance (recess, adjournment)\n4. Incidental motions: relate to current pending business (point of order, appeal)"},
+    {q:"What is a subsidiary motion and give examples?", a:"Subsidiary motions assist in treating or disposing of a main motion: Postpone Indefinitely, Amend, Commit (refer to committee), Postpone Definitely, Limit/Extend Debate, Move the Previous Question (close debate for immediate vote), Lay on the Table (set aside temporarily)."},
+    {q:"What is a privileged motion and give examples?", a:"Privileged motions relate not to pending business but to urgent overriding matters: Call for Orders of the Day (enforce schedule), Raise a Question of Privilege (urgent personal request), Recess, Adjournment, Fix the Time to Which to Adjourn. These take precedence over other business."},
+    {q:"What are incidental motions?", a:"Incidental motions relate to pending or current business: Point of Order (enforce rules), Appeal (challenge chair's ruling), Suspend the Rules, Objection to Consideration of a Question, Division of a Question, Consideration by Paragraph, Division of the Assembly (standing vote), Motions Relating to Voting Methods."},
+    {q:"What is a main motion?", a:"A main motion is a motion whose introduction brings new business before the assembly. It is the most basic type of motion. Only one main motion can be on the floor at a time. Subsidiary and incidental motions can be applied to main motions while they are pending."},
+    {q:"What is adjourning, recessing, and standing at ease?", a:"Adjourn: to formally end a meeting entirely.\nRecess: a short break from a meeting while proceedings are temporarily suspended.\nStanding at ease: the chair pauses proceedings briefly; members stand in place until the chair calls meeting back to order."},
+    {q:"What are requests and inquiries in parliamentary procedure?", a:"Parliamentary Inquiry: a request for the chair's opinion on parliamentary procedure relating to the business at hand.\nRequest for Information: an inquiry directed to the chair or a member regarding facts affecting the business at hand.\nThese are not motions but procedural mechanisms for seeking guidance."},
+    {q:"How are officers referred to in parliamentary procedure?", a:"The Chair is addressed as 'Madame President' or 'Mr. Chair' depending on their title. Members are referred to by name or title by the chair. Formal language (speaking through the chair, rising to be recognised) maintains order and ensures everyone has an equal opportunity to be heard."},
+    {q:"What is an appeal and when is it used?", a:"An appeal allows a member to challenge a ruling made by the chair — the assembly votes on whether to uphold or overturn the ruling. Requires a seconder. The chair may explain their reasoning. A majority (or tie) upholds the chair's decision; majority against overturns it. Ensures chair accountability."},
+  ],
+  health_topics: [
+    {q:"What is the NIH MedlinePlus Magazine and what is its purpose?", a:"A quarterly publication produced by the National Library of Medicine and National Institutes of Health (NIH). Provides updates to the general public on NIH-supported research breakthroughs, health topics, and wellness tips. Covers often feature celebrities and athletes sharing their health experiences."},
+    {q:"What are the current key health topics in RSV for older adults (2025)?", a:"Adults aged 65+ face higher RSV (Respiratory Syncytial Virus) infection risk, especially during peak winter months (December–January). A new RSV vaccine is now available to protect older adults and reduce severe respiratory illness. RSV was previously considered mainly a paediatric concern."},
+    {q:"What is pancreatic cancer and what are new 2025 detection advances?", a:"Pancreatic cancer is the 3rd-leading cause of U.S. cancer deaths (~1.7% lifetime risk), difficult to detect early. New NIH-funded advances: blood tests analysing tumour DNA and regular MRI/ultrasound for high-risk patients improve early detection. KRAS-inhibitor drugs can shrink/stop tumour growth."},
+    {q:"What is xenotransplantation and what was the 2025 pig kidney milestone?", a:"Xenotransplantation = transplanting organs from other species into humans. In 2025, Tim Andrews received a genetically-edited pig kidney that functioned for 271 days — a U.S. record before it was removed due to declining function. Over 100,000 U.S. patients await kidney transplants, with thousands dying while waiting."},
+    {q:"What is the 2025–2026 measles situation in Canada and the U.S.?", a:"Continuous measles transmission threatens national elimination status in Canada and the U.S. Some counties report up to 13% of children with non-medical vaccine exemptions. Measles complications: pneumonia, encephalitis, death. Health officials urge urgent vaccination campaigns to prevent large-scale outbreaks."},
+    {q:"What is antibiotic resistance and the 2025 WHO findings?", a:"WHO report (October 2025): 1 in 6 laboratory-confirmed bacterial infections were resistant to standard antibiotics. Over 40% of monitored pathogen-antibiotic combinations showed increasing resistance between 2018–2023, with annual increases of ~5–15%. A mounting global health threat that limits treatment of common infections."},
+    {q:"What is SNAP and what is its significance (2025)?", a:"SNAP (Supplemental Nutrition Assistance Program) serves ~42 million Americans monthly, many children and elderly. Federal government shutdown threatened SNAP benefits in 2025. Loss of benefits causes food insecurity, malnutrition, and health deterioration. 25 states sued the USDA to maintain funds."},
+    {q:"What is the Governors Public Health Alliance launched in 2025?", a:"A coalition of 15 U.S. governors (representing >1/3 of population) launched October 15, 2025, to improve state-level coordination on vaccine policy, emergency response, and health security. Formed in response to federal public health staffing cuts and CDC disruptions. Shares data and best practices across states."},
+    {q:"What is the CDC vaccine advisory disruption (2025)?", a:"Staff supporting the Advisory Committee on Immunization Practices (ACIP) at the CDC were laid off in 2025, and the October meeting was indefinitely postponed. ACIP makes vaccine recommendations for the U.S. childhood immunisation schedule. The disruption may affect approvals and coverage for up to half of children's vaccines."},
+    {q:"What are the core principles of public health?", a:"1. Prevention before treatment\n2. Population-level focus (vs. individual)\n3. Social determinants of health\n4. Equity and reducing disparities\n5. Evidence-based policy and practice\n6. Surveillance and monitoring\n7. Community engagement\n8. One Health (human-animal-environment interconnection)"},
+    {q:"What is herd immunity and how does it protect unvaccinated individuals?", a:"Herd (community) immunity occurs when a sufficient proportion of a population is immune, interrupting transmission chains and protecting unimmunised individuals (infants, immunocompromised). Threshold varies by disease: measles ~95%, polio ~80–85%. Requires sustained high vaccine coverage."},
+    {q:"What is influenza and key facts about seasonal flu prevention?", a:"Influenza viruses (A and B) cause seasonal respiratory illness. Peaks December–February. Vaccination recommended annually (especially children, elderly 65+, pregnant, immunocompromised). Complications: pneumonia, secondary bacterial infections, hospitalisation. Annual vaccination needed because influenza viruses mutate (antigenic drift/shift)."},
+    {q:"What is the Listeria 2025 outbreak and key public health points?", a:"A 2025 multistate Listeria outbreak was linked to ready-to-eat packaged meals (salads, bistro boxes at convenience stores, hospitals, airports). At least 10 hospitalisations. High-risk groups: pregnant women, elderly (65+), immunocompromised. Listeria symptoms: high fever, headache, stiff neck, nausea; onset from days to 10 weeks after exposure."},
+    {q:"What is the Leucovorin autism treatment debate (2025)?", a:"Leucovorin (folinic acid) is being promoted as a potential treatment for autism spectrum disorder (ASD) symptoms in children with folate-receptor autoantibodies. One study showed improvements in speech/behaviour, but experts caution: evidence is preliminary, no rigorous large trials completed, and it is not a cure. Considerable scientific debate remains."},
+  ],
+};
+
+
+// Build 'all' decks for new events
+(function() {
+  var newEids = ['cn','epid','nu','cp','hb'];
+  newEids.forEach(function(eid) {
+    if (!_hosaDecks[eid]) return;
+    var all = [];
+    Object.keys(_hosaDecks[eid]).forEach(function(k) {
+      if (k === 'all') return;
+      _hosaDecks[eid][k].forEach(function(c) {
+        all.push({q: c.q, a: c.a, deck: k});
+      });
+    });
+    _hosaDecks[eid].all = all;
+  });
+})();
+
+
+// Add labels and panel mappings for new events
+(function() {
+  var newLabels = {
+    // Clinical Nursing
+    assessment:'Patient Assessment & Vitals', medications:'Medications & Procedures',
+    patient_care:'Patient Care & Safety', special_populations:'Special Populations',
+    // Epidemiology
+    study_types:'Study Design & Research', outbreak:'Outbreak Investigation',
+    measures:'Epidemiological Measures', surveillance:'Surveillance & Prevention',
+    // Nutrition
+    macronutrients:'Macronutrients & Energy', vitamins_minerals:'Vitamins & Minerals',
+    clinical_nutrition:'Clinical Nutrition', lifespan_nutrition:'Nutrition Across the Lifespan',
+    // Creative Problem Solving
+    creative_thinking:'Creative Thinking', problem_solving:'Problem Solving Models',
+    decision_making:'Decision Making', team_process:'Team Process & Collaboration',
+    // HOSA Bowl
+    hosa_org:'HOSA Organization & History', parliamentary:'Parliamentary Procedure',
+    health_topics:'Current Health Topics',
+  };
+  Object.assign(_hosaLabels, newLabels);
+
+  var newPanels = {
+    'clinical-nursing': 'cn',
+    'epidemiology':     'epid',
+    'nutrition':        'nu',
+    'creative-problem': 'cp',
+    'hosa-bowl':        'hb',
+  };
+  Object.assign(_panelToEid, newPanels);
+})();
+
+// ═══════════════════════════════════════════════════════════════
+//  CUSTOM FLASHCARD CREATOR
+// ═══════════════════════════════════════════════════════════════
+
+'use strict';
+
+const CC_STORAGE_KEY = 'medpath_custom_cards';
+let _customCards = {};            // { panelId: [{id, q, a}] }
+const _ccStudy = {};              // per-panel study state
+
+// ── Storage ────────────────────────────────────────────────────
+function loadCustomCards() {
+  try {
+    const raw = localStorage.getItem(CC_STORAGE_KEY);
+    _customCards = raw ? JSON.parse(raw) : {};
+  } catch(e) { _customCards = {}; }
+}
+
+function saveCustomCards() {
+  try { localStorage.setItem(CC_STORAGE_KEY, JSON.stringify(_customCards)); } catch(e) {}
+}
+
+function _ccGet(pid) { return _customCards[pid] || []; }
+
+// ── DOM Injection: add My Cards tab to every panel ─────────────
+function initCustomCardsTabs() {
+  document.querySelectorAll('.hosa-event-panel').forEach(function(panel) {
+    var pid = panel.id.replace('hosa-panel-', '');
+    if (pid === 'empty') return;
+
+    // Detect if this is an info-only panel (has .ei-body, no flashcard deck)
+    var isInfoPanel = !!panel.querySelector('.ei-body') && !panel.querySelector('.cpr-deck-bar');
+
+    // Ensure .cpr-tabs container exists; if not, create it
+    var tabs = panel.querySelector('.cpr-tabs');
+    if (!tabs) {
+      tabs = document.createElement('div');
+      tabs.className = 'cpr-tabs';
+
+      var firstBtn = document.createElement('button');
+      firstBtn.className = 'cpr-tab active';
+
+      if (isInfoPanel) {
+        // ── Info panel: first tab = "Event Guide" showing the ei-body content ──
+        firstBtn.innerHTML = '📋 Event Guide';
+        firstBtn.onclick = (function(p) {
+          return function() { _switchInfoTab(p, p + '-tab-overview', this); };
+        })(pid);
+
+        // Wrap the existing ei-body in a cpr-tab-content div
+        var eiBody = panel.querySelector('.ei-body');
+        if (eiBody) {
+          var overviewDiv = document.createElement('div');
+          overviewDiv.id  = pid + '-tab-overview';
+          overviewDiv.className = 'cpr-tab-content';
+          eiBody.parentNode.insertBefore(overviewDiv, eiBody);
+          overviewDiv.appendChild(eiBody);
+        }
+        // Insert tab bar after header
+        var hdr = panel.querySelector('.hosa-panel-header');
+        if (hdr) hdr.insertAdjacentElement('afterend', tabs);
+      } else {
+        // ── Flashcard panel: first tab = "Flashcards" ──
+        firstBtn.innerHTML = '🗂️ Flashcards';
+        firstBtn.onclick = pid === 'cpr'
+          ? function() { switchCprTab('flashcards', this); }
+          : (function(p) { return function() { switchHosaTab(p, 'flashcards', this); }; })(pid);
+
+        var firstContent = panel.querySelector('.cpr-tab-content');
+        if (firstContent) panel.insertBefore(tabs, firstContent);
+        else { var hdr2 = panel.querySelector('.hosa-panel-header'); if (hdr2) hdr2.insertAdjacentElement('afterend', tabs); }
+      }
+
+      tabs.appendChild(firstBtn);
+    }
+
+    // My Cards tab button (same for all panels)
+    if (!tabs.querySelector('[data-cc-tab]')) {
+      var btn = document.createElement('button');
+      btn.className = 'cpr-tab';
+      btn.setAttribute('data-cc-tab', pid);
+      btn.innerHTML = '✏️ My Cards';
+      btn.onclick = pid === 'cpr'
+        ? function() { switchCprTab('my-cards', this); }
+        : (function(p) { return function() { switchHosaTab(p, 'my-cards', this); }; })(pid);
+      tabs.appendChild(btn);
+    }
+
+    // My Cards content div
+    var ccTabId = pid === 'cpr' ? 'cpr-tab-my-cards' : (pid + '-tab-my-cards');
+    if (!document.getElementById(ccTabId)) {
+      var div = document.createElement('div');
+      div.id = ccTabId;
+      div.className = 'cpr-tab-content hidden cc-tab-pane';
+      div.innerHTML = _ccBuildHTML(pid);
+      panel.appendChild(div);
+    }
+
+    renderCustomCardsList(pid);
+  });
+}
+
+// Switch tabs for info-only panels
+function _switchInfoTab(pid, tabId, btn) {
+  var panel = document.getElementById('hosa-panel-' + pid);
+  if (!panel) return;
+  panel.querySelectorAll('.cpr-tab').forEach(function(t) { t.classList.remove('active'); });
+  panel.querySelectorAll('.cpr-tab-content').forEach(function(c) { c.classList.add('hidden'); });
+  var tabEl = document.getElementById(tabId);
+  if (tabEl) tabEl.classList.remove('hidden');
+  if (btn) btn.classList.add('active');
+  _hosaLastTab[pid] = tabId.includes('overview') ? 'overview' : 'my-cards';
+}
+
+// ── HTML builder ───────────────────────────────────────────────
+function _ccBuildHTML(pid) {
+  var safe = pid.replace(/'/g, "\\'");
+  return [
+    // ── Study viewer (shown during study mode) ──
+    '<div class="cc-viewer" id="' + pid + '-cc-viewer" style="display:none">',
+      '<div class="cc-viewer-header">',
+        '<button class="cc-exit-btn" onclick="exitCustomStudy(\'' + safe + '\')">← Back to cards</button>',
+        '<span class="cc-viewer-prog" id="' + pid + '-cc-vprog"></span>',
+      '</div>',
+      '<div class="cpr-flashcard" id="' + pid + '-cc-vcard" onclick="flipCustomCard(\'' + safe + '\')">',
+        '<div class="cpr-flashcard-inner" id="' + pid + '-cc-vinner">',
+          '<div class="cpr-flashcard-front">',
+            '<span class="cpr-fc-deck-tag">✏️ My Cards</span>',
+            '<p class="cpr-fc-question" id="' + pid + '-cc-vq"></p>',
+            '<span class="cpr-fc-hint">Tap card to reveal answer</span>',
+          '</div>',
+          '<div class="cpr-flashcard-back">',
+            '<span class="cpr-fc-deck-tag">✏️ My Cards</span>',
+            '<p class="cpr-fc-answer" id="' + pid + '-cc-va"></p>',
+          '</div>',
+        '</div>',
+      '</div>',
+      '<div class="cpr-fc-nav">',
+        '<button class="cpr-fc-nav-btn" onclick="prevCustomCard(\'' + safe + '\')">← Prev</button>',
+        '<button class="cpr-fc-nav-btn" onclick="shuffleCustomStudy(\'' + safe + '\')">🔀 Shuffle</button>',
+        '<button class="cpr-fc-nav-btn" onclick="nextCustomCard(\'' + safe + '\')">Next →</button>',
+      '</div>',
+    '</div>',
+    // ── Main view (form + list) ──
+    '<div class="cc-main" id="' + pid + '-cc-main">',
+      '<div class="cc-study-bar" id="' + pid + '-cc-bar" style="display:none">',
+        '<span class="cc-bar-count" id="' + pid + '-cc-bar-count"></span>',
+        '<div class="cc-bar-actions">',
+          '<button class="cc-study-btn" onclick="startCustomStudy(\'' + safe + '\')">📖 Study →</button>',
+          '<button class="cc-io-btn" onclick="exportCustomCards(\'' + safe + '\')" title="Export cards as file">⬇ Export</button>',
+        '</div>',
+      '</div>',
+      // Import row — always visible
+      '<div class="cc-import-row">',
+        '<label class="cc-import-label" for="' + pid + '-cc-import-input">⬆ Import cards from file</label>',
+        '<input type="file" id="' + pid + '-cc-import-input" class="cc-import-input" accept=".json,.txt" onchange="importCustomCards(\'' + safe + '\', this)">',
+        '<label for="' + pid + '-cc-import-input" class="cc-import-btn">Choose file</label>',
+      '</div>',
+      '<div class="cc-form">',
+        '<div class="cc-form-title">✏️ Add a new card</div>',
+        '<div class="cc-field">',
+          '<label class="cc-label">Question / Front</label>',
+          '<textarea id="' + pid + '-cc-q" class="cc-input" placeholder="e.g. What is the normal SpO₂ range?" rows="2"></textarea>',
+        '</div>',
+        '<div class="cc-field">',
+          '<label class="cc-label">Answer / Back</label>',
+          '<textarea id="' + pid + '-cc-a" class="cc-input" placeholder="e.g. 95–100%. Values below 90% indicate hypoxemia." rows="2"></textarea>',
+        '</div>',
+        '<button class="cc-add-btn" onclick="addCustomCard(\'' + safe + '\')">＋ Add Card</button>',
+      '</div>',
+      '<div class="cc-list" id="' + pid + '-cc-list" data-cc-list="' + pid + '"></div>',
+    '</div>'
+  ].join('');
+}
+
+// ── Render card list ───────────────────────────────────────────
+function renderCustomCardsList(pid) {
+  var list = document.getElementById(pid + '-cc-list');
+  if (!list) return;
+  var cards = _ccGet(pid);
+  var bar = document.getElementById(pid + '-cc-bar');
+  var barCount = document.getElementById(pid + '-cc-bar-count');
+  if (bar) bar.style.display = cards.length ? 'flex' : 'none';
+  if (barCount) barCount.textContent = cards.length + ' custom card' + (cards.length !== 1 ? 's' : '');
+
+  if (!cards.length) {
+    list.innerHTML = '<div class="cc-empty"><span class="cc-empty-icon">📭</span><p>No custom cards yet.<br>Add your first one above!</p></div>';
+    return;
+  }
+  list.innerHTML = '<div class="cc-list-header">Your cards (' + cards.length + ')</div>' +
+    cards.map(function(c) { return _ccCardItemHTML(pid, c); }).join('');
+}
+
+function _ccCardItemHTML(pid, c) {
+  var safe = pid.replace(/'/g, "\\'");
+  var sid = c.id.replace(/'/g, "\\'");
+  var qEsc = _ccEsc(c.q);
+  var aEsc = _ccEsc(c.a);
+  return [
+    '<div class="cc-item" data-id="' + c.id + '">',
+      '<div class="cc-item-front">' + qEsc + '</div>',
+      '<div class="cc-item-divider"></div>',
+      '<div class="cc-item-back">' + aEsc + '</div>',
+      '<div class="cc-item-btns">',
+        '<button class="cc-item-btn cc-item-btn--edit" onclick="startEditCustomCard(\'' + safe + '\',\'' + sid + '\')">✏️ Edit</button>',
+        '<button class="cc-item-btn cc-item-btn--del"  onclick="deleteCustomCard(\'' + safe + '\',\'' + sid + '\')">🗑 Delete</button>',
+      '</div>',
+    '</div>'
+  ].join('');
+}
+
+function _ccEsc(str) {
+  return (str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Add card ───────────────────────────────────────────────────
+function addCustomCard(pid) {
+  var qEl = document.getElementById(pid + '-cc-q');
+  var aEl = document.getElementById(pid + '-cc-a');
+  if (!qEl || !aEl) return;
+  var q = qEl.value.trim();
+  var a = aEl.value.trim();
+  if (!q || !a) {
+    // Shake the empty field
+    var emptyEl = (!q ? qEl : aEl);
+    emptyEl.classList.add('cc-shake');
+    setTimeout(function() { emptyEl.classList.remove('cc-shake'); }, 500);
+    emptyEl.focus();
+    return;
+  }
+  if (!_customCards[pid]) _customCards[pid] = [];
+  _customCards[pid].push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), q: q, a: a });
+  saveCustomCards();
+  qEl.value = '';
+  aEl.value = '';
+  qEl.focus();
+  renderCustomCardsList(pid);
+  // Flash the add button green
+  var addBtn = qEl.closest('.cc-form') && qEl.closest('.cc-form').querySelector('.cc-add-btn');
+  if (addBtn) { addBtn.classList.add('cc-add-success'); setTimeout(function() { addBtn.classList.remove('cc-add-success'); }, 700); }
+}
+
+// ── Edit card ──────────────────────────────────────────────────
+function startEditCustomCard(pid, cardId) {
+  var item = document.querySelector('#' + pid + '-cc-list [data-id="' + cardId + '"]');
+  if (!item) return;
+  var card = (_ccGet(pid)).find(function(c) { return c.id === cardId; });
+  if (!card) return;
+  var safe = pid.replace(/'/g, "\\'");
+  var sid = cardId.replace(/'/g, "\\'");
+  item.classList.add('cc-item--editing');
+  item.innerHTML = [
+    '<textarea class="cc-input cc-edit-q" rows="2">' + _ccEsc(card.q) + '</textarea>',
+    '<textarea class="cc-input cc-edit-a" rows="2">' + _ccEsc(card.a) + '</textarea>',
+    '<div class="cc-item-btns">',
+      '<button class="cc-item-btn cc-item-btn--save"   onclick="saveEditCustomCard(\'' + safe + '\',\'' + sid + '\')">✓ Save</button>',
+      '<button class="cc-item-btn cc-item-btn--cancel" onclick="renderCustomCardsList(\'' + safe + '\')">✕ Cancel</button>',
+    '</div>'
+  ].join('');
+  item.querySelector('.cc-edit-q').focus();
+}
+
+function saveEditCustomCard(pid, cardId) {
+  var item = document.querySelector('#' + pid + '-cc-list [data-id="' + cardId + '"]');
+  if (!item) return;
+  var q = (item.querySelector('.cc-edit-q').value || '').trim();
+  var a = (item.querySelector('.cc-edit-a').value || '').trim();
+  if (!q || !a) { return; }
+  var cards = _ccGet(pid);
+  var card = cards.find(function(c) { return c.id === cardId; });
+  if (card) { card.q = q; card.a = a; }
+  _customCards[pid] = cards;
+  saveCustomCards();
+  renderCustomCardsList(pid);
+}
+
+// ── Delete card ────────────────────────────────────────────────
+function deleteCustomCard(pid, cardId) {
+  if (!confirm('Delete this card?')) return;
+  _customCards[pid] = (_ccGet(pid)).filter(function(c) { return c.id !== cardId; });
+  saveCustomCards();
+  renderCustomCardsList(pid);
+  // If in study mode, update
+  if (_ccStudy[pid] && _ccStudy[pid].active) {
+    var cards = _ccGet(pid);
+    if (!cards.length) { exitCustomStudy(pid); return; }
+    _ccStudy[pid].cards = cards;
+    _ccStudy[pid].index = Math.min(_ccStudy[pid].index, cards.length - 1);
+    _ccRenderStudyCard(pid);
+  }
+}
+
+// ── Study mode ─────────────────────────────────────────────────
+function startCustomStudy(pid) {
+  var cards = _ccGet(pid);
+  if (!cards.length) return;
+  _ccStudy[pid] = { cards: cards.slice(), index: 0, flipped: false, active: true };
+  _ccRenderStudyCard(pid);
+  var viewer = document.getElementById(pid + '-cc-viewer');
+  var main   = document.getElementById(pid + '-cc-main');
+  if (viewer) viewer.style.display = 'block';
+  if (main)   main.style.display   = 'none';
+}
+
+function exitCustomStudy(pid) {
+  if (_ccStudy[pid]) _ccStudy[pid].active = false;
+  var viewer = document.getElementById(pid + '-cc-viewer');
+  var main   = document.getElementById(pid + '-cc-main');
+  if (viewer) viewer.style.display = 'none';
+  if (main)   main.style.display   = 'block';
+}
+
+function flipCustomCard(pid) {
+  var s = _ccStudy[pid];
+  if (!s || s.flipped) return;
+  var card = document.getElementById(pid + '-cc-vcard');
+  if (card) card.classList.add('flipped');
+  s.flipped = true;
+}
+
+function nextCustomCard(pid) {
+  var s = _ccStudy[pid];
+  if (!s) return;
+  s.index = (s.index + 1) % s.cards.length;
+  _ccRenderStudyCard(pid);
+}
+
+function prevCustomCard(pid) {
+  var s = _ccStudy[pid];
+  if (!s) return;
+  s.index = (s.index - 1 + s.cards.length) % s.cards.length;
+  _ccRenderStudyCard(pid);
+}
+
+function shuffleCustomStudy(pid) {
+  var s = _ccStudy[pid];
+  if (!s) return;
+  for (var i = s.cards.length - 1; i > 0; i--) {
+    var j = Math.floor(Math.random() * (i + 1));
+    var tmp = s.cards[i]; s.cards[i] = s.cards[j]; s.cards[j] = tmp;
+  }
+  s.index = 0;
+  _ccRenderStudyCard(pid);
+}
+
+function _ccRenderStudyCard(pid) {
+  var s = _ccStudy[pid];
+  if (!s || !s.cards.length) return;
+  var card = s.cards[s.index];
+  var qEl   = document.getElementById(pid + '-cc-vq');
+  var aEl   = document.getElementById(pid + '-cc-va');
+  var prog  = document.getElementById(pid + '-cc-vprog');
+  var vcard = document.getElementById(pid + '-cc-vcard');
+  if (qEl)   qEl.textContent  = card.q;
+  if (aEl)   aEl.textContent  = card.a;
+  if (prog)  prog.textContent = (s.index + 1) + ' / ' + s.cards.length;
+  if (vcard) vcard.classList.remove('flipped');
+  s.flipped = false;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  CUSTOM CARDS — IMPORT / EXPORT
+// ═══════════════════════════════════════════════════════════════
+
+// Pretty names for panel IDs shown in export files and conflict UI
+var _CC_EVENT_NAMES = {
+  'cpr':'CPR / First Aid','emt':'Emergency Medical Technician',
+  'sports-medicine':'Sports Medicine','pharmacy-science':'Pharmacy Science',
+  'physical-therapy':'Physical Therapy','clinical-lab':'Clinical Laboratory Science',
+  'dental-science':'Dental Science','veterinary-science':'Veterinary Science',
+  'biotechnology':'Biotechnology','medical-terminology':'Medical Terminology',
+  'pathophysiology':'Pathophysiology','medical-math':'Medical Math',
+  'forensic-science':'Forensic Science','behavioral-health':'Behavioral Health',
+  'medical-spelling':'Medical Spelling','human-growth':'Human Growth & Development',
+  'medical-law':'Medical Law and Ethics','clinical-nursing':'Clinical Nursing',
+  'epidemiology':'Epidemiology','nutrition':'Nutrition',
+  'creative-problem':'Creative Problem Solving','hosa-bowl':'HOSA Bowl',
+  'biomedical-debate':'Biomedical Debate','community-awareness':'Community Awareness',
+  'medical-innovation':'Medical Innovation','clinical-specialty':'Clinical Specialty',
+  'mental-health':'Mental Health Promotion','public-health':'Public Health',
+  'persuasive-speaking':'Researched Persuasive Speaking','research-poster':'Research Poster',
+};
+
+// ── EXPORT ─────────────────────────────────────────────────────
+function exportCustomCards(pid) {
+  var cards = _ccGet(pid);
+  if (!cards.length) {
+    _ccToast('No cards to export yet.', 'warn');
+    return;
+  }
+  var eventName = _CC_EVENT_NAMES[pid] || pid;
+  var payload = {
+    _type:    'hosa-custom-cards',
+    _version: 1,
+    event:    pid,
+    eventName: eventName,
+    exported: new Date().toISOString().slice(0, 10),
+    cards:    cards.map(function(c) { return { q: c.q, a: c.a }; })
+  };
+  var json = JSON.stringify(payload, null, 2);
+  var blob = new Blob([json], { type: 'application/json' });
+  var url  = URL.createObjectURL(blob);
+  var a    = document.createElement('a');
+  var safeName = eventName.replace(/[^a-z0-9]+/gi, '_').toLowerCase();
+  a.href     = url;
+  a.download = 'hosa_cards_' + safeName + '_' + payload.exported + '.json';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function() { URL.revokeObjectURL(url); a.remove(); }, 1000);
+  _ccToast('Exported ' + cards.length + ' card' + (cards.length !== 1 ? 's' : '') + ' ✓', 'ok');
+}
+
+// ── IMPORT ─────────────────────────────────────────────────────
+function importCustomCards(pid, inputEl) {
+  var file = inputEl.files && inputEl.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    inputEl.value = ''; // reset so same file can be re-imported
+    var raw = e.target.result;
+    var parsed = _ccParseImport(raw);
+    if (!parsed) {
+      _ccToast('Could not read file. Make sure it\'s a valid HOSA cards export.', 'err');
+      return;
+    }
+    var incoming = parsed.cards;
+    if (!incoming.length) {
+      _ccToast('File is valid but contains no cards.', 'warn');
+      return;
+    }
+    var existing  = _ccGet(pid);
+    var hasCards  = existing.length > 0;
+    var sourceName = parsed.eventName && parsed.eventName !== (_CC_EVENT_NAMES[pid] || pid)
+      ? parsed.eventName : null;
+
+    // Show the merge/replace modal
+    _ccShowImportModal(pid, incoming, existing, sourceName);
+  };
+  reader.onerror = function() { _ccToast('Failed to read file.', 'err'); };
+  reader.readAsText(file);
+}
+
+function _ccParseImport(raw) {
+  try {
+    var obj = JSON.parse(raw.trim());
+    // Strict format: our own export
+    if (obj._type === 'hosa-custom-cards' && Array.isArray(obj.cards)) {
+      var cards = obj.cards.filter(function(c) { return c.q && c.a; });
+      return { cards: cards, eventName: obj.eventName || null };
+    }
+    // Loose format: plain array of {q, a} objects
+    if (Array.isArray(obj)) {
+      var cards = obj.filter(function(c) { return c.q && c.a; });
+      return { cards: cards, eventName: null };
+    }
+    return null;
+  } catch(e) { return null; }
+}
+
+// ── IMPORT MODAL ───────────────────────────────────────────────
+function _ccShowImportModal(pid, incoming, existing, sourceName) {
+  // Remove any existing modal
+  var old = document.getElementById('cc-import-modal');
+  if (old) old.remove();
+
+  var eventName  = _CC_EVENT_NAMES[pid] || pid;
+  var safe       = pid.replace(/'/g, "\\'");
+  var sourceNote = sourceName ? '<span class="ccm-source">from <strong>' + _ccEsc(sourceName) + '</strong></span>' : '';
+  var mergeWarn  = existing.length
+    ? '<p class="ccm-warn">You already have <strong>' + existing.length + ' card' + (existing.length !== 1 ? 's' : '') + '</strong> in this deck. Choose how to import:</p>'
+    : '';
+
+  var modal = document.createElement('div');
+  modal.id = 'cc-import-modal';
+  modal.className = 'ccm-overlay';
+  modal.innerHTML = [
+    '<div class="ccm-box">',
+      '<div class="ccm-header">',
+        '<span class="ccm-icon">⬆</span>',
+        '<div>',
+          '<div class="ccm-title">Import ' + incoming.length + ' card' + (incoming.length !== 1 ? 's' : '') + ' ' + sourceNote + '</div>',
+          '<div class="ccm-subtitle">Into: ' + _ccEsc(eventName) + '</div>',
+        '</div>',
+        '<button class="ccm-close" onclick="document.getElementById(\'cc-import-modal\').remove()">✕</button>',
+      '</div>',
+      '<div class="ccm-body">',
+        mergeWarn,
+        '<div class="ccm-preview">',
+          '<div class="ccm-preview-title">Preview (' + Math.min(incoming.length, 3) + ' of ' + incoming.length + ')</div>',
+          incoming.slice(0, 3).map(function(c) {
+            return '<div class="ccm-preview-card"><span class="ccm-pq">' + _ccEsc(c.q.slice(0, 80)) + (c.q.length > 80 ? '…' : '') + '</span><span class="ccm-pa">' + _ccEsc(c.a.slice(0, 60)) + (c.a.length > 60 ? '…' : '') + '</span></div>';
+          }).join(''),
+        '</div>',
+        '<div class="ccm-actions">',
+          existing.length
+            ? '<button class="ccm-btn ccm-btn--merge" onclick="_ccDoImport(\'' + safe + '\', \'merge\')">＋ Add to existing (' + (existing.length + incoming.length) + ' total)</button>'
+            : '',
+          '<button class="ccm-btn ccm-btn--replace" onclick="_ccDoImport(\'' + safe + '\', \'replace\')">' + (existing.length ? '↩ Replace all' : '✓ Import all ' + incoming.length) + '</button>',
+          '<button class="ccm-btn ccm-btn--cancel" onclick="document.getElementById(\'cc-import-modal\').remove()">Cancel</button>',
+        '</div>',
+      '</div>',
+    '</div>'
+  ].join('');
+
+  // Store incoming data on the element for use by _ccDoImport
+  modal._incoming = incoming;
+  document.body.appendChild(modal);
+
+  // Close on overlay click
+  modal.addEventListener('click', function(e) {
+    if (e.target === modal) modal.remove();
+  });
+}
+
+function _ccDoImport(pid, mode) {
+  var modal    = document.getElementById('cc-import-modal');
+  if (!modal) return;
+  var incoming = modal._incoming || [];
+  modal.remove();
+
+  var makeId = function() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); };
+  var newCards = incoming.map(function(c) { return { id: makeId(), q: c.q, a: c.a }; });
+
+  if (mode === 'merge') {
+    _customCards[pid] = (_ccGet(pid)).concat(newCards);
+  } else {
+    _customCards[pid] = newCards;
+  }
+
+  saveCustomCards();
+  renderCustomCardsList(pid);
+
+  var total = _customCards[pid].length;
+  _ccToast(
+    (mode === 'merge' ? 'Added ' : 'Imported ') + newCards.length + ' card' + (newCards.length !== 1 ? 's' : '') + ' ✓  (' + total + ' total)',
+    'ok'
+  );
+}
+
+// ── TOAST ──────────────────────────────────────────────────────
+var _ccToastTimer = null;
+function _ccToast(msg, type) {
+  var el = document.getElementById('cc-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'cc-toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.className = 'cc-toast cc-toast--' + (type || 'ok') + ' visible';
+  if (_ccToastTimer) clearTimeout(_ccToastTimer);
+  _ccToastTimer = setTimeout(function() { el.classList.remove('visible'); }, 2600);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SM-2 HELPERS
+// ═══════════════════════════════════════════════════════════════
+
+// Simple djb2-style hash of a string → short hex string for card IDs
+function _sm2CardHash(str) {
+  var h = 5381;
+  for (var i = 0; i < (str || '').length; i++) {
+    h = ((h << 5) + h) ^ str.charCodeAt(i);
+    h = h >>> 0;
+  }
+  return h.toString(36);
+}
+
+// Reset SM-2 data (called by resetSection)
+function sm2Reset() {
+  sm2Data = {};
+  sm2Save();
+  updateStatsStrip();
+  updateFC();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  KEYBOARD SHORTCUT MODAL
+//  Press ? anywhere (outside an input) to open/close
+// ═══════════════════════════════════════════════════════════════
+
+function openKbdModal() {
+  var modal = document.getElementById('kbd-modal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  // Focus the close button for accessibility
+  var closeBtn = modal.querySelector('.kbd-close');
+  if (closeBtn) setTimeout(function() { closeBtn.focus(); }, 60);
+}
+
+function closeKbdModal() {
+  var modal = document.getElementById('kbd-modal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  document.body.style.overflow = '';
+}
+
+// Close on overlay click (outside the box)
+document.addEventListener('click', function(e) {
+  var modal = document.getElementById('kbd-modal');
+  if (modal && !modal.classList.contains('hidden') && e.target === modal) {
+    closeKbdModal();
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  KEYBOARD SHORTCUTS
+//  Space = flip  |  1/2/3/4 = rate  |  ←/→ = navigate
+//  ? = shortcuts overlay  |  Esc = close overlays
+//  Works contextually: main FC, HOSA panels, CPR panel
+// ═══════════════════════════════════════════════════════════════
+
+document.addEventListener('keydown', function(e) {
+  // Ignore when focus is inside a text input / textarea
+  var tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (document.activeElement && document.activeElement.isContentEditable) return;
+
+  // ? → toggle keyboard shortcut overlay (works globally)
+  if (e.key === '?') {
+    e.preventDefault();
+    var modal = document.getElementById('kbd-modal');
+    if (modal) {
+      if (modal.classList.contains('hidden')) openKbdModal();
+      else closeKbdModal();
+    }
+    return;
+  }
+
+  // Esc → close keyboard modal if open
+  if (e.key === 'Escape') {
+    var modal = document.getElementById('kbd-modal');
+    if (modal && !modal.classList.contains('hidden')) {
+      closeKbdModal();
+      return;
+    }
+  }
+
+  // Detect which flashcard context is active
+  var ctx = _getActiveFlashcardContext();
+  if (!ctx) return;
+
+  switch (e.key) {
+    case ' ':
+    case 'Spacebar':
+      e.preventDefault();
+      ctx.flip();
+      break;
+    case '1': e.preventDefault(); ctx.rate(1); break;
+    case '2': e.preventDefault(); ctx.rate(2); break;
+    case '3': e.preventDefault(); ctx.rate(3); break;
+    case '4': e.preventDefault(); ctx.rate(4); break;
+    case 'ArrowRight':
+    case 'ArrowUp':
+      e.preventDefault();
+      ctx.next();
+      break;
+    case 'ArrowLeft':
+    case 'ArrowDown':
+      e.preventDefault();
+      ctx.prev();
+      break;
+  }
+});
+
+// Returns a {flip, rate, next, prev} context object for whatever is active,
+// or null if no flashcard UI is currently visible
+function _getActiveFlashcardContext() {
+  // 1. Main flashcard screen
+  var fcScreen = document.getElementById('screen-flashcards');
+  if (fcScreen && fcScreen.classList.contains('active')) {
+    // Don't intercept if session-complete overlay is shown
+    var sc = document.getElementById('fcSessionComplete');
+    if (sc && !sc.classList.contains('hidden')) return null;
+    return {
+      flip: function() { flipCard(); _maybeShowKbdHintFlipped(); },
+      rate: function(r) {
+        var row = document.getElementById('fcSrsRow');
+        if (row && row.classList.contains('visible')) rateCard(r);
+      },
+      next: function() { nextCard(); },
+      prev: function() { prevCard(); },
+    };
+  }
+
+  // 2. HOSA screen — find the visible panel with a flashcard tab active
+  var hosaScreen = document.getElementById('screen-hosa');
+  if (hosaScreen && hosaScreen.classList.contains('active')) {
+    // Find the open panel
+    var openPanel = document.querySelector('.hosa-event-panel:not(.hidden)');
+    if (!openPanel) return null;
+
+    var panelId = openPanel.id.replace('hosa-panel-', '');
+
+    // CPR is its own special case
+    if (panelId === 'cpr') {
+      return {
+        flip: function() { flipCprCard(); },
+        rate: function(r) {
+          var ratingEl = document.getElementById('cprFcRating');
+          if (ratingEl && !ratingEl.classList.contains('hidden')) rateCprCard(r);
+        },
+        next: function() { nextCprCard(); },
+        prev: function() { prevCprCard(); },
+      };
+    }
+
+    // All other HOSA panels — map panel id to eid
+    var eid = (window._panelToEid && _panelToEid[panelId]) || panelId;
+    // Only active if flashcard tab content is visible
+    var fcTab = document.getElementById(panelId + '-tab-flashcards');
+    if (!fcTab || fcTab.classList.contains('hidden')) return null;
+
+    var s = window._hosaState && _hosaState[eid];
+    if (!s) return null;
+
+    return {
+      flip: function() { flipHosaCard(eid); },
+      rate: function(r) {
+        var ratingEl = document.getElementById(eid + 'FcRating');
+        if (ratingEl && !ratingEl.classList.contains('hidden')) rateHosaCard(eid, r);
+      },
+      next: function() { nextHosaCard(eid); },
+      prev: function() { prevHosaCard(eid); },
+    };
+  }
+
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  KEYBOARD SHORTCUT HINT — shows once on first card flip
+// ═══════════════════════════════════════════════════════════════
+
+var _kbdHintShown = !!localStorage.getItem('medpath_kbd_hint_seen');
+
+function _maybeShowKbdHintFlipped() {
+  if (_kbdHintShown) return;
+  // Only show on desktop (pointer: fine) — not useful on touchscreen
+  var isMouse = window.matchMedia && window.matchMedia('(pointer: fine)').matches;
+  if (!isMouse) { _kbdHintShown = true; return; } // don't bother on touch
+  var hint = document.getElementById('fcKbdHint');
+  if (hint) {
+    hint.classList.remove('hidden');
+    // Auto-dismiss after 7 seconds
+    setTimeout(function() { dismissKbdHint(); }, 7000);
+  }
+}
+
+function dismissKbdHint() {
+  var hint = document.getElementById('fcKbdHint');
+  if (hint) hint.classList.add('hidden');
+  _kbdHintShown = true;
+  localStorage.setItem('medpath_kbd_hint_seen', '1');
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SESSION COMPLETE SCREEN
+//  Triggered when the user reaches the end of the main FC deck
+// ═══════════════════════════════════════════════════════════════
+
+var _sessionStats = { reviewed: 0, again: 0, hard: 0, good: 0, easy: 0, startTime: 0 };
+
+// Called at session start (when filterFC runs)
+function _sessionStart() {
+  _sessionStats = { reviewed: 0, again: 0, hard: 0, good: 0, easy: 0, startTime: Date.now() };
+}
+
+// Hook into rateCard to track per-session stats
+(function() {
+  var _origRate = rateCard;
+  rateCard = function(r) {
+    _sessionStats.reviewed++;
+    if (r === 1) _sessionStats.again++;
+    else if (r === 2) _sessionStats.hard++;
+    else if (r === 3) _sessionStats.good++;
+    else if (r === 4) _sessionStats.easy++;
+    _origRate(r);
+  };
+})();
+
+// Hook into filterFC to reset session stats on deck change
+(function() {
+  var _origFilter = filterFC;
+  filterFC = function(cat) {
+    _sessionStart();
+    // Hide any existing session complete overlay
+    var sc = document.getElementById('fcSessionComplete');
+    if (sc) sc.classList.add('hidden');
+    var fw = document.getElementById('flashcard');
+    if (fw) fw.style.display = '';
+    var fcontrols = document.querySelector('.fc-controls');
+    if (fcontrols) fcontrols.style.display = '';
+    var fsrs = document.getElementById('fcSrsRow');
+    if (fsrs) { fsrs.classList.remove('visible'); }
+    _origFilter(cat);
+  };
+})();
+
+// Hook into nextCard to detect session end (when we wrap from last → first)
+(function() {
+  var _origNext = nextCard;
+  nextCard = function() {
+    var wasLast = (fcIndex === fcFiltered.length - 1);
+    var prevIdx = fcIndex;
+    _origNext();
+    // Session complete: we wrapped around AND we've reviewed at least the deck size
+    var wrappedToStart = (prevIdx > fcIndex || (prevIdx === fcIndex && fcFiltered.length === 1));
+    if (wasLast && _sessionStats.reviewed >= Math.min(fcFiltered.length, 5)) {
+      _showSessionComplete();
+    }
+  };
+})();
+
+function _showSessionComplete() {
+  var sc   = document.getElementById('fcSessionComplete');
+  if (!sc) return;
+
+  var elapsed  = Math.round((Date.now() - _sessionStats.startTime) / 60000);
+  var reviewed = _sessionStats.reviewed;
+  var good     = _sessionStats.good + _sessionStats.easy;
+  var pct      = reviewed > 0 ? Math.round((good / reviewed) * 100) : 0;
+
+  // Sub-headline
+  var sub = document.getElementById('fcScSub');
+  if (sub) {
+    if (pct >= 80)      sub.textContent = 'Great session — you knew most of these! 🔥';
+    else if (pct >= 50) sub.textContent = 'Solid work — keep reviewing the tricky ones.';
+    else                sub.textContent = 'Tough deck — these cards will come back soon.';
+  }
+
+  // Stats row
+  var statsEl = document.getElementById('fcScStats');
+  if (statsEl) {
+    statsEl.innerHTML =
+      '<div class="fc-sc-stat"><span class="fc-sc-stat-val">' + reviewed + '</span><span class="fc-sc-stat-lbl">Cards</span></div>' +
+      '<div class="fc-sc-stat"><span class="fc-sc-stat-val">' + elapsed + 'm</span><span class="fc-sc-stat-lbl">Time</span></div>' +
+      '<div class="fc-sc-stat"><span class="fc-sc-stat-val">' + pct + '%</span><span class="fc-sc-stat-lbl">Good+Easy</span></div>' +
+      '<div class="fc-sc-stat"><span class="fc-sc-stat-val">' + _sessionStats.again + '</span><span class="fc-sc-stat-lbl">Again</span></div>';
+  }
+
+  // Next due message
+  var nextEl = document.getElementById('fcScNext');
+  if (nextEl) {
+    var now = Date.now();
+    var dueSoon = flashcards.filter(function(f) {
+      var c = sm2Get('fc:' + f.term);
+      return c.state === 'learning' || c.state === 'relearning';
+    });
+    var nextDue = dueSoon.reduce(function(min, f) {
+      var c = sm2Get('fc:' + f.term);
+      return c.due < min ? c.due : min;
+    }, Infinity);
+
+    if (dueSoon.length > 0 && nextDue !== Infinity) {
+      var mins = Math.max(1, Math.round((nextDue - now) / 60000));
+      if (mins < 60) {
+        nextEl.textContent = dueSoon.length + ' card' + (dueSoon.length > 1 ? 's' : '') + ' due in ' + mins + ' min';
+      } else {
+        nextEl.textContent = dueSoon.length + ' card' + (dueSoon.length > 1 ? 's' : '') + ' due in ' + Math.round(mins/60) + 'h';
+      }
+    } else {
+      nextEl.textContent = 'All caught up — no cards due soon.';
+    }
+  }
+
+  sc.classList.remove('hidden');
+  // Reset session stats so re-entering doesn't immediately re-show
+  _sessionStats.reviewed = 0;
+}
+
+function dismissSessionComplete() {
+  var sc = document.getElementById('fcSessionComplete');
+  if (sc) sc.classList.add('hidden');
+  _sessionStart();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SWIPE GESTURES ON FLASHCARDS
+//  Right = Good (3)  |  Left = Again (1)  |  Up = Easy (4)
+//  Down = Hard (2)
+// ═══════════════════════════════════════════════════════════════
+
+(function() {
+  var SWIPE_MIN  = 50;   // px minimum to count as a swipe
+  var SWIPE_MAX  = 30;   // px max perpendicular drift allowed
+
+  function attachSwipe(el, onSwipe) {
+    if (!el) return;
+    var startX, startY, active = false;
+
+    el.addEventListener('touchstart', function(e) {
+      if (e.touches.length !== 1) return;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      active = true;
+    }, { passive: true });
+
+    el.addEventListener('touchend', function(e) {
+      if (!active) return;
+      active = false;
+      var dx = e.changedTouches[0].clientX - startX;
+      var dy = e.changedTouches[0].clientY - startY;
+      var adx = Math.abs(dx), ady = Math.abs(dy);
+
+      if (adx > SWIPE_MIN && ady < SWIPE_MAX) {
+        onSwipe(dx > 0 ? 'right' : 'left');
+      } else if (ady > SWIPE_MIN && adx < SWIPE_MAX) {
+        onSwipe(dy < 0 ? 'up' : 'down');
+      }
+    }, { passive: true });
+
+    el.addEventListener('touchmove', function(e) {
+      // Only prevent scroll when we're clearly swiping horizontally
+      if (!active) return;
+      var dx = Math.abs(e.touches[0].clientX - startX);
+      var dy = Math.abs(e.touches[0].clientY - startY);
+      if (dx > dy && dx > 10) e.preventDefault();
+    }, { passive: false });
+  }
+
+  // Direction → SM-2 rating map
+  var SWIPE_RATING = { left: 1, down: 2, right: 3, up: 4 };
+  // Visual labels for the swipe overlay
+  var SWIPE_LABEL = { left: 'Again', down: 'Hard', right: 'Good', up: 'Easy' };
+  var SWIPE_CLASS = { left: 'swipe--again', down: 'swipe--hard', right: 'swipe--good', up: 'swipe--easy' };
+
+  function handleMainSwipe(dir) {
+    var rating = SWIPE_RATING[dir];
+    var row = document.getElementById('fcSrsRow');
+    // If not flipped yet, a right/left swipe flips instead
+    if (!fcFlipped) { flipCard(); return; }
+    if (!row || !row.classList.contains('visible')) return;
+    _showSwipeOverlay(document.getElementById('flashcard'), dir);
+    _haptic(30);
+    rateCard(rating);
+  }
+
+  function handleCprSwipe(dir) {
+    if (!cprFlipped) { flipCprCard(); return; }
+    var ratingEl = document.getElementById('cprFcRating');
+    if (!ratingEl || ratingEl.classList.contains('hidden')) return;
+    _showSwipeOverlay(document.getElementById('cprFlashcard'), dir);
+    _haptic(30);
+    rateCprCard(SWIPE_RATING[dir]);
+  }
+
+  function handleHosaSwipe(eid, dir) {
+    var s = window._hosaState && _hosaState[eid];
+    if (!s) return;
+    if (!s.flipped) { flipHosaCard(eid); return; }
+    var ratingEl = document.getElementById(eid + 'FcRating');
+    if (!ratingEl || ratingEl.classList.contains('hidden')) return;
+    _showSwipeOverlay(document.getElementById(eid + 'Flashcard'), dir);
+    _haptic(30);
+    rateHosaCard(eid, SWIPE_RATING[dir]);
+  }
+
+  // Attach to main flashcard
+  attachSwipe(document.getElementById('flashcard'), handleMainSwipe);
+  // Attach to CPR
+  attachSwipe(document.getElementById('cprFlashcard'), handleCprSwipe);
+  // Attach to all HOSA panels (they exist in DOM at load time)
+  document.querySelectorAll('.cpr-flashcard[id]').forEach(function(el) {
+    var eid = el.id.replace('Flashcard', '');
+    if (eid === 'cpr') return; // already handled above
+    attachSwipe(el, function(dir) { handleHosaSwipe(eid, dir); });
+  });
+})();
+
+// ── Swipe overlay flash (shows direction label briefly) ────────
+function _showSwipeOverlay(cardEl, dir) {
+  if (!cardEl) return;
+  var labels  = { left: 'Again', down: 'Hard', right: 'Good', up: 'Easy' };
+  var classes = { left: 'swipe-overlay--again', down: 'swipe-overlay--hard',
+                  right: 'swipe-overlay--good', up: 'swipe-overlay--easy' };
+  var overlay = document.createElement('div');
+  overlay.className = 'swipe-overlay ' + (classes[dir] || '');
+  overlay.textContent = labels[dir] || '';
+  cardEl.style.position = 'relative';
+  cardEl.appendChild(overlay);
+  setTimeout(function() { overlay.classList.add('swipe-overlay--fade'); }, 50);
+  setTimeout(function() { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }, 500);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  HAPTIC FEEDBACK
+//  Called on every rating button tap and swipe
+// ═══════════════════════════════════════════════════════════════
+
+function _haptic(ms) {
+  try {
+    if (navigator.vibrate) navigator.vibrate(ms || 30);
+  } catch(e) {}
+}
+
+// Attach haptic to all existing rating buttons via event delegation
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('.fc-srs-btn, .cpr-rate-btn, .cc-study-btn');
+  if (btn) _haptic(30);
+}, { passive: true });
+
+// ═══════════════════════════════════════════════════════════════
+//  "BACK TO STUDYING" HOME SCREEN BANNER
+//  Shows when SM-2 cards are due; updates on every home visit
+// ═══════════════════════════════════════════════════════════════
+
+function updateResumeBanner() {
+  var banner = document.getElementById('resumeBanner');
+  var subEl  = document.getElementById('resumeBannerSub');
+  if (!banner || !subEl) return;
+
+  var now = Date.now();
+  // Count due cards across ALL SM-2 namespaces (fc:, cpr:, hosa:)
+  var dueCount = 0;
+  var newCount = 0;
+
+  // Main flashcards
+  if (typeof flashcards !== 'undefined') {
+    flashcards.forEach(function(f) {
+      var c = sm2Get('fc:' + f.term);
+      if (c.state === 'new') newCount++;
+      else if (c.due <= now) dueCount++;
+    });
+  }
+
+  // Streak info
+  var streak = (typeof progressStreak !== 'undefined') ? progressStreak.currentStreak : 0;
+  var streakTxt = streak > 1 ? ' · 🔥 ' + streak + ' day streak' : '';
+
+  if (dueCount > 0) {
+    subEl.textContent = dueCount + ' card' + (dueCount !== 1 ? 's' : '') + ' due now' + streakTxt;
+    banner.classList.remove('hidden');
+  } else if (newCount > 0) {
+    subEl.textContent = newCount + ' new card' + (newCount !== 1 ? 's' : '') + ' to learn' + streakTxt;
+    banner.classList.remove('hidden');
+  } else if (streak > 0) {
+    subEl.textContent = 'All caught up' + streakTxt;
+    banner.classList.remove('hidden');
+  } else {
+    banner.classList.add('hidden');
+  }
+}
+
+// Hook into showScreen to refresh banner whenever home is shown
+(function() {
+  var _orig = showScreen;
+  showScreen = function(id) {
+    _orig(id);
+    if (id === 'home') updateResumeBanner();
+  };
+})();
+
+// Also update on init (after SM-2 data is loaded)
+document.addEventListener('DOMContentLoaded', function() {
+  setTimeout(updateResumeBanner, 100);
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  ONBOARDING FLOW
+//  7 steps — name → goal → division → events → competition date
+//           → daily time → biggest challenge → personalised summary
+// ═══════════════════════════════════════════════════════════════
+
+var OB_KEY = 'medpath_onboarding';
+var obProfile = null;  // saved after completion
+var obStep = 0;
+var obData = {};       // answers collected during onboarding
+
+// ── Step definitions ──────────────────────────────────────────
+var OB_STEPS = [
+  // 0 — Welcome
+  {
+    id: 'welcome', type: 'welcome', emoji: '👋',
+    title: 'Welcome to MedPath',
+    sub:   'Your personalised healthcare study companion. Let\'s set things up for you. Takes about 90 seconds.',
+    next:  'Get started →',
+  },
+  // 1 — Name
+  {
+    id: 'name', type: 'text', emoji: '🙂',
+    title: 'What\'s your first name?',
+    sub:   'We\'ll use this to personalise your experience.',
+    placeholder: 'Type your name…', key: 'name',
+    validate: function(v) { return v.trim().length >= 1; },
+    errMsg: 'Enter your name to continue.',
+  },
+  // 2 — Goal
+  {
+    id: 'goal', type: 'single', emoji: '🎯',
+    title: 'What are you mainly using MedPath for?',
+    sub: 'Choose the one that fits best.', key: 'goal',
+    options: [
+      { val:'school',  label:'School & coursework',      icon:'📚', desc:'Anatomy, medical terminology, pathophysiology' },
+      { val:'hosa',    label:'HOSA competition prep',    icon:'🏆', desc:'Competitive events, exams, and clinical skills' },
+      { val:'explore', label:'General health knowledge', icon:'🔬', desc:'Curiosity about medicine and healthcare careers' },
+      { val:'both',    label:'All of the above',         icon:'⚡', desc:'Competition + coursework + general interest' },
+    ],
+  },
+  // 3 — Experience (everyone)
+  {
+    id: 'experience', type: 'single', emoji: '📊',
+    title: 'How would you rate your current medical knowledge?',
+    sub: 'Be honest — this helps us calibrate where to start.', key: 'experience',
+    options: [
+      { val:'none',     label:'Complete beginner',    icon:'🌱', desc:'Just starting out — no health science background' },
+      { val:'some',     label:'Some basics',          icon:'📖', desc:'Covered biology or health class before' },
+      { val:'solid',    label:'Solid foundation',     icon:'⚡', desc:'Studied health science or have clinical experience' },
+      { val:'advanced', label:'Advanced',             icon:'🔬', desc:'Pre-med, clinical training, or multiple competitions' },
+    ],
+  },
+  // 4 — Division (HOSA only)
+  {
+    id: 'division', type: 'single', emoji: '🎓',
+    title: 'Which division are you in?',
+    sub: 'This helps us show the right competition guidelines.', key: 'division',
+    skipIf: function() { return obData.goal === 'school' || obData.goal === 'explore'; },
+    options: [
+      { val:'secondary',     label:'Secondary',      icon:'🏫', desc:'High school (grades 9–12)' },
+      { val:'postsecondary', label:'Post-Secondary', icon:'🎓', desc:'College or university' },
+      { val:'middle',        label:'Middle School',  icon:'📖', desc:'Grades 6–8' },
+    ],
+  },
+  // 5 — Past HOSA experience (HOSA only)
+  {
+    id: 'hosaExp', type: 'single', emoji: '🏅',
+    title: 'Have you competed in HOSA before?',
+    sub: 'We\'ll adjust the coaching tone based on your experience.', key: 'hosaExp',
+    skipIf: function() { return obData.goal === 'school' || obData.goal === 'explore'; },
+    options: [
+      { val:'first',    label:'First time',              icon:'✨', desc:'Brand new — never competed before' },
+      { val:'once',     label:'1–2 competitions',        icon:'📋', desc:'Some experience, still building confidence' },
+      { val:'multiple', label:'Multiple competitions',   icon:'🏆', desc:'Experienced and looking to improve scores' },
+      { val:'captain',  label:'Team captain / veteran',  icon:'🌟', desc:'Leading others and aiming for top placement' },
+    ],
+  },
+  // 6 — Events (HOSA only, multi-select)
+  {
+    id: 'events', type: 'multi', emoji: '📋',
+    title: 'Which events are you competing in?',
+    sub: 'Select all that apply. You can change this later.', key: 'events',
+    skipIf: function() { return obData.goal === 'school' || obData.goal === 'explore'; },
+    minSelect: 1,
+    options: [
+      { val:'behavioral-health',     label:'Behavioral Health',              cat:'Health Science' },
+      { val:'human-growth',          label:'Human Growth & Development',     cat:'Health Science' },
+      { val:'medical-law',           label:'Medical Law & Ethics',           cat:'Health Science' },
+      { val:'medical-math',          label:'Medical Math',                   cat:'Health Science' },
+      { val:'medical-spelling',      label:'Medical Spelling',               cat:'Health Science' },
+      { val:'medical-terminology',   label:'Medical Terminology',            cat:'Health Science' },
+      { val:'nutrition',             label:'Nutrition',                      cat:'Health Science' },
+      { val:'pathophysiology',       label:'Pathophysiology',                cat:'Health Science' },
+      { val:'biomedical-debate',     label:'Biomedical Debate',              cat:'Teamwork' },
+      { val:'community-awareness',   label:'Community Awareness',            cat:'Teamwork' },
+      { val:'creative-problem',      label:'Creative Problem Solving',       cat:'Teamwork' },
+      { val:'forensic-science',      label:'Forensic Science',               cat:'Teamwork' },
+      { val:'hosa-bowl',             label:'HOSA Bowl',                      cat:'Teamwork' },
+      { val:'medical-innovation',    label:'Medical Innovation',             cat:'Teamwork' },
+      { val:'biotechnology',         label:'Biotechnology',                  cat:'Health Professions' },
+      { val:'clinical-lab',          label:'Clinical Laboratory Science',    cat:'Health Professions' },
+      { val:'clinical-nursing',      label:'Clinical Nursing',               cat:'Health Professions' },
+      { val:'dental-science',        label:'Dental Science',                 cat:'Health Professions' },
+      { val:'pharmacy-science',      label:'Pharmacy Science',               cat:'Health Professions' },
+      { val:'physical-therapy',      label:'Physical Therapy',               cat:'Health Professions' },
+      { val:'sports-medicine',       label:'Sports Medicine',                cat:'Health Professions' },
+      { val:'veterinary-science',    label:'Veterinary Science',             cat:'Health Professions' },
+      { val:'cpr',                   label:'CPR / First Aid',                cat:'Emergency Prep' },
+      { val:'emt',                   label:'Emergency Medical Technician',   cat:'Emergency Prep' },
+      { val:'epidemiology',          label:'Epidemiology',                   cat:'Emergency Prep' },
+      { val:'persuasive-speaking',   label:'Researched Persuasive Speaking', cat:'Leadership' },
+      { val:'research-poster',       label:'Research Poster',                cat:'Leadership' },
+    ],
+  },
+  // 7 — Competition date (HOSA only)
+  {
+    id: 'compDate', type: 'single', emoji: '📅',
+    title: 'When is your competition?',
+    sub: 'We\'ll calibrate how intensively you should study.', key: 'compDate',
+    skipIf: function() { return obData.goal === 'school' || obData.goal === 'explore'; },
+    options: [
+      { val:'2weeks',  label:'Within 2 weeks',     icon:'🔥', desc:'Crunch mode — focus on weak spots now' },
+      { val:'1month',  label:'About 1 month',      icon:'⚡', desc:'Good time to build a solid foundation' },
+      { val:'2months', label:'2–3 months away',    icon:'📈', desc:'Steady daily review will get you there' },
+      { val:'later',   label:'More than 3 months', icon:'🌱', desc:'Build deep understanding, not just recall' },
+      { val:'unsure',  label:'Not sure yet',       icon:'🤷', desc:'No problem — we\'ll keep it flexible' },
+    ],
+  },
+  // 8 — Biggest challenge (everyone)
+  {
+    id: 'challenge', type: 'single', emoji: '💬',
+    title: 'What\'s your biggest challenge when studying?',
+    sub: 'Pick the one that resonates most.', key: 'challenge',
+    options: [
+      { val:'memory',     label:'Too much to memorise',      icon:'🧠', desc:'Terms and facts just don\'t stick' },
+      { val:'consistent', label:'Staying consistent',        icon:'📅', desc:'Starting strong then falling off' },
+      { val:'understand', label:'I understand, then forget', icon:'🔄', desc:'Gets it in the moment but blanks on tests' },
+      { val:'pressure',   label:'Exam pressure',             icon:'😰', desc:'Knows the material but freezes under stress' },
+      { val:'time',       label:'Not enough time',           icon:'⏱️', desc:'Busy schedule, hard to find study windows' },
+    ],
+  },
+  // 9 — Study environment (everyone)
+  {
+    id: 'environment', type: 'single', emoji: '📱',
+    title: 'How do you usually study?',
+    sub: 'Helps us optimise for how you actually use the app.', key: 'environment',
+    options: [
+      { val:'phone', label:'Phone on the go',          icon:'📱', desc:'Commuting, between classes, quick sessions' },
+      { val:'desk',  label:'Desk — focused sessions',  icon:'💻', desc:'Sit-down study, longer blocks of time' },
+      { val:'both',  label:'Mix of both',              icon:'🔀', desc:'Depends on the day' },
+    ],
+  },
+  // 10 — Daily time (everyone)
+  {
+    id: 'dailyTime', type: 'single', emoji: '⏱️',
+    title: 'How much time can you study each day?',
+    sub: 'Be honest — consistency beats cramming every time.', key: 'dailyTime',
+    options: [
+      { val:'5',  label:'5–10 minutes',  icon:'⚡', desc:'Quick review — every day adds up' },
+      { val:'15', label:'15–20 minutes', icon:'📖', desc:'One focused session — the sweet spot' },
+      { val:'30', label:'30–45 minutes', icon:'💪', desc:'Real depth — you\'ll see fast results' },
+      { val:'60', label:'1 hour+',       icon:'🚀', desc:'Full prep mode — nothing left to chance' },
+    ],
+  },
+  // 11 — Loading (auto-advances)
+  { id: 'loading', type: 'loading', emoji: '⚙️' },
+  // 12 — Summary
+  { id: 'summary', type: 'summary', emoji: '✅' },
+];
+
+// ── Initialise ────────────────────────────────────────────────
+function obInit() {
+  try {
+    var saved = localStorage.getItem(OB_KEY);
+    if (saved) {
+      obProfile = JSON.parse(saved);
+      _applyProfile(obProfile);
+      return; // already onboarded
+    }
+  } catch(e) {}
+  // First time — show onboarding
+  obData = {};
+  obStep = 0;
+  _obBuild();
+  _obRender(0);
+  document.getElementById('ob-overlay').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+
+// ── Build all step HTML ────────────────────────────────────────
+function _obBuild() {
+  var container = document.getElementById('ob-steps');
+  container.innerHTML = '';
+  OB_STEPS.forEach(function(step, i) {
+    var div = document.createElement('div');
+    div.className = 'ob-step hidden';
+    div.id = 'ob-step-' + i;
+    div.innerHTML = _obStepHTML(step, i);
+    container.appendChild(div);
+  });
+}
+
+function _obStepHTML(step, idx) {
+  var h = '<div class="ob-step-emoji">' + step.emoji + '</div>';
+
+  if (step.type === 'welcome') {
+    h += '<h2 class="ob-title">' + step.title + '</h2>';
+    h += '<p class="ob-sub">' + step.sub + '</p>';
+    h += '<div class="ob-welcome-features">';
+    h += '<div class="ob-feature"><span>📚</span><span>7,000+ medical flashcards with Anki SM-2</span></div>';
+    h += '<div class="ob-feature"><span>🏥</span><span>All HOSA Canada 2025–26 events covered</span></div>';
+    h += '<div class="ob-feature"><span>🧠</span><span>Clinical cases, anatomy explorer & quizzes</span></div>';
+    h += '<div class="ob-feature"><span>📶</span><span>Works offline — study anywhere</span></div>';
+    h += '</div>';
+    return h;
+  }
+
+  if (step.type === 'loading') {
+    h += '<h2 class="ob-title">Building your plan…</h2>';
+    h += '<p class="ob-sub">Personalising MedPath just for you.</p>';
+    h += '<div class="ob-loading-items" id="ob-loading-items"></div>';
+    h += '<div class="ob-loading-bar-wrap"><div class="ob-loading-bar" id="ob-loading-bar"></div></div>';
+    return h;
+  }
+
+  if (step.type === 'summary') {
+    h += '<h2 class="ob-title" id="ob-summary-title">Your plan is ready</h2>';
+    h += '<p class="ob-sub" id="ob-summary-sub"></p>';
+    h += '<div class="ob-summary-cards" id="ob-summary-cards"></div>';
+    return h;
+  }
+
+  h += '<h2 class="ob-title">' + step.title + '</h2>';
+  h += '<p class="ob-sub">' + step.sub + '</p>';
+
+  if (step.type === 'text') {
+    h += '<input type="text" id="ob-input-' + step.key + '" class="ob-input"'
+      + ' placeholder="' + (step.placeholder || '') + '"'
+      + ' maxlength="40"'
+      + ' oninput="obOnInput()" onkeydown="obInputKey(event)"'
+      + ' autocomplete="off" spellcheck="false" />';
+    h += '<p class="ob-err hidden" id="ob-err-' + step.key + '">' + (step.errMsg || '') + '</p>';
+    return h;
+  }
+
+  if (step.type === 'single') {
+    h += '<div class="ob-options">';
+    step.options.forEach(function(opt) {
+      h += '<button class="ob-option" data-val="' + opt.val + '" onclick="obSelect(this,\'' + step.key + '\',false)">';
+      if (opt.icon) h += '<span class="ob-opt-icon">' + opt.icon + '</span>';
+      h += '<div class="ob-opt-body"><div class="ob-opt-label">' + opt.label + '</div>';
+      if (opt.desc) h += '<div class="ob-opt-desc">' + opt.desc + '</div>';
+      h += '</div><span class="ob-opt-check">✓</span></button>';
+    });
+    h += '</div>';
+    return h;
+  }
+
+  if (step.type === 'multi') {
+    // Group by category
+    var cats = [];
+    var grouped = {};
+    step.options.forEach(function(opt) {
+      if (!grouped[opt.cat]) { grouped[opt.cat] = []; cats.push(opt.cat); }
+      grouped[opt.cat].push(opt);
+    });
+    h += '<div class="ob-multi-hint">Tap to select multiple</div>';
+    cats.forEach(function(cat) {
+      h += '<div class="ob-cat-label">' + cat + '</div>';
+      h += '<div class="ob-options ob-options--multi">';
+      grouped[cat].forEach(function(opt) {
+        h += '<button class="ob-option ob-option--chip" data-val="' + opt.val + '" onclick="obSelect(this,\'' + step.key + '\',true)">';
+        h += '<span class="ob-opt-label">' + opt.label + '</span>';
+        h += '<span class="ob-opt-check">✓</span></button>';
+      });
+      h += '</div>';
+    });
+    return h;
+  }
+
+  return h;
+}
+
+// ── Render step i ─────────────────────────────────────────────
+function _obRender(i, dir) {
+  dir = (dir === -1) ? -1 : 1;  // default forward
+  // Check skip conditions
+  var step = OB_STEPS[i];
+  if (step && step.skipIf && step.skipIf()) {
+    obStep = i + dir;
+    _obRender(i + dir, dir);
+    return;
+  }
+
+  // Hide all, show current
+  document.querySelectorAll('.ob-step').forEach(function(s) { s.classList.add('hidden'); });
+  var el = document.getElementById('ob-step-' + i);
+  if (el) {
+    el.classList.remove('hidden');
+    el.classList.add('ob-step--in');
+    setTimeout(function() { el.classList.remove('ob-step--in'); }, 350);
+  }
+
+  // Focus text input if present
+  if (step && step.type === 'text') {
+    setTimeout(function() {
+      var inp = document.getElementById('ob-input-' + step.key);
+      if (inp) { inp.focus(); if (obData[step.key]) inp.value = obData[step.key]; }
+    }, 120);
+  }
+
+  // Restore selections if user went back
+  if (step && (step.type === 'single' || step.type === 'multi') && obData[step.key]) {
+    var saved = Array.isArray(obData[step.key]) ? obData[step.key] : [obData[step.key]];
+    setTimeout(function() {
+      document.querySelectorAll('#ob-step-' + i + ' .ob-option').forEach(function(btn) {
+        if (saved.indexOf(btn.getAttribute('data-val')) > -1) btn.classList.add('selected');
+      });
+    }, 50);
+  }
+
+  // Build summary on last step
+  if (step && step.type === 'summary') _obBuildSummary();
+
+  // Loading step — run ticking animation then auto-advance
+  if (step && step.type === 'loading') {
+    document.getElementById('ob-nav').style.visibility = 'hidden';
+    _obRunLoader(function() {
+      document.getElementById('ob-nav').style.visibility = '';
+      var next = obStep + 1;
+      obStep = next;
+      _obRender(next, 1);
+    });
+  } else {
+    document.getElementById('ob-nav').style.visibility = '';
+  }
+
+  // Dots
+  _obUpdateDots(i);
+
+  // Nav buttons
+  var backBtn = document.getElementById('ob-back');
+  var nextBtn = document.getElementById('ob-next');
+  var isLast  = (i === OB_STEPS.length - 1);
+  backBtn.classList.toggle('hidden', i === 0);
+  nextBtn.textContent = isLast ? '🚀 Start studying' : (step && step.next ? step.next : 'Continue →');
+}
+
+// ── Dots indicator ────────────────────────────────────────────
+function _obUpdateDots(current) {
+  var container = document.getElementById('ob-dots');
+  container.innerHTML = '';
+  // Only show visible steps (non-skipped)
+  var visibleSteps = OB_STEPS.filter(function(s, i) {
+    return !s.skipIf || !s.skipIf();
+  });
+  var visibleIdx = 0;
+  OB_STEPS.forEach(function(s, i) {
+    if (s.skipIf && s.skipIf()) return;
+    var dot = document.createElement('div');
+    dot.className = 'ob-dot' + (i === current ? ' ob-dot--active' : (i < current ? ' ob-dot--done' : ''));
+    container.appendChild(dot);
+  });
+}
+
+// ── Option selection ──────────────────────────────────────────
+function obSelect(btn, key, multi) {
+  var val = btn.getAttribute('data-val');
+  if (multi) {
+    btn.classList.toggle('selected');
+    var selected = [];
+    var container = btn.closest('.ob-step');
+    container.querySelectorAll('.ob-option.selected').forEach(function(b) {
+      selected.push(b.getAttribute('data-val'));
+    });
+    obData[key] = selected;
+  } else {
+    // Single select — deselect others in this step
+    var container2 = btn.closest('.ob-step');
+    container2.querySelectorAll('.ob-option').forEach(function(b) { b.classList.remove('selected'); });
+    btn.classList.add('selected');
+    obData[key] = val;
+    // Auto-advance after short delay for single-select
+    setTimeout(function() { obNext(); }, 160);
+  }
+}
+
+// ── Text input handlers ───────────────────────────────────────
+function obOnInput() {
+  var step = OB_STEPS[obStep];
+  if (!step || step.type !== 'text') return;
+  var inp = document.getElementById('ob-input-' + step.key);
+  if (inp) obData[step.key] = inp.value;
+  var err = document.getElementById('ob-err-' + step.key);
+  if (err) err.classList.add('hidden');
+}
+
+function obInputKey(e) {
+  if (e.key === 'Enter') obNext();
+}
+
+// ── Navigation ────────────────────────────────────────────────
+function obNext() {
+  var step = OB_STEPS[obStep];
+  if (!step) return;
+
+  // Validate
+  if (step.type === 'text') {
+    var inp = document.getElementById('ob-input-' + step.key);
+    var val = inp ? inp.value.trim() : '';
+    if (step.validate && !step.validate(val)) {
+      var err = document.getElementById('ob-err-' + step.key);
+      if (err) err.classList.remove('hidden');
+      if (inp) inp.focus();
+      return;
+    }
+    obData[step.key] = val;
+  }
+
+  if (step.type === 'single' && !obData[step.key]) {
+    // Shake the options
+    var opts = document.querySelectorAll('#ob-step-' + obStep + ' .ob-options');
+    opts.forEach(function(o) {
+      o.classList.add('ob-shake');
+      setTimeout(function() { o.classList.remove('ob-shake'); }, 400);
+    });
+    return;
+  }
+
+  if (step.type === 'multi') {
+    var sel = (obData[step.key] || []);
+    var min = step.minSelect || 1;
+    if (sel.length < min) {
+      var opts2 = document.querySelectorAll('#ob-step-' + obStep + ' .ob-options');
+      opts2.forEach(function(o) { o.classList.add('ob-shake'); setTimeout(function() { o.classList.remove('ob-shake'); }, 400); });
+      return;
+    }
+  }
+
+  // Last step → finish
+  if (obStep === OB_STEPS.length - 1) {
+    obFinish();
+    return;
+  }
+
+  var next = obStep + 1;
+  obStep = next;
+  _obRender(next, 1);
+}
+
+function obBack() {
+  if (obStep === 0) return;
+  var prev = obStep - 1;
+  obStep = prev;
+  _obRender(prev, -1);
+}
+
+// ── Summary screen ────────────────────────────────────────────
+function _obRunLoader(onDone) {
+  var itemsEl = document.getElementById('ob-loading-items');
+  var barEl   = document.getElementById('ob-loading-bar');
+  if (!itemsEl) { setTimeout(onDone, 100); return; }
+  var items = ['Setting up your flashcard queue'];
+  if (obData.goal === 'hosa' || obData.goal === 'both') {
+    var ec = (obData.events || []).length;
+    items.push('Loading ' + (ec > 0 ? ec + ' event deck' + (ec > 1 ? 's' : '') : 'HOSA content'));
+    if (obData.compDate === '2weeks') items.push('Prioritising crunch-mode content');
+    else items.push('Scheduling your study timeline');
+  } else if (obData.goal === 'school') {
+    items.push('Curating coursework content');
+    items.push('Calibrating difficulty level');
+  } else {
+    items.push('Curating health science content');
+    items.push('Setting exploration mode');
+  }
+  if (obData.challenge === 'memory')     items.push('Activating spaced repetition');
+  else if (obData.challenge === 'pressure') items.push('Adding timed practice mode');
+  else if (obData.challenge === 'time')  items.push('Enabling quick-study sessions');
+  else                                   items.push('Personalising your study tips');
+  if (obData.experience === 'none' || obData.experience === 'some') items.push('Starting from the fundamentals');
+  else items.push('Unlocking advanced content');
+  items.push('Profile ready ✓');
+  itemsEl.innerHTML = items.map(function(txt) {
+    return '<div class="ob-li ob-li--pending"><span class="ob-li-dot"></span><span class="ob-li-txt">' + txt + '</span></div>';
+  }).join('');
+  var total = items.length;
+  var delay = Math.floor(1400 / total);
+  var current = 0;
+  function tick() {
+    var rows = itemsEl.querySelectorAll('.ob-li');
+    if (current > 0 && rows[current-1]) { rows[current-1].classList.remove('ob-li--active'); rows[current-1].classList.add('ob-li--done'); }
+    if (current < total) {
+      rows[current].classList.add('ob-li--active');
+      if (barEl) barEl.style.width = Math.round(((current+1)/total)*100) + '%';
+      current++;
+      setTimeout(tick, delay);
+    } else {
+      if (barEl) barEl.style.width = '100%';
+      setTimeout(onDone, 250);
+    }
+  }
+  setTimeout(tick, 120);
+}
+
+function _obGetStartRec() {
+  var isHosa = obData.goal === 'hosa' || obData.goal === 'both';
+  var events = obData.events || [];
+  var exp = obData.experience, ch = obData.challenge, time = obData.dailyTime;
+  if (exp === 'none' || exp === 'some')
+    return { title:'Medical Terminology flashcards', desc:'Master prefixes, roots, and suffixes first — they unlock everything else in the app.' };
+  if (isHosa && obData.compDate === '2weeks') {
+    var fe = events[0];
+    return fe
+      ? { title:'Open your first event deck', desc:'With 2 weeks left, drill ' + fe.replace(/-/g,' ') + ' immediately.' }
+      : { title:'HOSA Events — weakest event first', desc:'With 2 weeks left, drill your weakest event until nothing surprises you.' };
+  }
+  if (ch === 'memory')   return { title:'Flashcards with spaced repetition', desc:'Rate each card 1–4 as you go. The system learns what you struggle with and brings those cards back at the right time.' };
+  if (ch === 'pressure') return { title:'Clinical Case Mode', desc:'Case Mode simulates real diagnostic scenarios under pressure — the best way to build confidence for test conditions.' };
+  if (time === '5')      return { title:'Flashcards — quick daily sessions', desc:'5-minute sessions add up fast. Flip through 10–15 cards daily and the SM-2 system tracks exactly what needs review.' };
+  if (isHosa && events.length) return { title:'Open the HOSA Events section', desc:'Your events are loaded and ready. Start with the deck you feel least confident in.' };
+  if (obData.goal === 'school') return { title:'Anatomy Explorer', desc:'Start with the body system you\'re currently studying in class.' };
+  return { title:'Explore the Flashcard library', desc:'Browse 7,000+ cards across medical terminology, anatomy, pharmacology, and more.' };
+}
+
+function _obBuildSummary() {
+  var name = obData.name || 'there';
+  var titleEl = document.getElementById('ob-summary-title');
+  var subEl   = document.getElementById('ob-summary-sub');
+  var cardsEl = document.getElementById('ob-summary-cards');
+  if (titleEl) titleEl.textContent = 'You\'re all set, ' + name + '! \ud83c\udf89';
+  var sub = '';
+  var isHosa = obData.goal === 'hosa' || obData.goal === 'both';
+  if (isHosa) {
+    var ec = (obData.events || []).length;
+    sub = 'Competing in ' + (ec > 0 ? ec + ' event' + (ec > 1 ? 's' : '') : 'your events') + '. ';
+    if (obData.compDate === '2weeks') sub += 'Two weeks — focus on weak spots right now.';
+    else if (obData.compDate === '1month') sub += 'One month to build a strong foundation.';
+    else if (obData.goal === 'both') sub += 'Balancing competition and coursework.';
+    else sub += 'You have time to go deep — use it.';
+  } else if (obData.goal === 'school') {
+    sub = 'School focus — clinical cases and medical terminology front and centre.';
+  } else {
+    sub = 'Curiosity-driven — explore medicine and healthcare at your own pace.';
+  }
+  if (subEl) subEl.textContent = sub;
+  var cards = [];
+  if (obData.name) cards.push({ icon:'\ud83d\ude42', label:'Name', val: obData.name });
+  if (obData.goal) {
+    var gL = { hosa:'HOSA Competition', school:'School & Coursework', explore:'General Health Knowledge', both:'Competition + School' };
+    cards.push({ icon:'\ud83c\udfaf', label:'Goal', val: gL[obData.goal] || obData.goal });
+  }
+  if (obData.experience) {
+    var eL = { none:'Complete beginner', some:'Some basics', solid:'Solid foundation', advanced:'Advanced' };
+    cards.push({ icon:'\ud83d\udcca', label:'Experience', val: eL[obData.experience] || obData.experience });
+  }
+  if (obData.division) {
+    var dL = { secondary:'Secondary (High School)', postsecondary:'Post-Secondary', middle:'Middle School' };
+    cards.push({ icon:'\ud83c\udf93', label:'Division', val: dL[obData.division] || obData.division });
+  }
+  if (obData.hosaExp) {
+    var hL = { first:'First time competing', once:'1\u20132 competitions', multiple:'Multiple competitions', captain:'Team captain' };
+    cards.push({ icon:'\ud83c\udfc5', label:'HOSA Experience', val: hL[obData.hosaExp] || obData.hosaExp });
+  }
+  if (obData.events && obData.events.length)
+    cards.push({ icon:'\ud83d\udccb', label:'Events', val: obData.events.length + ' event' + (obData.events.length > 1 ? 's' : '') + ' selected' });
+  if (obData.compDate) {
+    var cL = { '2weeks':'Within 2 weeks \ud83d\udd25', '1month':'~1 month away', '2months':'2\u20133 months away', 'later':'3+ months', 'unsure':'TBD' };
+    cards.push({ icon:'\ud83d\udcc5', label:'Competition', val: cL[obData.compDate] || obData.compDate });
+  }
+  if (obData.challenge) {
+    var chL = { memory:'Memorisation', consistent:'Staying consistent', understand:'Recall under pressure', pressure:'Exam anxiety', time:'Limited time' };
+    cards.push({ icon:'\ud83d\udcac', label:'Challenge', val: chL[obData.challenge] || obData.challenge });
+  }
+  if (obData.environment) {
+    var envL = { phone:'Phone on the go', desk:'Desk sessions', both:'Mix of both' };
+    cards.push({ icon:'\ud83d\udcf1', label:'Study style', val: envL[obData.environment] || obData.environment });
+  }
+  if (obData.dailyTime) {
+    var tL = { '5':'5\u201310 min/day', '15':'15\u201320 min/day', '30':'30\u201345 min/day', '60':'1 hour+/day' };
+    cards.push({ icon:'\u23f1\ufe0f', label:'Daily goal', val: tL[obData.dailyTime] || obData.dailyTime });
+  }
+  var rec = _obGetStartRec();
+  if (cardsEl) {
+    cardsEl.innerHTML =
+      '<div class="ob-start-here">' +
+        '<div class="ob-sh-label">\u2736 Start here</div>' +
+        '<div class="ob-sh-title">' + rec.title + '</div>' +
+        '<div class="ob-sh-desc">' + rec.desc + '</div>' +
+      '</div>' +
+      cards.map(function(c) {
+        return '<div class="ob-summary-card"><span class="ob-sc-icon">' + c.icon + '</span>'
+          + '<div><div class="ob-sc-label">' + c.label + '</div>'
+          + '<div class="ob-sc-val">' + c.val + '</div></div></div>';
+      }).join('');
+  }
+}
+// ── Finish ────────────────────────────────────────────────────
+function obFinish() {
+  // Save profile
+  obProfile = Object.assign({}, obData, { completedAt: Date.now() });
+  try { localStorage.setItem(OB_KEY, JSON.stringify(obProfile)); } catch(e) {}
+
+  // Close overlay with animation
+  var overlay = document.getElementById('ob-overlay');
+  overlay.classList.add('ob-overlay--exit');
+  setTimeout(function() {
+    overlay.classList.add('hidden');
+    overlay.classList.remove('ob-overlay--exit');
+    document.body.style.overflow = '';
+    _applyProfile(obProfile);
+    // If they selected events, open HOSA screen
+    if (obProfile.goal === 'hosa' && obProfile.events && obProfile.events.length) {
+      showScreen('hosa');
+    }
+  }, 450);
+}
+
+// ── Apply saved profile to home screen ────────────────────────
+function _applyProfile(profile) {
+  if (!profile) return;
+  var name = profile.name;
+  if (!name) return;
+  var badge = document.getElementById('heroBadge');
+  var title = document.getElementById('heroTitle');
+  var sub   = document.getElementById('heroSub');
+  var hour = new Date().getHours();
+  var greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  if (badge) badge.textContent = '\ud83d\udc4b ' + greeting + ', ' + name;
+  if (title) {
+    if (profile.goal === 'hosa')       title.innerHTML = 'Ready to <em>compete?</em>';
+    else if (profile.goal === 'both')  title.innerHTML = 'Study hard,<br/><em>compete harder.</em>';
+    else if (profile.goal === 'school') title.innerHTML = 'Keep <em>learning.</em>';
+    else                               title.innerHTML = 'Learn Healthcare<br/><em>the smart way.</em>';
+  }
+  if (sub) {
+    if (profile.compDate === '2weeks')         sub.textContent = 'Competition in 2 weeks — every session counts.';
+    else if (profile.compDate === '1month')    sub.textContent = 'One month out — build your foundation now.';
+    else if (profile.challenge === 'memory')   sub.textContent = 'Spaced repetition active — cards come back exactly when needed.';
+    else if (profile.challenge === 'consistent') sub.textContent = 'Daily streaks unlocked — consistency is your superpower.';
+    else if (profile.challenge === 'pressure') sub.textContent = 'Case Mode is ready — build confidence under test conditions.';
+    else if (profile.events && profile.events.length) sub.textContent = profile.events.length + ' event' + (profile.events.length > 1 ? 's' : '') + ' loaded \u00b7 keep the streak going.';
+    else if (profile.goal === 'school')        sub.textContent = 'Your personalised coursework plan is active.';
+    else                                       sub.textContent = 'Built for future healthcare professionals.';
+  }
+}
+
+// ── Reset onboarding (for settings) ──────────────────────────
+function resetOnboarding() {
+  if (!confirm('Reset your onboarding profile? Your study progress is not affected.')) return;
+  localStorage.removeItem(OB_KEY);
+  obProfile = null;
+  obData = {};
+  obStep = 0;
+  _obBuild();
+  _obRender(0);
+  document.getElementById('ob-overlay').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+
+// ── Hook into init ─────────────────────────────────────────────
+// Use a direct DOMContentLoaded listener — runs after init() since
+// scripts execute before DOMContentLoaded fires
+document.addEventListener('DOMContentLoaded', function() {
+  setTimeout(obInit, 50);
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  XP + LEVEL SYSTEM
+// ═══════════════════════════════════════════════════════════════
+
+var XP_LEVELS = [
+  { level:1,  xp:0,     name:'Pre-Med' },
+  { level:2,  xp:100,   name:'Medical Student' },
+  { level:3,  xp:300,   name:'Intern' },
+  { level:4,  xp:600,   name:'Junior Resident' },
+  { level:5,  xp:1100,  name:'Resident' },
+  { level:6,  xp:2000,  name:'Senior Resident' },
+  { level:7,  xp:3500,  name:'Fellow' },
+  { level:8,  xp:5500,  name:'Attending' },
+  { level:9,  xp:8500,  name:'Specialist' },
+  { level:10, xp:13000, name:'Consultant' },
+  { level:11, xp:19000, name:'Chief Resident' },
+  { level:12, xp:27000, name:'Professor' },
+  { level:13, xp:38000, name:'Department Head' },
+  { level:14, xp:52000, name:'Medical Director' },
+  { level:15, xp:70000, name:'Chief of Medicine' },
+];
+
+var XP_KEY = 'medpath_xp';
+var xpData = {
+  totalXP: 0, level: 1,
+  cardsReviewed: 0, casesCompleted: 0, quizzesDone: 0,
+  hosaPanelsOpened: [], sectionsVisited: [],
+  consecutiveGoodEasy: 0,
+  sessionCards: 0, sessionStart: 0,
+};
+
+function xpLoad() {
+  try {
+    var raw = localStorage.getItem(XP_KEY);
+    if (raw) xpData = Object.assign(xpData, JSON.parse(raw));
+  } catch(e) {}
+}
+
+function xpSave() {
+  try { localStorage.setItem(XP_KEY, JSON.stringify(xpData)); } catch(e) {}
+}
+
+function xpGetLevel(totalXP) {
+  var lv = XP_LEVELS[0];
+  for (var i = 0; i < XP_LEVELS.length; i++) {
+    if (totalXP >= XP_LEVELS[i].xp) lv = XP_LEVELS[i];
+    else break;
+  }
+  return lv;
+}
+
+function xpGetNext(totalXP) {
+  var cur = xpGetLevel(totalXP);
+  for (var i = 0; i < XP_LEVELS.length; i++) {
+    if (XP_LEVELS[i].level === cur.level + 1) return XP_LEVELS[i];
+  }
+  return null; // max level
+}
+
+// ── Earn XP ────────────────────────────────────────────────────
+function earnXP(amount, source) {
+  var prevLevel = xpGetLevel(xpData.totalXP);
+  xpData.totalXP += amount;
+  var newLevel  = xpGetLevel(xpData.totalXP);
+  xpSave();
+  updateXPBar();
+
+  // Level up!
+  if (newLevel.level > prevLevel.level) {
+    xpData.level = newLevel.level;
+    xpSave();
+    setTimeout(function() { showLevelUp(newLevel); }, 350);
+    // Check level achievements
+    if (newLevel.level >= 5)  achUnlock('level_5');
+    if (newLevel.level >= 10) achUnlock('level_10');
+  }
+
+  // XP milestone achievement
+  if (xpData.totalXP >= 10000) achUnlock('xp_10k');
+}
+
+// ── Update XP bar on home screen ──────────────────────────────
+function updateXPBar() {
+  var total   = xpData.totalXP;
+  var cur     = xpGetLevel(total);
+  var next    = xpGetNext(total);
+  var pct     = next ? Math.round(((total - cur.xp) / (next.xp - cur.xp)) * 100) : 100;
+
+  var badge   = document.getElementById('xpLevelBadge');
+  var name    = document.getElementById('xpLevelName');
+  var label   = document.getElementById('xpLabel');
+  var fill    = document.getElementById('xpBarFill');
+
+  if (badge) badge.textContent  = 'Lv. ' + cur.level;
+  if (name)  name.textContent   = cur.name;
+  if (label) label.textContent  = next
+    ? total.toLocaleString() + ' / ' + next.xp.toLocaleString() + ' XP'
+    : total.toLocaleString() + ' XP · Max Level';
+  if (fill)  fill.style.width   = pct + '%';
+}
+
+// ── Level-up celebration ───────────────────────────────────────
+function showLevelUp(levelObj) {
+  var overlay  = document.getElementById('levelup-overlay');
+  var levelEl  = document.getElementById('levelupLevel');
+  var nameEl   = document.getElementById('levelupName');
+  var xpEl     = document.getElementById('levelupXP');
+  var starsEl  = document.getElementById('levelupStars');
+  if (!overlay) return;
+
+  if (levelEl) levelEl.textContent = 'Level ' + levelObj.level;
+  if (nameEl)  nameEl.textContent  = levelObj.name;
+  if (xpEl)    xpEl.textContent    = levelObj.xp.toLocaleString() + ' XP reached';
+
+  // Particle stars
+  if (starsEl) {
+    starsEl.innerHTML = '';
+    for (var i = 0; i < 12; i++) {
+      var star = document.createElement('div');
+      star.className = 'lu-star';
+      star.style.setProperty('--angle', (i * 30) + 'deg');
+      star.style.setProperty('--delay', (i * 0.05) + 's');
+      star.textContent = ['⭐','✨','💫'][i % 3];
+      starsEl.appendChild(star);
+    }
+  }
+
+  function dismissLevelUp() {
+    overlay.removeEventListener('click', dismissLevelUp);
+    if (overlay.classList.contains('hidden')) return;
+    overlay.classList.add('levelup-out');
+    setTimeout(function() {
+      overlay.classList.add('hidden');
+      overlay.classList.remove('levelup-in', 'levelup-out');
+    }, 350);
+    if (_luTimer) { clearTimeout(_luTimer); _luTimer = null; }
+  }
+
+  overlay.classList.remove('hidden');
+  overlay.classList.add('levelup-in');
+  overlay.style.cursor = 'pointer';
+  overlay.addEventListener('click', dismissLevelUp);
+
+  // Also add a "Tap to continue" hint
+  var hint = overlay.querySelector('.lu-tap-hint');
+  if (!hint) {
+    hint = document.createElement('div');
+    hint.className = 'lu-tap-hint';
+    hint.textContent = 'Tap to continue';
+    overlay.querySelector('.levelup-card').appendChild(hint);
+  }
+
+  // Auto-dismiss after 3s
+  var _luTimer = setTimeout(dismissLevelUp, 3000);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  ACHIEVEMENT SYSTEM
+// ═══════════════════════════════════════════════════════════════
+
+var ACHIEVEMENTS = [
+  { id:'first_flip',    icon:'🌱', name:'First Flip',      desc:'Flip your first flashcard' },
+  { id:'on_a_roll',     icon:'🔥', name:'On a Roll',       desc:'Rate 10 cards Good or Easy in a row' },
+  { id:'century',       icon:'💯', name:'Century',         desc:'Review 100 cards total' },
+  { id:'memory_500',    icon:'🧠', name:'Memory Machine',  desc:'Review 500 cards total' },
+  { id:'bookworm',      icon:'📚', name:'Bookworm',        desc:'Review 1,000 cards total' },
+  { id:'night_owl',     icon:'🌙', name:'Night Owl',       desc:'Study after midnight' },
+  { id:'speed_run',     icon:'⚡', name:'Speed Run',       desc:'Rate 20 cards in under 5 minutes' },
+  { id:'case_cracker',  icon:'🔬', name:'Case Cracker',    desc:'Complete 10 clinical cases' },
+  { id:'clinician',     icon:'🩺', name:'Clinician',       desc:'Complete 50 clinical cases' },
+  { id:'quiz_ace',      icon:'📝', name:'Quiz Ace',        desc:'Score 100% on any quiz' },
+  { id:'week_warrior',  icon:'🏅', name:'Week Warrior',    desc:'Maintain a 7-day streak' },
+  { id:'diamond',       icon:'💎', name:'Diamond',         desc:'Maintain a 30-day streak' },
+  { id:'hosa_hero',     icon:'🏥', name:'HOSA Hero',       desc:'Open 5 different HOSA events' },
+  { id:'star_saver',    icon:'⭐', name:'Star Saver',      desc:'Save 10 flashcards' },
+  { id:'level_5',       icon:'🎓', name:'Leveled Up',      desc:'Reach Level 5 — Resident' },
+  { id:'level_10',      icon:'🌟', name:'Scholar',         desc:'Reach Level 10 — Consultant' },
+  { id:'explorer',      icon:'🗺️', name:'Explorer',        desc:'Visit every section of MedPath' },
+  { id:'xp_10k',        icon:'🏆', name:'Champion',        desc:'Earn 10,000 XP total' },
+  { id:'deck_complete', icon:'🗂️', name:'Deck Complete',   desc:'Rate every card in a HOSA event deck' },
+  { id:'comeback',      icon:'🔄', name:'Comeback',        desc:'Rate a card Again then Good in the same session' },
+];
+
+var ACH_KEY = 'medpath_achievements';
+var achUnlocked = new Set();
+
+function achLoad() {
+  try {
+    var raw = localStorage.getItem(ACH_KEY);
+    if (raw) achUnlocked = new Set(JSON.parse(raw));
+  } catch(e) {}
+}
+
+function achSave() {
+  try { localStorage.setItem(ACH_KEY, JSON.stringify([...achUnlocked])); } catch(e) {}
+}
+
+function achUnlock(id) {
+  if (achUnlocked.has(id)) return; // already unlocked
+  achUnlocked.add(id);
+  achSave();
+  var def = ACHIEVEMENTS.find(function(a) { return a.id === id; });
+  if (def) showAchievementToast(def);
+  renderAchievements();
+}
+
+function showAchievementToast(def) {
+  var toast = document.getElementById('ach-toast');
+  var iconEl = document.getElementById('achToastIcon');
+  var nameEl = document.getElementById('achToastName');
+  if (!toast) return;
+  if (iconEl) {
+    iconEl.innerHTML = '<img src="ach_icons/' + def.id + '.png" alt="' + def.name + '" '
+      + 'style="width:32px;height:32px;border-radius:8px;display:block" '
+      + 'onerror="this.outerHTML=\'' + def.icon + '\'">';
+  }
+  if (nameEl) nameEl.textContent = def.name;
+  toast.classList.remove('hidden', 'ach-toast--out');
+  toast.classList.add('ach-toast--in');
+  var _t = setTimeout(function() {
+    toast.classList.remove('ach-toast--in');
+    toast.classList.add('ach-toast--out');
+    setTimeout(function() { toast.classList.add('hidden'); }, 400);
+  }, 3000);
+}
+
+function renderAchievements() {
+  var grid = document.getElementById('achGrid');
+  if (!grid) return;
+  grid.innerHTML = ACHIEVEMENTS.map(function(a) {
+    var unlocked = achUnlocked.has(a.id);
+    var imgSrc   = 'ach_icons/' + a.id + '.png';
+    var iconHTML = '<img class="ach-badge-img" src="' + imgSrc + '" alt="' + a.name + '" '
+      + 'onerror="this.style.display=\'none\';this.nextSibling.style.display=\'block\'">'
+      + '<span class="ach-badge-emoji" style="display:none">' + a.icon + '</span>';
+    return '<div class="ach-badge ' + (unlocked ? 'ach-badge--unlocked' : 'ach-badge--locked') + '" title="' + a.desc + '">'
+      + '<div class="ach-badge-icon">' + iconHTML + '</div>'
+      + '<div class="ach-badge-name">' + a.name + '</div>'
+      + (unlocked ? '' : '<div class="ach-lock">🔒</div>')
+      + '</div>';
+  }).join('');
+}
+
+// ── Hooks — XP and achievement checks on every action ─────────
+
+// Hook rateCard (main flashcards)
+(function() {
+  var _orig = rateCard;
+  rateCard = function(r) {
+    _orig(r);
+    var xp = [1, 2, 5, 8][r - 1] || 5;
+    earnXP(xp, 'card');
+    xpData.cardsReviewed++;
+    xpData.sessionCards++;
+    if (!xpData.sessionStart) xpData.sessionStart = Date.now();
+    // Consecutive Good/Easy
+    if (r >= 3) {
+      xpData.consecutiveGoodEasy = (xpData.consecutiveGoodEasy || 0) + 1;
+      if (xpData.consecutiveGoodEasy >= 10) achUnlock('on_a_roll');
+    } else {
+      xpData.consecutiveGoodEasy = 0;
+    }
+    xpSave();
+    _checkCardAchievements();
+    // Speed run — 20 cards in under 5 min
+    if (xpData.sessionCards >= 20 && xpData.sessionStart) {
+      var elapsed = (Date.now() - xpData.sessionStart) / 60000;
+      if (elapsed <= 5) achUnlock('speed_run');
+    }
+    // Night owl
+    if (new Date().getHours() === 0 || new Date().getHours() >= 23) achUnlock('night_owl');
+    // Study log
+    logStudyActivity('card');
+  };
+})();
+
+// Hook rateCprCard
+(function() {
+  var _orig = rateCprCard;
+  rateCprCard = function(r) {
+    _orig(r);
+    earnXP([1,2,5,8][r-1] || 5, 'card');
+    xpData.cardsReviewed++;
+    xpData.consecutiveGoodEasy = r >= 3 ? (xpData.consecutiveGoodEasy||0)+1 : 0;
+    if (xpData.consecutiveGoodEasy >= 10) achUnlock('on_a_roll');
+    xpSave();
+    _checkCardAchievements();
+    logStudyActivity('card');
+  };
+})();
+
+// Hook rateHosaCard
+(function() {
+  var _orig = rateHosaCard;
+  rateHosaCard = function(eid, r) {
+    _orig(eid, r);
+    earnXP([1,2,5,8][r-1] || 5, 'card');
+    xpData.cardsReviewed++;
+    xpData.consecutiveGoodEasy = r >= 3 ? (xpData.consecutiveGoodEasy||0)+1 : 0;
+    if (xpData.consecutiveGoodEasy >= 10) achUnlock('on_a_roll');
+    xpSave();
+    _checkCardAchievements();
+    logStudyActivity('card');
+  };
+})();
+
+function _checkCardAchievements() {
+  if (xpData.cardsReviewed >= 1)    achUnlock('first_flip');
+  if (xpData.cardsReviewed >= 100)  achUnlock('century');
+  if (xpData.cardsReviewed >= 500)  achUnlock('memory_500');
+  if (xpData.cardsReviewed >= 1000) achUnlock('bookworm');
+}
+
+// Hook flipCard for first_flip achievement
+(function() {
+  var _orig = flipCard;
+  flipCard = function() {
+    _orig();
+    achUnlock('first_flip');
+  };
+})();
+
+// Hook case completion
+(function() {
+  var _orig = recordCaseAnswer;
+  recordCaseAnswer = function(caseId, isCorrect, tag, difficulty) {
+    _orig(caseId, isCorrect, tag, difficulty);
+    earnXP(isCorrect ? 15 : 3, 'case');
+    xpData.casesCompleted++;
+    xpSave();
+    if (xpData.casesCompleted >= 10)  achUnlock('case_cracker');
+    if (xpData.casesCompleted >= 50)  achUnlock('clinician');
+    logStudyActivity('case');
+  };
+})();
+
+// Hook quiz completion
+(function() {
+  var _orig = recordQuizComplete;
+  recordQuizComplete = function(score, total) {
+    _orig(score, total);
+    var pct = total > 0 ? score / total : 0;
+    earnXP(Math.max(5, Math.round(pct * 20)), 'quiz');
+    xpData.quizzesDone++;
+    xpSave();
+    if (pct === 1 && total >= 5) achUnlock('quiz_ace');
+    logStudyActivity('quiz');
+  };
+})();
+
+// Hook showScreen to track sections visited + HOSA panels + refresh XP bar
+(function() {
+  var _orig = showScreen;
+  showScreen = function(id) {
+    _orig(id);
+    if (id === 'home') updateXPBar();
+    if (!xpData.sectionsVisited) xpData.sectionsVisited = [];
+    if (xpData.sectionsVisited.indexOf(id) === -1) {
+      xpData.sectionsVisited.push(id);
+      xpSave();
+    }
+    var allSections = ['home','case','anatomy','flashcards','quiz','hosa','progress'];
+    var visited = allSections.filter(function(s) { return xpData.sectionsVisited.indexOf(s) > -1; });
+    if (visited.length >= allSections.length) achUnlock('explorer');
+  };
+})();
+
+// Hook showHosaEvent to track panels opened
+(function() {
+  var _orig = showHosaEvent;
+  showHosaEvent = function(id, name) {
+    _orig(id, name);
+    if (!xpData.hosaPanelsOpened) xpData.hosaPanelsOpened = [];
+    if (xpData.hosaPanelsOpened.indexOf(id) === -1) {
+      xpData.hosaPanelsOpened.push(id);
+      xpSave();
+    }
+    if (xpData.hosaPanelsOpened.length >= 5) achUnlock('hosa_hero');
+  };
+})();
+
+// Streak achievements — check when progress loads
+(function() {
+  var _orig = updateStreak;
+  updateStreak = function() {
+    _orig();
+    if (progressStreak.currentStreak >= 7)  achUnlock('week_warrior');
+    if (progressStreak.currentStreak >= 30) achUnlock('diamond');
+  };
+})();
+
+// Saved cards achievement — check when a card is saved
+(function() {
+  var _orig = toggleSaveCard;
+  toggleSaveCard = function(e) {
+    _orig(e);
+    if (savedCards.size >= 10) achUnlock('star_saver');
+  };
+})();
+
+// Hook renderProgressDashboard to render achievements
+(function() {
+  var _orig = renderProgressDashboard;
+  renderProgressDashboard = function() {
+    _orig();
+    renderAchievements();
+  };
+})();
+
+// ── Initialise XP + achievements on load ──────────────────────
+document.addEventListener('DOMContentLoaded', function() {
+  xpLoad();
+  achLoad();
+  _loadStudyLog();
+  updateXPBar();
+  renderAchievements();
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  PULL-TO-REFRESH — Home screen only
+// ═══════════════════════════════════════════════════════════════
+(function() {
+  var PTR_THRESHOLD = 72;   // px of pull needed to trigger
+  var startY = 0;
+  var pulling = false;
+  var indicator = null;
+
+  function getIndicator() {
+    if (!indicator) {
+      indicator = document.getElementById('ptr-indicator');
+      if (!indicator) {
+        indicator = document.createElement('div');
+        indicator.id = 'ptr-indicator';
+        indicator.className = 'ptr-indicator';
+        indicator.innerHTML = '<span class="ptr-arrow" id="ptrArrow">↓</span><span class="ptr-text" id="ptrText">Pull to refresh</span>';
+        document.body.appendChild(indicator);
+      }
+    }
+    return indicator;
+  }
+
+  function isHomeActive() {
+    var h = document.getElementById('screen-home');
+    return h && h.classList.contains('active');
+  }
+
+  document.addEventListener('touchstart', function(e) {
+    if (!isHomeActive()) return;
+    if (window.scrollY > 0) return; // only at top of page
+    if (e.touches.length !== 1) return;
+    startY = e.touches[0].clientY;
+    pulling = true;
+  }, { passive: true });
+
+  document.addEventListener('touchmove', function(e) {
+    if (!pulling) return;
+    var dy = e.touches[0].clientY - startY;
+    if (dy <= 0) { pulling = false; return; }
+
+    var ind = getIndicator();
+    var progress = Math.min(dy / PTR_THRESHOLD, 1);
+    var translate = Math.min(dy * 0.4, PTR_THRESHOLD * 0.6);
+
+    ind.style.transform = 'translateX(-50%) translateY(' + (translate - 40) + 'px)';
+    ind.style.opacity   = Math.min(progress * 1.5, 1);
+
+    var arrow = document.getElementById('ptrArrow');
+    var text  = document.getElementById('ptrText');
+    if (arrow) arrow.style.transform = 'rotate(' + (progress * 180) + 'deg)';
+    if (text)  text.textContent = progress >= 1 ? 'Release to refresh' : 'Pull to refresh';
+  }, { passive: true });
+
+  document.addEventListener('touchend', function(e) {
+    if (!pulling) return;
+    pulling = false;
+    var dy = e.changedTouches[0].clientY - startY;
+    var ind = getIndicator();
+
+    if (dy >= PTR_THRESHOLD) {
+      // Trigger refresh
+      var text = document.getElementById('ptrText');
+      if (text) text.textContent = 'Refreshing…';
+      ind.style.transform = 'translateX(-50%) translateY(0px)';
+      ind.style.opacity   = '1';
+
+      setTimeout(function() {
+        updateResumeBanner();
+        updateXPBar();
+        // Snap back
+        ind.style.transition = 'transform .3s ease, opacity .3s ease';
+        ind.style.transform  = 'translateX(-50%) translateY(-50px)';
+        ind.style.opacity    = '0';
+        setTimeout(function() { ind.style.transition = ''; }, 350);
+      }, 600);
+    } else {
+      // Snap back without refreshing
+      ind.style.transition = 'transform .25s ease, opacity .25s ease';
+      ind.style.transform  = 'translateX(-50%) translateY(-50px)';
+      ind.style.opacity    = '0';
+      setTimeout(function() { ind.style.transition = ''; }, 300);
+    }
+  }, { passive: true });
+})();
+
+// ═══════════════════════════════════════════════════════════════
+//  HOSA COMPETITION COUNTDOWN
+//  Cycles: ILC → SLC → ILC → SLC ... using real HOSA dates
+// ═══════════════════════════════════════════════════════════════
+
+var HOSA_EVENTS = [
+  // SLC 2026 already happened (March 9-11 2026) — skip if past
+  {
+    id:       'slc2026',
+    name:     'SLC 2026',
+    full:     'Spring Leadership Conference',
+    meta:     'March 9–11, 2026 · Metro Toronto Convention Centre',
+    location: 'Toronto, ON',
+    start:    new Date('2026-03-09T08:00:00'),
+    end:      new Date('2026-03-11T23:59:00'),
+    type:     'slc',
+  },
+  {
+    id:       'ilc2026',
+    name:     'ILC 2026',
+    full:     'International Leadership Conference',
+    meta:     'June 17–20, 2026 · Indianapolis, IN',
+    location: 'Indianapolis, IN',
+    start:    new Date('2026-06-17T08:00:00'),
+    end:      new Date('2026-06-20T23:59:00'),
+    type:     'ilc',
+  },
+  {
+    id:       'slc2027',
+    name:     'SLC 2027',
+    full:     'Spring Leadership Conference',
+    meta:     'March 2027 · Metro Toronto Convention Centre',
+    location: 'Toronto, ON',
+    start:    new Date('2027-03-08T08:00:00'),
+    end:      new Date('2027-03-10T23:59:00'),
+    type:     'slc',
+  },
+  {
+    id:       'ilc2027',
+    name:     'ILC 2027',
+    full:     'International Leadership Conference',
+    meta:     'June 23–26, 2027 · Baltimore, MD',
+    location: 'Baltimore, MD',
+    start:    new Date('2027-06-23T08:00:00'),
+    end:      new Date('2027-06-26T23:59:00'),
+    type:     'ilc',
+  },
+  {
+    id:       'slc2028',
+    name:     'SLC 2028',
+    full:     'Spring Leadership Conference',
+    meta:     'March 2028 · Metro Toronto Convention Centre',
+    location: 'Toronto, ON',
+    start:    new Date('2028-03-06T08:00:00'),
+    end:      new Date('2028-03-08T23:59:00'),
+    type:     'slc',
+  },
+  {
+    id:       'ilc2028',
+    name:     'ILC 2028',
+    full:     'International Leadership Conference',
+    meta:     'June 28–July 1, 2028 · Houston, TX',
+    location: 'Houston, TX',
+    start:    new Date('2028-06-28T08:00:00'),
+    end:      new Date('2028-07-01T23:59:00'),
+    type:     'ilc',
+  },
+  {
+    id:       'slc2029',
+    name:     'SLC 2029',
+    full:     'Spring Leadership Conference',
+    meta:     'March 2029 · Metro Toronto Convention Centre',
+    location: 'Toronto, ON',
+    start:    new Date('2029-03-05T08:00:00'),
+    end:      new Date('2029-03-07T23:59:00'),
+    type:     'slc',
+  },
+  {
+    id:       'ilc2029',
+    name:     'ILC 2029',
+    full:     'International Leadership Conference',
+    meta:     'June 26–30, 2029 · Orlando, FL',
+    location: 'Orlando, FL',
+    start:    new Date('2029-06-26T08:00:00'),
+    end:      new Date('2029-06-30T23:59:00'),
+    type:     'ilc',
+  },
+];
+
+var _cdTimer = null;
+
+function _hosaGetCurrentEvent() {
+  var now = Date.now();
+  // Find the first event that hasn't ended yet
+  for (var i = 0; i < HOSA_EVENTS.length; i++) {
+    if (HOSA_EVENTS[i].end.getTime() > now) {
+      return HOSA_EVENTS[i];
+    }
+  }
+  // All known events past — return last one
+  return HOSA_EVENTS[HOSA_EVENTS.length - 1];
+}
+
+function _hosaGetNextEvent(currentId) {
+  for (var i = 0; i < HOSA_EVENTS.length - 1; i++) {
+    if (HOSA_EVENTS[i].id === currentId) return HOSA_EVENTS[i + 1];
+  }
+  return null;
+}
+
+function _padTwo(n) {
+  return n < 10 ? '0' + n : '' + n;
+}
+
+function initHosaCountdown() {
+  if (_cdTimer) clearInterval(_cdTimer);
+
+  function tick() {
+    var now     = Date.now();
+    var ev      = _hosaGetCurrentEvent();
+    var isLive  = now >= ev.start.getTime() && now <= ev.end.getTime();
+    var target  = isLive ? ev.end.getTime() : ev.start.getTime();
+    var diff    = Math.max(0, target - now);
+
+    // Update DOM
+    var badge   = document.getElementById('hcdBadge');
+    var evEl    = document.getElementById('hcdEvent');
+    var metaEl  = document.getElementById('hcdMeta');
+    var nextEl  = document.getElementById('hcdNext');
+    var wrap    = document.getElementById('hosaCountdown');
+
+    if (!badge) return;
+
+    badge.textContent  = ev.name;
+    evEl.textContent   = ev.full;
+    metaEl.textContent = ev.meta;
+
+    // Colour class
+    if (wrap) {
+      wrap.classList.toggle('hcd--ilc', ev.type === 'ilc');
+      wrap.classList.toggle('hcd--slc', ev.type === 'slc');
+      wrap.classList.toggle('hcd--live', isLive);
+    }
+
+    if (isLive) {
+      badge.textContent = '🔴 LIVE — ' + ev.name;
+    }
+
+    // Countdown numbers
+    var totalSecs = Math.floor(diff / 1000);
+    var days  = Math.floor(totalSecs / 86400);
+    var hours = Math.floor((totalSecs % 86400) / 3600);
+    var mins  = Math.floor((totalSecs % 3600) / 60);
+    var secs  = totalSecs % 60;
+
+    document.getElementById('hcdDays').textContent  = days;
+    document.getElementById('hcdHours').textContent = _padTwo(hours);
+    document.getElementById('hcdMins').textContent  = _padTwo(mins);
+    document.getElementById('hcdSecs').textContent  = _padTwo(secs);
+
+    // Next event hint
+    var next = _hosaGetNextEvent(ev.id);
+    if (next && nextEl) {
+      nextEl.textContent = isLive
+        ? 'Up next: ' + next.name + ' — ' + next.location
+        : 'After this: ' + next.name + ' · ' + next.location;
+    }
+  }
+
+  tick();
+  _cdTimer = setInterval(tick, 1000);
+}
+
+// Start countdown when HOSA screen is shown
+(function() {
+  var _orig = showScreen;
+  showScreen = function(id) {
+    _orig(id);
+    if (id === 'hosa') initHosaCountdown();
+  };
+})();
+
+// Also init on load if HOSA screen happens to be active
+document.addEventListener('DOMContentLoaded', function() {
+  var hosa = document.getElementById('screen-hosa');
+  if (hosa && hosa.classList.contains('active')) initHosaCountdown();
+});
+
+/* ═══════════════════════════════════════════════════════════════
+   CAPY — Capybara Study Companion
+   Appended to script.js
+═══════════════════════════════════════════════════════════════ */
+(function () {
+  'use strict';
+
+  var TIPS = [
+    '💡 Tap a flashcard to test yourself — then reveal!',
+    '🔁 "Again" on hard cards? Good! Spaced rep brings them back.',
+    '🏥 Case Mode is the best way to apply what you memorised.',
+    '🔥 Even 10 minutes a day keeps your streak alive!',
+    '⭐ Save cards you keep missing — they become a focused deck.',
+    '⌨️ In flashcards: Space to flip, 1–4 to rate, ← → to navigate.',
+    '📊 Check Progress after every session — weak spots show up fast.',
+    '🩺 Anatomy Explorer: click any hotspot for deep detail.',
+    '🎯 Quiz mode right after flashcards locks in what stuck.',
+    '🏆 HOSA Skills Checklist: practise out loud, not just in your head.',
+    '💊 For CPR, the 30:2 ratio is everything. Drill it.',
+    '🌙 Sleep after studying = better retention. Science says so!',
+    '📖 Short focused sessions beat long marathon cramming every time.',
+    '✨ You\'re doing great. Every card brings you closer.',
+    '🧠 Pathophysiology + Anatomy studied together = 🔥',
+    '⏱️ 20-min study, 5-min break. Repeat. It works!',
+    '📝 Short-answer quiz mode is harder — and way more effective.',
+  ];
+
+  var CAPY_SVG = '<svg id="capy-svg" viewBox="0 0 100 112" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">'
+    + '<ellipse cx="50" cy="109" rx="27" ry="4.5" fill="rgba(0,0,0,0.10)"/>'
+    + '<ellipse cx="50" cy="85" rx="29" ry="24" fill="#9B7355"/>'
+    + '<ellipse cx="50" cy="89" rx="18" ry="16" fill="#C4966E"/>'
+    + '<rect x="46.2" y="85" width="7.6" height="2.8" rx="1.4" fill="#6B4832"/>'
+    + '<rect x="48.8" y="82.2" width="2.8" height="8.4" rx="1.4" fill="#6B4832"/>'
+    + '<ellipse cx="30" cy="104" rx="12" ry="7.5" fill="#9B7355" transform="rotate(-10 30 104)"/>'
+    + '<ellipse cx="70" cy="104" rx="12" ry="7.5" fill="#9B7355" transform="rotate(10 70 104)"/>'
+    + '<ellipse cx="22" cy="107" rx="3.2" ry="2.2" fill="#7A5540"/>'
+    + '<ellipse cx="29" cy="110" rx="3.2" ry="2.2" fill="#7A5540"/>'
+    + '<ellipse cx="36" cy="108" rx="3.2" ry="2.2" fill="#7A5540"/>'
+    + '<ellipse cx="64" cy="108" rx="3.2" ry="2.2" fill="#7A5540"/>'
+    + '<ellipse cx="71" cy="110" rx="3.2" ry="2.2" fill="#7A5540"/>'
+    + '<ellipse cx="78" cy="107" rx="3.2" ry="2.2" fill="#7A5540"/>'
+    + '<ellipse cx="50" cy="43" rx="34" ry="28" fill="#9B7355"/>'
+    + '<ellipse cx="21" cy="18" rx="9.5" ry="8.5" fill="#9B7355"/>'
+    + '<ellipse cx="21" cy="18" rx="6" ry="5.5" fill="#7A5540"/>'
+    + '<ellipse cx="79" cy="18" rx="9.5" ry="8.5" fill="#9B7355"/>'
+    + '<ellipse cx="79" cy="18" rx="6" ry="5.5" fill="#7A5540"/>'
+    + '<circle cx="36" cy="33" r="8.5" fill="white"/>'
+    + '<circle cx="64" cy="33" r="8.5" fill="white"/>'
+    + '<circle id="capy-pl" cx="37.5" cy="34.5" r="5.2" fill="#1A0E00"/>'
+    + '<circle id="capy-pr" cx="65.5" cy="34.5" r="5.2" fill="#1A0E00"/>'
+    + '<circle cx="39.5" cy="32.5" r="2.1" fill="white"/>'
+    + '<circle cx="67.5" cy="32.5" r="2.1" fill="white"/>'
+    + '<circle cx="37" cy="37" r="1" fill="rgba(255,255,255,.6)"/>'
+    + '<circle cx="65" cy="37" r="1" fill="rgba(255,255,255,.6)"/>'
+    + '<rect x="22" y="50" width="56" height="26" rx="13" fill="#C4966E"/>'
+    + '<ellipse cx="50" cy="51.5" rx="22" ry="4" fill="rgba(255,255,255,.12)"/>'
+    + '<ellipse cx="38" cy="58" rx="5" ry="4" fill="#7A5540"/>'
+    + '<ellipse cx="62" cy="58" rx="5" ry="4" fill="#7A5540"/>'
+    + '<ellipse cx="39" cy="56.5" rx="2" ry="1.5" fill="rgba(255,255,255,.3)"/>'
+    + '<ellipse cx="63" cy="56.5" rx="2" ry="1.5" fill="rgba(255,255,255,.3)"/>'
+    + '<path id="capy-m" d="M37 67 Q50 73 63 67" stroke="#7A5540" stroke-width="2.2" stroke-linecap="round" fill="none"/>'
+    + '<path d="M32 79 Q23 86 25 96" stroke="#0d9488" stroke-width="2.4" fill="none" stroke-linecap="round"/>'
+    + '<circle cx="25" cy="97.5" r="4.2" stroke="#0d9488" stroke-width="1.8" fill="none"/>'
+    + '<path d="M32 79 Q34 74 39 73" stroke="#0d9488" stroke-width="1.8" fill="none" stroke-linecap="round"/>'
+    + '<circle cx="39.5" cy="72.5" r="2" fill="#0d9488"/>'
+    + '<path d="M46 16 Q50 10 54 16" stroke="#9B7355" stroke-width="3" fill="none" stroke-linecap="round"/>'
+    + '<path d="M43 18 Q50 11 57 18" stroke="#9B7355" stroke-width="2" fill="none" stroke-linecap="round" opacity="0.6"/>'
+    + '</svg>';
+
+  var mood = 'idle';
+  var speechTmr, idleTmr;
+  var minimized = false;
+  var zzEls = [];
+  var $wrap, $bubble, $bubbleText, $body, $mini;
+
+  function init() {
+    buildDOM();
+    bindEvents();
+    hookApp();
+    resetIdle();
+    setTimeout(function () {
+      if (mood === 'idle') speak("Hi! I'm Capy 🌿 Tap me for study tips!", 4000);
+    }, 2800);
+  }
+
+  function buildDOM() {
+    $wrap = document.createElement('div');
+    $wrap.id = 'capy-wrap';
+    $wrap.innerHTML =
+      '<div id="capy-bubble">'
+      + '<button id="capy-dismiss" aria-label="Dismiss">✕</button>'
+      + '<span id="capy-bubble-text"></span>'
+      + '</div>'
+      + '<div id="capy-body" title="Capy — your study companion">'
+      + '<div id="capy-aura"></div>'
+      + CAPY_SVG
+      + '<div id="capy-parts"></div>'
+      + '</div>'
+      + '<div id="capy-mini" role="button" aria-label="Show Capy">🌿</div>';
+    document.body.appendChild($wrap);
+    $bubble     = document.getElementById('capy-bubble');
+    $bubbleText = document.getElementById('capy-bubble-text');
+    $body       = document.getElementById('capy-body');
+    $mini       = document.getElementById('capy-mini');
+  }
+
+  function bindEvents() {
+    $body.addEventListener('click', onBodyClick);
+    $mini.addEventListener('click', unminimize);
+    document.getElementById('capy-dismiss').addEventListener('click', function (e) {
+      e.stopPropagation();
+      hideBubble();
+    });
+    var pt;
+    $body.addEventListener('pointerdown', function () { pt = setTimeout(minimize, 900); });
+    $body.addEventListener('pointerup',   function () { clearTimeout(pt); });
+    $body.addEventListener('pointermove', function () { clearTimeout(pt); });
+    document.addEventListener('click',      resetIdle, { passive: true });
+    document.addEventListener('keydown',    resetIdle, { passive: true });
+    document.addEventListener('touchstart', resetIdle, { passive: true });
+    document.addEventListener('click', addRipple);
+  }
+
+  /* ── Ripple ── */
+  function addRipple(e) {
+    var btn = e.target.closest(
+      '.btn-primary,.btn-secondary,.btn-outline,.fc-btn,.fc-srs-btn,.qz-sa-submit,.qz-next-btn,.fc-sc-btn'
+    );
+    if (!btn) return;
+    var r = document.createElement('span');
+    var rect = btn.getBoundingClientRect();
+    var size = Math.max(rect.width, rect.height) * 2;
+    r.className = 'ripple-wave';
+    r.style.cssText = 'position:absolute;border-radius:50%;background:rgba(255,255,255,.36);'
+      + 'width:' + size + 'px;height:' + size + 'px;'
+      + 'top:'  + (e.clientY - rect.top  - size / 2) + 'px;'
+      + 'left:' + (e.clientX - rect.left - size / 2) + 'px;'
+      + 'transform:scale(0);animation:ripple-out .65s cubic-bezier(.16,1,.3,1) forwards;'
+      + 'pointer-events:none;z-index:0;';
+    btn.appendChild(r);
+    setTimeout(function () { r.remove(); }, 700);
+  }
+
+  /* ── Speech ── */
+  function speak(text, dur) {
+    if (minimized) return;
+    clearTimeout(speechTmr);
+    $bubbleText.textContent = text;
+    $bubble.style.display = '';
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () { $bubble.classList.add('show'); });
+    });
+    speechTmr = setTimeout(hideBubble, dur || 4500);
+  }
+  function hideBubble() {
+    $bubble.classList.remove('show');
+    clearTimeout(speechTmr);
+  }
+
+  /* ── Moods ── */
+  function setMood(m, holdMs) {
+    clearZzz();
+    mood = m;
+    $wrap.className = 'mood-' + m;
+    updateFace(m);
+    if (m === 'sleepy') spawnZzz();
+    if (holdMs) {
+      setTimeout(function () {
+        if (mood === m) { mood = 'idle'; $wrap.className = ''; updateFace('idle'); clearZzz(); }
+      }, holdMs);
+    }
+  }
+  function updateFace(m) {
+    var mo = document.getElementById('capy-m');
+    var pl = document.getElementById('capy-pl');
+    var pr = document.getElementById('capy-pr');
+    if (!mo || !pl || !pr) return;
+    pl.setAttribute('r', '5.2');  pr.setAttribute('r', '5.2');
+    pl.setAttribute('cy', '34.5'); pr.setAttribute('cy', '34.5');
+    switch (m) {
+      case 'celebrating':
+      case 'happy':
+        mo.setAttribute('d', 'M34 65 Q50 75 66 65');
+        pl.setAttribute('r', '6');    pr.setAttribute('r', '6');
+        pl.setAttribute('cy', '33'); pr.setAttribute('cy', '33');
+        break;
+      case 'encouraging':
+        mo.setAttribute('d', 'M36 66 Q50 73 64 66');
+        break;
+      case 'thinking':
+        mo.setAttribute('d', 'M38 69 Q50 69.5 62 69');
+        pl.setAttribute('cy', '32');  pr.setAttribute('cy', '32');
+        break;
+      case 'sleepy':
+        mo.setAttribute('d', 'M38 69 Q50 68 62 69');
+        pl.setAttribute('r', '2.2'); pr.setAttribute('r', '2.2');
+        pl.setAttribute('cy', '36.5'); pr.setAttribute('cy', '36.5');
+        break;
+      default:
+        mo.setAttribute('d', 'M37 67 Q50 73 63 67');
+    }
+  }
+
+  /* ── Zzz ── */
+  function spawnZzz() {
+    clearZzz();
+    var parts = document.getElementById('capy-parts');
+    if (!parts) return;
+    for (var i = 0; i < 3; i++) {
+      var el = document.createElement('div');
+      el.className = 'capy-z';
+      el.textContent = 'z';
+      el.style.animationDelay = (i * 0.65) + 's';
+      parts.appendChild(el);
+      zzEls.push(el);
+    }
+  }
+  function clearZzz() { zzEls.forEach(function (e) { e.remove(); }); zzEls = []; }
+
+  /* ── Particles ── */
+  var EMOJIS = ['⭐', '💊', '❤️', '✨', '🩺', '💡', '🏅', '🌿', '🌟'];
+  function burst(count) {
+    var parts = document.getElementById('capy-parts');
+    if (!parts) return;
+    for (var i = 0; i < (count || 4); i++) {
+      (function (d) {
+        setTimeout(function () {
+          var p = document.createElement('div');
+          p.className = 'vp';
+          p.textContent = EMOJIS[Math.floor(Math.random() * EMOJIS.length)];
+          var angle = (Math.random() * 220) - 110;
+          var dist  = 44 + Math.random() * 52;
+          var rad   = (angle * Math.PI) / 180;
+          p.style.setProperty('--vx', Math.sin(rad) * dist + 'px');
+          p.style.setProperty('--vy', '-' + (50 + Math.random() * 45) + 'px');
+          p.style.setProperty('--vr', (Math.random() > 0.5 ? '' : '-') + (20 + Math.random() * 44) + 'deg');
+          parts.appendChild(p);
+          setTimeout(function () { p.remove(); }, 1200);
+        }, d);
+      })(i * 115);
+    }
+  }
+
+  /* ── Confetti ── */
+  function confetti(count) {
+    var colors = ['#9B7355', '#C4966E', '#0d9488', '#5DCAA5', '#f97316', '#a855f7', '#3b82f6', '#f59e0b'];
+    for (var i = 0; i < (count || 32); i++) {
+      (function (d) {
+        setTimeout(function () {
+          var p = document.createElement('div');
+          p.className = 'confetti-piece';
+          p.style.cssText = 'left:' + (Math.random() * 100) + 'vw;'
+            + 'top:' + (8 + Math.random() * 28) + 'vh;'
+            + 'background:' + colors[Math.floor(Math.random() * colors.length)] + ';'
+            + 'animation-duration:' + (0.8 + Math.random() * 0.8) + 's;'
+            + 'animation-delay:' + d + 'ms;'
+            + 'transform:rotate(' + (Math.random() * 360) + 'deg);'
+            + 'border-radius:' + (Math.random() > 0.5 ? '50%' : '2px') + ';';
+          document.body.appendChild(p);
+          setTimeout(function () { p.remove(); }, 2000);
+        }, d);
+      })(i * 55);
+    }
+  }
+
+  /* ── User interactions ── */
+  function onBodyClick() {
+    speak(TIPS[Math.floor(Math.random() * TIPS.length)], 5500);
+    burst(5);
+    resetIdle();
+  }
+  function minimize()   { minimized = true;  $wrap.classList.add('minimized');    hideBubble(); }
+  function unminimize() {
+    minimized = false; $wrap.classList.remove('minimized');
+    setMood('happy', 1800);
+    speak("I'm back! 🌿", 2200);
+  }
+
+  /* ── Idle timer ── */
+  function resetIdle() {
+    clearTimeout(idleTmr);
+    if (mood === 'sleepy') { setMood('idle', 0); }
+    idleTmr = setTimeout(function () { setMood('sleepy', 0); }, 50000);
+  }
+
+  /* ── Hook into existing app functions ── */
+  function hookApp() {
+    var origRate = window.rateCard;
+    if (typeof origRate === 'function') {
+      window.rateCard = function (rating) {
+        origRate.apply(this, arguments);
+        if (rating >= 3) {
+          setMood('happy', 2200);
+          burst(4);
+          if (rating === 4) speak('Easy one! You\'re on fire 🌟', 2200);
+        } else {
+          setMood('encouraging', 2200);
+          speak('No worries — it\'ll come back soon! 💪', 2500);
+        }
+        resetIdle();
+      };
+    }
+
+    var origFlip = window.flipCard;
+    if (typeof origFlip === 'function') {
+      window.flipCard = function () {
+        origFlip.apply(this, arguments);
+        setMood('thinking', 1000);
+        resetIdle();
+      };
+    }
+
+    var origLevelUp = window.triggerLevelUp;
+    if (typeof origLevelUp === 'function') {
+      window.triggerLevelUp = function () {
+        origLevelUp.apply(this, arguments);
+        setMood('celebrating', 4000);
+        speak('LEVEL UP!! You\'re crushing it!! 🎉', 4000);
+        burst(8);
+        confetti(40);
+      };
+    }
+
+    var origAddXP = window.addXP;
+    if (typeof origAddXP === 'function') {
+      window.addXP = function (amount) {
+        origAddXP.apply(this, arguments);
+        if (amount >= 20) { setMood('happy', 2000); burst(3); }
+        resetIdle();
+      };
+    }
+
+    var origDismiss = window.dismissSessionComplete;
+    if (typeof origDismiss === 'function') {
+      window.dismissSessionComplete = function () {
+        origDismiss.apply(this, arguments);
+        setMood('celebrating', 3500);
+        speak('Session done! Real skill incoming 🏅', 3500);
+        burst(6);
+      };
+    }
+
+    // Watch quiz feedback elements for correct/wrong class changes
+    var observer = new MutationObserver(function (muts) {
+      muts.forEach(function (m) {
+        if (m.type === 'attributes' && m.attributeName === 'class') {
+          var el = m.target;
+          if (el.classList.contains('correct')) {
+            setMood('celebrating', 2500); burst(5);
+          } else if (el.classList.contains('wrong')) {
+            setMood('encouraging', 2000);
+            speak('That\'s okay — review it and try again! 📖', 3000);
+          }
+        }
+      });
+    });
+    document.querySelectorAll('.quiz-feedback').forEach(function (el) {
+      observer.observe(el, { attributes: true, attributeFilter: ['class'] });
+    });
+  }
+
+  /* ── Boot ── */
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
