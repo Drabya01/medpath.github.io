@@ -72,7 +72,7 @@ function goHome() {
 // ─────────────────────────────────────────
 //  DATA: CASES
 // ─────────────────────────────────────────
-const cases = [
+var cases = [
 
   // ── BEGINNER ───────────────────────────────────────────────────────────────
   {
@@ -4256,7 +4256,7 @@ function backToAnatomyList() {
 // ─────────────────────────────────────────
 //  DATA: FLASHCARDS
 // ─────────────────────────────────────────
-const flashcards = [
+var flashcards = [
   // FOUNDATIONS 
   { cat:'Foundations', term:'Diagnosis', def:'The process of identifying a disease or condition based on symptoms, medical history, examination, and tests.' },
   { cat:'Foundations', term:'Prognosis', def:'Prediction of the likely course and outcome of a disease.' },
@@ -7453,7 +7453,7 @@ const flashcards = [
   { cat:"Anatomy", term:"Retroperitoneal", def:"Located behind the peritoneum." },
 ];
 
-const allCategories = ['All', 'Saved ⭐', ...new Set(flashcards.map(f => f.cat))];
+var allCategories = ['All', 'Saved ⭐', ...new Set(flashcards.map(f => f.cat))];
 let fcFiltered = [...flashcards];
 let fcIndex = 0;
 let fcFlipped = false;
@@ -7968,7 +7968,7 @@ function escapeHtml(str) {
 // ─────────────────────────────────────────
 //  DATA: QUIZ
 // ─────────────────────────────────────────
-const allQuestions = [
+var allQuestions = [
   {
     q: 'Which organ is responsible for producing insulin to regulate blood sugar?',
     choices: ['Liver', 'Pancreas', 'Kidney', 'Gallbladder'],
@@ -8951,8 +8951,20 @@ function shuffle(arr) {
 // ─────────────────────────────────────────
 //  INIT
 // ─────────────────────────────────────────
-function init() {
+async function init() {
   sm2Load();
+
+  // Load external content from Google Sheets (if configured).
+  // This await resolves immediately when using cached data or
+  // when not configured — it only blocks on a first-ever cold fetch.
+  await MedPathContent.load(function onBackgroundRefresh() {
+    // Called when a background re-fetch completes after serving from cache.
+    // Rebuild derived state so new content shows without a page reload.
+    allCategories = ['All', 'Saved ⭐', ...new Set(flashcards.map(f => f.cat))];
+    initDiffCounts();
+    renderFCCategories();
+    renderContentStatus(); // update the Settings panel badge
+  });
   loadProgressData();
   updateStreak();
   initDiffCounts();
@@ -9972,6 +9984,120 @@ function renderSettingsScreen() {
   var modeEl = document.getElementById('stQuizMode');
   if (modeEl) modeEl.value = appSettings.defaultQuizMode;
   syncSeg('stQuizLenSeg', appSettings.defaultQuizLen);
+
+  // Content panel (populated from MedPathContent status)
+  renderContentStatus();
+}
+
+// ── Content Management ────────────────────────────────────────────────────
+
+/**
+ * Reads the current MedPathContent status and updates every element
+ * in the Settings → Content group.  Safe to call at any time.
+ */
+function renderContentStatus() {
+  if (typeof MedPathContent === 'undefined') return;
+  var status = MedPathContent.getStatus();
+
+  var badge      = document.getElementById('contentStatusBadge');
+  var details    = document.getElementById('contentSyncDetails');
+  var lastSyncEl = document.getElementById('contentLastSync');
+  var syncBtn    = document.getElementById('contentSyncBtn');
+  var input      = document.getElementById('sheetIdInput');
+  var cntCases   = document.getElementById('countCases');
+  var cntCards   = document.getElementById('countCards');
+  var cntQuiz    = document.getElementById('countQuiz');
+  if (!badge) return;
+
+  // Pre-fill input with the currently saved Sheet ID (only when empty)
+  if (input && !input.value) {
+    try { input.value = localStorage.getItem('medpath_sheet_id') || ''; } catch(_) {}
+  }
+
+  // Badge label + style
+  var stateLabel = {
+    idle:          'Not configured',
+    unconfigured:  'Not configured',
+    loading:       'Syncing\u2026',
+    ok:            '\u2713 Connected',
+    error:         '\u2715 Sync error'
+  };
+  var stateClass = { idle: 'idle', unconfigured: 'idle', loading: 'loading', ok: 'ok', error: 'error' };
+  badge.textContent = stateLabel[status.state] || 'Unknown';
+  badge.className   = 'st-sync-badge st-sync-badge--' + (stateClass[status.state] || 'idle');
+
+  // Show/hide the counts + last-synced block
+  var showDetails = (status.state === 'ok' || status.state === 'error') && status.lastSync;
+  if (details) details.classList.toggle('hidden', !showDetails);
+
+  // Last-synced relative time
+  if (status.lastSync && lastSyncEl) {
+    var mins = Math.round((Date.now() - new Date(status.lastSync)) / 60000);
+    lastSyncEl.textContent = mins < 1 ? 'Just now'
+      : mins < 60 ? mins + 'm ago'
+      : Math.round(mins / 60) + 'h ago';
+  }
+
+  // Content counts
+  if (cntCases && status.counts) {
+    cntCases.textContent = '+' + status.counts.cases;
+    cntCards.textContent = '+' + status.counts.flashcards;
+    cntQuiz.textContent  = '+' + status.counts.quiz;
+  }
+
+  // Sync button state
+  if (syncBtn) {
+    syncBtn.disabled    = (status.state === 'loading');
+    syncBtn.textContent = (status.state === 'loading') ? 'Syncing\u2026' : 'Sync';
+  }
+}
+
+/**
+ * Called when the user clicks Save after entering a Sheet ID.
+ * Saves the ID then immediately triggers a fresh sync.
+ */
+function saveSheetId() {
+  var input = document.getElementById('sheetIdInput');
+  if (!input) return;
+  var normalised = MedPathContent.setSheetId(input.value);
+  input.value = normalised; // reflect normalised value back into the field
+  if (normalised) {
+    refreshContent();
+  } else {
+    renderContentStatus();
+    showSettingsToast('Sheet ID cleared');
+  }
+}
+
+/**
+ * Force an immediate re-fetch from Google Sheets.
+ * Rebuilds derived UI state on success.
+ */
+async function refreshContent() {
+  renderContentStatus(); // show "Syncing…" immediately
+  var result = await MedPathContent.refresh();
+  if (result.ok) {
+    // Rebuild derived arrays and refresh affected UI sections
+    allCategories = ['All', 'Saved \u2B50', ...new Set(flashcards.map(function(f) { return f.cat; }))];
+    initDiffCounts();
+    renderFCCategories();
+    var c = result.counts;
+    showSettingsToast(
+      'Synced \u2014 +'  + c.cases + ' cases, +' + c.flashcards + ' flashcards, +' + c.quiz + ' quiz Qs'
+    );
+  } else {
+    showSettingsToast('Sync failed: ' + result.error.slice(0, 70));
+  }
+  renderContentStatus();
+}
+
+/**
+ * Remove cached sheet data.  Built-in content is unaffected.
+ */
+function clearContentCache() {
+  MedPathContent.clearCache();
+  renderContentStatus();
+  showSettingsToast('Cached content cleared');
 }
 
 function syncSeg(containerId, val) {
