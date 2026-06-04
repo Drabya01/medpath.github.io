@@ -7527,6 +7527,7 @@ function sm2Save() {
     localStorage.setItem(SM2_KEY, JSON.stringify(sm2Data));
     localStorage.setItem('medpath_saved', JSON.stringify([...savedCards]));
   } catch(e) {}
+  SupabaseSync.schedulePush('srs');
 }
 
 // Backward-compat aliases used elsewhere in the code
@@ -8953,6 +8954,7 @@ function shuffle(arr) {
 // ─────────────────────────────────────────
 async function init() {
   sm2Load();
+  SupabaseSync.init(); // set up Supabase client (no-op if not configured)
 
   // Load external content from Google Sheets (if configured).
   // This await resolves immediately when using cached data or
@@ -9411,6 +9413,7 @@ function saveProgressData() {
     localStorage.setItem('medpath_quiz_stats',  JSON.stringify(progressQuizStats));
     localStorage.setItem('medpath_streak',       JSON.stringify(progressStreak));
   } catch(e) {}
+  SupabaseSync.schedulePush('progress');
 }
 
 // ─────────────────────────────────────────
@@ -9428,6 +9431,7 @@ function _loadStudyLog() {
 
 function _saveStudyLog() {
   try { localStorage.setItem(STUDY_LOG_KEY, JSON.stringify(studyLog)); } catch(e) {}
+  SupabaseSync.schedulePush('progress');
 }
 
 // Call this whenever the user does something that counts as "studying"
@@ -9831,12 +9835,15 @@ function handleGoogleCredential(response) {
   };
   try { localStorage.setItem('medpath_user', JSON.stringify(currentUser)); } catch(e) {}
   renderAuthUI();
+  // Exchange the Google JWT for a Supabase session, then pull + merge cloud data
+  SupabaseSync.onGoogleSignIn(response.credential);
 }
 
 function signOut() {
   if (typeof google !== 'undefined' && google.accounts) {
     google.accounts.id.disableAutoSelect();
   }
+  SupabaseSync.onSignOut(); // push pending data then end Supabase session
   currentUser = null;
   try { localStorage.removeItem('medpath_user'); } catch(e) {}
   renderAuthUI();
@@ -9900,6 +9907,7 @@ var appSettings = {
 // ── Persistence ──────────────────────────
 function saveSettings() {
   try { localStorage.setItem('medpath_settings', JSON.stringify(appSettings)); } catch(e) {}
+  SupabaseSync.schedulePush('settings');
 }
 function loadSettings() {
   try {
@@ -11865,6 +11873,7 @@ function loadCustomCards() {
 
 function saveCustomCards() {
   try { localStorage.setItem(CC_STORAGE_KEY, JSON.stringify(_customCards)); } catch(e) {}
+  SupabaseSync.schedulePush('custom_cards');
 }
 
 function _ccGet(pid) { return _customCards[pid] || []; }
@@ -13611,6 +13620,7 @@ function xpLoad() {
 
 function xpSave() {
   try { localStorage.setItem(XP_KEY, JSON.stringify(xpData)); } catch(e) {}
+  SupabaseSync.schedulePush('progress');
 }
 
 function xpGetLevel(totalXP) {
@@ -13766,6 +13776,7 @@ function achLoad() {
 
 function achSave() {
   try { localStorage.setItem(ACH_KEY, JSON.stringify([...achUnlocked])); } catch(e) {}
+  SupabaseSync.schedulePush('progress');
 }
 
 function achUnlock(id) {
