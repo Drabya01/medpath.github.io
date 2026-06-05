@@ -541,6 +541,40 @@ var SupabaseSync = (function () {
         return !r.error;
       } catch(e) { console.warn('[Admin] resetWeekly:', e.message); return false; }
     },
+    removeFromLeaderboard: async function(userId) {
+      if (!_ready || !_uid) return false;
+      try { var r=await _db.from('leaderboard').delete().eq('user_id',userId); return !r.error; }
+      catch(e) { console.warn('[Admin] removeLb:', e.message); return false; }
+    },
+    fetchClubsWithCounts: async function() {
+      if (!_ready) return [];
+      try {
+        var clubs=await _db.from('clubs').select('id,name,join_code,created_at').order('created_at',{ascending:false});
+        if (!clubs.data) return [];
+        var counts=await Promise.all(clubs.data.map(function(c){
+          return _db.from('club_members').select('*',{count:'exact',head:true}).eq('club_id',c.id);
+        }));
+        return clubs.data.map(function(c,i){ return Object.assign({},c,{member_count:counts[i].count||0}); });
+      } catch(e) { console.warn('[Admin] clubCounts:', e.message); return []; }
+    },
+    fetchTableHealth: async function() {
+      if (!_ready) return [];
+      var tables=['leaderboard','user_progress','user_srs','user_settings','clubs',
+                  'club_members','club_member_stats','assignments','announcements','app_config'];
+      return Promise.all(tables.map(async function(t) {
+        try {
+          var r=await _db.from(t).select('*',{count:'exact',head:true});
+          return {table:t, count:r.count, error:r.error?r.error.message:null};
+        } catch(e) { return {table:t, count:null, error:e.message}; }
+      }));
+    },
+    searchUsers: async function(query) {
+      if (!_ready||!query) return [];
+      try {
+        var r=await _db.from('leaderboard').select('*').ilike('display_name','%'+query+'%').order('total_xp',{ascending:false}).limit(10);
+        return r.data||[];
+      } catch(e) { return []; }
+    },
 
     // ── Leaderboard ────────────────────────────────────────────
     pushLeaderboard: async function(data) {

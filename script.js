@@ -50,63 +50,6 @@ function _afterShowScreen(id) {
 }
 
 // ── App-wide config (feature flags + banner) ──────────────────
-
-// ── Global utility functions (used by club, leaderboard, admin) ──
-
-/** HTML-escape a string to prevent XSS in rendered HTML */
-function _esc(s) {
-  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-/** Render a user avatar — photo if available, else initials circle */
-function _lbAvatar(row, cls) {
-  if (row && row.avatar_url) {
-    return '<img class="'+cls+'" src="'+_esc(row.avatar_url)+'" alt="" '
-      +'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'">'
-      +'<div class="'+cls+' '+cls+'--init" style="display:none">'+_lbInitials(row.display_name||row.name||'')+'</div>';
-  }
-  return '<div class="'+cls+' '+cls+'--init">'+_lbInitials((row&&(row.display_name||row.name))||'?')+'</div>';
-}
-
-function _lbInitials(name) {
-  var parts = String(name||'?').split(' ');
-  return (parts[0].charAt(0)+(parts[1]?parts[1].charAt(0):'')).toUpperCase();
-}
-
-/** Leaderboard teaser on home screen — stub if full leaderboard not loaded */
-function updateLbTeaser() {
-  var teaser = document.getElementById('lbTeaser');
-  if (!teaser) return;
-  var user = typeof getCurrentUser === 'function' ? getCurrentUser() : null;
-  if (!user) { teaser.classList.add('hidden'); return; }
-  teaser.classList.remove('hidden');
-  if (typeof SupabaseSync === 'undefined' || typeof SupabaseSync.fetchLeaderboard !== 'function') return;
-  var subEl = document.getElementById('lbTeaserSub');
-  SupabaseSync.fetchLeaderboard('week_xp').then(function(rows) {
-    if (!rows || !rows.length) { if(subEl) subEl.textContent = 'Be the first on the board!'; return; }
-    SupabaseSync.fetchMyRank('week_xp').then(function(myRank) {
-      var names = rows.slice(0,3).map(function(r,i){ return ['🥇','🥈','🥉'][i]+' '+r.display_name.split(' ')[0]; }).join('  ');
-      if(subEl) subEl.textContent = (myRank?'Your rank: #'+myRank+'  ·  ':'')+names;
-    });
-  });
-}
-
-/** Leaderboard screen init — stub so navigation doesn't break */
-function initLeaderboardScreen() {
-  var el = document.getElementById('lbSigninPrompt');
-  var user = typeof getCurrentUser === 'function' ? getCurrentUser() : null;
-  if (el) el.classList.toggle('hidden', !!user);
-  var loadingEl = document.getElementById('lbLoading');
-  var contentEl = document.getElementById('lbContent');
-  if (!user) { if(loadingEl) loadingEl.classList.add('hidden'); return; }
-  if (typeof _lbFetch === 'function') _lbFetch(_lbTab||'week');
-}
-
-function switchLbTab(tab) {
-  if (typeof _lbTab !== 'undefined') _lbTab = tab;
-  document.querySelectorAll('.lb-tab').forEach(function(b){ b.classList.toggle('active', b.dataset.tab===tab); });
-  if (typeof _lbFetch === 'function') _lbFetch(tab);
-}
 var _appConfig = { banner: {}, features: {} };
 
 async function loadAppConfig() {
@@ -143,8 +86,24 @@ function _applyAppConfig() {
   var feats = _appConfig.features || {};
   _setFeatureVisible('mc--leaderboard-card', feats.leaderboard !== false);
   _setFeatureVisible('mc--club-card',        feats.clubs       !== false);
-  // Case background is toggled via CSS class on body
   document.body.classList.toggle('no-case-bg', feats.caseBackground === false);
+
+  // ── Home screen announcement ──────────────────────────────
+  var ann = _appConfig.announcement;
+  if (ann && ann.enabled && ann.text) {
+    var dismissed = false;
+    try { dismissed = localStorage.getItem('mp_ann_dismissed') === ann.id; } catch(e){}
+    var annEl = document.getElementById('homeAnnouncement');
+    if (annEl && !dismissed) {
+      annEl.innerHTML = '<div class="home-ann-inner"><span>📣 '+_esc(ann.text)+'</span>'
+        +'<button onclick="this.parentElement.parentElement.classList.add(\'hidden\');'
+        +'try{localStorage.setItem(\'mp_ann_dismissed\',\''+ann.id+'\');}catch(e){}">✕</button></div>';
+      annEl.classList.remove('hidden');
+    }
+  } else {
+    var annEl2 = document.getElementById('homeAnnouncement');
+    if (annEl2) annEl2.classList.add('hidden');
+  }
 }
 
 function _setFeatureVisible(id, visible) {
@@ -9274,153 +9233,641 @@ function _adminExit() {
 }
 
 // ── Render ────────────────────────────────────────────────────
+// ── Admin state ───────────────────────────────────────────────
+var _admTab          = 'overview';
+var _admActivityLog  = [];
+var _admRefreshTimer = null;
+var _admLastStats    = {totalUsers:0,activeThisWeek:0,totalXP:0,topUsers:[]};
+
+function _admLog(msg) {
+  _admActivityLog.unshift(new Date().toLocaleTimeString()+' — '+msg);
+  if (_admActivityLog.length > 8) _admActivityLog.pop();
+  var el = document.getElementById('admLog');
+  if (el) el.innerHTML = _admActivityLog.map(function(l){
+    return '<div class="adm-log-item">'+_esc(l)+'</div>';
+  }).join('');
+}
+
 async function _adminRender() {
   var el = document.getElementById('adminContent');
   if (!el) return;
-  var user = typeof getCurrentUser === 'function' ? getCurrentUser() : null;
-  el.innerHTML = '<div class="adm-loading"><div class="club-spinner"></div> Loading stats…</div>';
+  var user = typeof getCurrentUser==='function' ? getCurrentUser() : null;
+  el.innerHTML = '<div class="adm-loading"><div class="club-spinner"></div> Loading…</div>';
 
-  var stats = null;
+  // Pre-fetch
   if (typeof SupabaseSync !== 'undefined') {
-    stats = await SupabaseSync.fetchAdminStats();
-    var cfg = await SupabaseSync.fetchAppConfig();
-    if (cfg.banner)   _appConfig.banner   = cfg.banner;
-    if (cfg.features) _appConfig.features = cfg.features;
+    var res = await Promise.all([
+      SupabaseSync.fetchAdminStats().catch(function(){return null;}),
+      SupabaseSync.fetchAppConfig().catch(function(){return {};})
+    ]);
+    if (res[0]) _admLastStats = res[0];
+    var cfg = res[1]||{};
+    if (cfg.banner)       _appConfig.banner       = cfg.banner;
+    if (cfg.features)     _appConfig.features     = cfg.features;
+    if (cfg.announcement) _appConfig.announcement = cfg.announcement;
   }
-  stats = stats || {totalUsers:0,activeThisWeek:0,totalXP:0,topUsers:[]};
-  var b = _appConfig.banner   || {enabled:false,text:'',style:'info'};
-  var f = _appConfig.features || {leaderboard:true,clubs:true,caseBackground:true,maintenanceMode:false};
 
-  el.innerHTML =
-    '<div class="adm-welcome">'+_esc((user&&user.email)||'Unknown')
-    +'&nbsp;<span class="adm-session-note">· session expires on tab close</span></div>'
+  el.innerHTML = _admShell(user);
+  _admRenderTab(_admTab);
+  _admStartAutoRefresh();
+}
 
-    +'<div class="adm-section-title">📊 Live Stats</div>'
-    +'<div class="adm-stats-row">'
-    +_admC('👥',stats.totalUsers,'Total users')
-    +_admC('⚡',stats.activeThisWeek,'Active this week')
-    +_admC('✨',(stats.totalXP||0).toLocaleString(),'XP earned')
+function _admShell(user) {
+  var s = _admLastStats;
+  return ''
+    // Persistent mini-stats bar
+    +'<div class="adm-topbar">'
+    +'<div class="adm-topbar-stats">'
+    +'<span class="adm-tbstat">👥 <strong>'+s.totalUsers+'</strong> users</span>'
+    +'<span class="adm-tbsep">·</span>'
+    +'<span class="adm-tbstat">⚡ <strong>'+s.activeThisWeek+'</strong> active</span>'
+    +'<span class="adm-tbsep">·</span>'
+    +'<span class="adm-tbstat">✨ <strong>'+_admShortNum(s.totalXP)+'</strong> XP</span>'
+    +'</div>'
+    +'<span class="adm-topbar-user">'+_esc((user&&user.name||'').split(' ')[0]||'Admin')+'</span>'
     +'</div>'
 
-    +'<div class="adm-section-title">📢 App-Wide Banner</div>'
+    // Tab nav
+    +'<div class="adm-tabs" id="admTabBar">'
+    +[['overview','📊','Overview'],['broadcast','📢','Broadcast'],
+      ['features','🚩','Features'],['content','📚','Content'],
+      ['users','👥','Users'],['clubs','🏫','Clubs'],
+      ['analytics','🔬','Analytics'],['database','🛠','Database'],
+      ['system','⚙','System']]
+    .map(function(t){
+      return '<button class="adm-tab'+(_admTab===t[0]?' adm-tab--active':'')+'" '
+        +'data-tab="'+t[0]+'" onclick="_admSwitchTab(\''+t[0]+'\')" title="'+t[2]+'">'
+        +t[1]+' <span class="adm-tab-label">'+t[2]+'</span></button>';
+    }).join('')
+    +'</div>'
+
+    // Tab content
+    +'<div id="admTabContent"><div class="adm-loading"><div class="club-spinner"></div></div></div>'
+
+    // Footer: activity log + exit
+    +'<div class="adm-footer">'
+    +'<div class="adm-log-wrap"><div class="adm-log-title">Recent activity</div><div id="admLog" class="adm-log"></div></div>'
+    +'<button class="adm-exit-btn" onclick="_adminExit()">🔒 Exit</button>'
+    +'</div>'
+
+    // User profile modal (hidden)
+    +'<div class="adm-user-modal hidden" id="admUserModal">'
+    +'<div class="adm-user-modal-box" id="admUserModalBox"></div>'
+    +'</div>'
+
+    +'<div id="admToast" class="adm-toast hidden"></div>';
+}
+
+function _admRenderTab(tab) {
+  var c = document.getElementById('admTabContent');
+  if (!c) return;
+  c.innerHTML = '<div class="adm-loading"><div class="club-spinner"></div> Loading…</div>';
+  _admLoadTabData(tab).then(function(data){
+    c.innerHTML = _admTabContent(tab, data);
+  });
+}
+
+async function _admLoadTabData(tab) {
+  var data = { stats: _admLastStats, clubs: [], health: [] };
+  if (typeof SupabaseSync !== 'undefined') {
+    if (['overview','users','analytics'].indexOf(tab) !== -1) {
+      data.stats = await SupabaseSync.fetchAdminStats().catch(function(){return _admLastStats;});
+      _admLastStats = data.stats;
+      _admUpdateTopbar();
+    }
+    if (tab==='clubs' && typeof SupabaseSync.fetchClubsWithCounts==='function')
+      data.clubs = await SupabaseSync.fetchClubsWithCounts().catch(function(){return [];});
+    if (tab==='database' && typeof SupabaseSync.fetchTableHealth==='function')
+      data.health = await SupabaseSync.fetchTableHealth().catch(function(){return [];});
+  }
+  return data;
+}
+
+function _admTabContent(tab, data) {
+  var s=data.stats||_admLastStats;
+  if (tab==='overview')  return _admTabOverview(s);
+  if (tab==='broadcast') return _admTabBroadcast();
+  if (tab==='features')  return _admTabFeatures();
+  if (tab==='content')   return _admTabContentTab();
+  if (tab==='users')     return _admTabUsers(s);
+  if (tab==='clubs')     return _admTabClubs(data.clubs||[]);
+  if (tab==='analytics') return _admTabAnalytics(s);
+  if (tab==='database')  return _admTabDatabase(data.health||[]);
+  if (tab==='system')    return _admTabSystem();
+  return '';
+}
+
+function _admSwitchTab(tab) {
+  _admTab = tab;
+  document.querySelectorAll('#admTabBar .adm-tab').forEach(function(b){
+    b.classList.toggle('adm-tab--active', b.dataset.tab===tab);
+  });
+  _admRenderTab(tab);
+}
+
+function _admUpdateTopbar() {
+  var s=_admLastStats;
+  var stats=[['👥',s.totalUsers,'users'],['⚡',s.activeThisWeek,'active'],['✨',_admShortNum(s.totalXP),'XP']];
+  var bar=document.querySelector('.adm-topbar-stats');
+  if (bar) bar.innerHTML=stats.map(function(x,i){
+    return (i>0?'<span class="adm-tbsep">·</span>':'')
+      +'<span class="adm-tbstat">'+x[0]+' <strong>'+x[1]+'</strong> '+x[2]+'</span>';
+  }).join('');
+}
+
+function _admShortNum(n) {
+  if (n>=1000000) return (n/1000000).toFixed(1)+'M';
+  if (n>=1000)    return (n/1000).toFixed(1)+'K';
+  return (n||0).toString();
+}
+
+// ── Auto-refresh ──────────────────────────────────────────────
+function _admStartAutoRefresh() {
+  clearInterval(_admRefreshTimer);
+  _admRefreshTimer = setInterval(function() {
+    if (_admTab==='overview' || _admTab==='users') _admRenderTab(_admTab);
+  }, 60000);
+}
+
+// ── Tab: Overview ─────────────────────────────────────────────
+function _admTabOverview(s) {
+  var fcC=typeof flashcards!=='undefined'?flashcards.length:'—';
+  var csC=typeof cases!=='undefined'?cases.length:'—';
+  var qC=typeof allQuestions!=='undefined'?allQuestions.length:'—';
+  var avgXP=s.totalUsers>0?Math.round((s.totalXP||0)/s.totalUsers):0;
+  var activeRate=s.totalUsers>0?Math.round(s.activeThisWeek/s.totalUsers*100):0;
+
+  return '<div class="adm-overview-grid">'
+    +_admBigStat('👥',s.totalUsers,'Total Users','#7c3aed')
+    +_admBigStat('⚡',s.activeThisWeek,'Active This Week','#0d9488')
+    +_admBigStat('✨',_admShortNum(s.totalXP),'Total XP','#d97706')
+    +_admBigStat('📈',avgXP.toLocaleString(),'Avg XP / User','#059669')
+    +_admBigStat('💯',activeRate+'%','Weekly Retention','#2563eb')
+    +_admBigStat('🃏',fcC,'Flashcards','#7c3aed')
+    +_admBigStat('🩺',csC,'Cases','#0d9488')
+    +_admBigStat('📝',qC,'Quiz Questions','#d97706')
+    +'</div>'
+
+    +'<div class="adm-section-title">🏆 Top Users</div>'
+    +'<div class="adm-card" style="padding:0;overflow:hidden">'
+    +(s.topUsers&&s.topUsers.length
+      ? s.topUsers.slice(0,8).map(function(u,i){
+          return '<div class="adm-user-row" onclick="_admShowUserProfile('+JSON.stringify(u)+')">'
+            +'<span class="adm-rank">'+(i<3?['🥇','🥈','🥉'][i]:'#'+(i+1))+'</span>'
+            +_lbAvatar(u,'adm-u-avatar')
+            +'<div class="adm-top-info"><span class="adm-top-name">'+_esc(u.display_name||'—')+'</span>'
+            +'<span class="adm-top-meta">Lv.'+u.level+(u.streak>1?' · 🔥'+u.streak+'d':'')+'</span></div>'
+            +'<span class="adm-top-xp">'+((u.total_xp||0).toLocaleString())+' XP</span>'
+            +'<span class="adm-row-arrow">›</span>'
+            +'</div>';
+        }).join('')
+      :'<div class="adm-hint" style="padding:16px">No users yet.</div>')
+    +'</div>';
+}
+
+function _admBigStat(icon,val,label,color) {
+  return '<div class="adm-big-stat" style="--stat-color:'+color+'">'
+    +'<div class="adm-big-stat-icon">'+icon+'</div>'
+    +'<div class="adm-big-stat-val">'+val+'</div>'
+    +'<div class="adm-big-stat-lbl">'+label+'</div>'
+    +'</div>';
+}
+
+// ── User profile modal ────────────────────────────────────────
+function _admShowUserProfile(u) {
+  var modal = document.getElementById('admUserModal');
+  var box   = document.getElementById('admUserModalBox');
+  if (!modal||!box) return;
+  box.innerHTML =
+    '<button class="adm-modal-close" onclick="document.getElementById(\'admUserModal\').classList.add(\'hidden\')">✕</button>'
+    +'<div class="adm-user-profile">'
+    +_lbAvatar(u,'adm-profile-avatar')
+    +'<div class="adm-profile-name">'+_esc(u.display_name||'—')+'</div>'
+    +'<div class="adm-profile-meta">Level '+u.level+'</div>'
+    +'</div>'
+    +'<div class="adm-profile-stats">'
+    +_admProfileStat('Total XP',    (u.total_xp||0).toLocaleString())
+    +_admProfileStat('Week XP',     (u.week_xp||0).toLocaleString())
+    +_admProfileStat('Streak',      u.streak>0?'🔥 '+u.streak+' days':'—')
+    +_admProfileStat('Last Active', u.updated_at?_timeAgo(u.updated_at):'—')
+    +'</div>'
+    +'<div class="adm-profile-actions">'
+    +'<button class="adm-action-btn adm-action-btn--warn" style="width:100%" '
+    +'onclick="_admRemoveFromLb('+JSON.stringify(u)+')">Remove from Leaderboard</button>'
+    +'</div>';
+  modal.classList.remove('hidden');
+}
+
+function _admProfileStat(l,v) {
+  return '<div class="adm-profile-stat"><div class="adm-profile-stat-l">'+l+'</div>'
+    +'<div class="adm-profile-stat-v">'+v+'</div></div>';
+}
+
+async function _admRemoveFromLb(u) {
+  if (!confirm('Remove '+u.display_name+' from the leaderboard? Their study data is NOT deleted.')) return;
+  if (typeof SupabaseSync==='undefined'){_admToast('Supabase not ready');return;}
+  var ok = await SupabaseSync.removeFromLeaderboard(u.user_id);
+  document.getElementById('admUserModal').classList.add('hidden');
+  _admLog('Removed '+u.display_name+' from leaderboard');
+  _admToast(ok?'✓ Removed from leaderboard':'✕ Failed');
+  if (ok) _admRenderTab('users');
+}
+
+// ── Tab: Broadcast ────────────────────────────────────────────
+function _admTabBroadcast() {
+  var b = _appConfig.banner       || {enabled:false,text:'',style:'info'};
+  var a = _appConfig.announcement || {enabled:false,text:''};
+
+  return ''
+    // ── Persistent Banner ──
+    +'<div class="adm-section-title">📌 Persistent Top Banner</div>'
+    +'<div class="adm-hint" style="margin-bottom:8px">Always-visible bar at the very top of the screen for all users.</div>'
     +'<div class="adm-card">'
-    +'<div class="adm-row"><span class="adm-label">Visible to all users</span>'
+    +'<div class="adm-field-row">'
+    +'<span class="adm-label">Enabled</span>'
     +'<button class="adm-toggle'+(b.enabled?' adm-toggle--on':'')+'" id="admBannerToggle" '
-    +'onclick="this.classList.toggle(\'adm-toggle--on\');this.textContent=this.classList.contains(\'adm-toggle--on\')?\'ON\':\'OFF\'">'
-    +(b.enabled?'ON':'OFF')+'</button></div>'
-    +'<label class="adm-label" style="display:block;margin:10px 0 4px">Message</label>'
+    +'onclick="this.classList.toggle(\'adm-toggle--on\');this.textContent=this.classList.contains(\'adm-toggle--on\')?\'ON\':\'OFF\';_admUpdateBannerPreview()">'
+    +(b.enabled?'ON':'OFF')+'</button>'
+    +'</div>'
     +'<input class="adm-input" id="admBannerText" type="text" maxlength="200" '
-    +'placeholder="e.g. 🎉 New HOSA cases added!" value="'+_esc(b.text||'')+'">'
-    +'<div class="adm-row" style="margin-top:10px"><span class="adm-label">Style</span>'
-    +'<div class="adm-chip-row" id="admBannerStyle">'
-    +['info','success','warning','error'].map(function(s){
-        return '<button class="adm-chip adm-chip--'+s+(b.style===s?' adm-chip--sel':'')+'" '
-          +'onclick="_admPickStyle(\''+s+'\')" data-style="'+s+'">'+s.charAt(0).toUpperCase()+s.slice(1)+'</button>';
-      }).join('')
-    +'</div></div>'
+    +'placeholder="e.g. 🎉 New HOSA cases added this week!" value="'+_esc(b.text||'')+'" '
+    +'oninput="_admUpdateBannerPreview()" style="margin-top:8px">'
+    +'<div class="adm-chip-row" id="admBannerStyle" style="margin-top:8px">'
+    +[['info','🔵 Info'],['success','🟢 Success'],['warning','🟡 Warning'],['error','🔴 Alert']].map(function(s){
+        return '<button class="adm-chip adm-chip--'+s[0]+(b.style===s[0]?' adm-chip--sel':'')+'" '
+          +'onclick="_admPickStyle(\''+s[0]+'\');_admUpdateBannerPreview()" data-style="'+s[0]+'">'+s[1]+'</button>';
+    }).join('')+'</div>'
+    +'<div class="adm-preview-label">Preview</div>'
+    +'<div id="admBannerPreview" class="adm-preview-box">'
+    +(b.enabled&&b.text?'<div class="admin-banner admin-banner--'+b.style+'" style="position:relative;padding:10px 16px;border-radius:8px">'+_esc(b.text)+'</div>':'<em style="color:var(--text-muted);font-size:.78rem">Banner hidden — type a message above</em>')
+    +'</div>'
     +'<button class="adm-save-btn" onclick="_admSaveBanner()">💾 Save Banner</button>'
     +'</div>'
 
-    +'<div class="adm-section-title">🚩 Feature Flags</div>'
+    // ── Home Announcement ──
+    +'<div class="adm-section-title" style="margin-top:18px">📣 Home Screen Announcement</div>'
+    +'<div class="adm-hint" style="margin-bottom:8px">Shown as a dismissible card on the home screen. Users can close it — great for one-time notices.</div>'
     +'<div class="adm-card">'
-    +_admFlag('Leaderboard visible',    'leaderboard',    f.leaderboard    !==false)
-    +_admFlag('Club Dashboard visible', 'clubs',          f.clubs          !==false)
-    +_admFlag('Case Mode Background',   'caseBackground', f.caseBackground !==false)
-    +_admFlag('🚨 Maintenance Mode',   'maintenanceMode',!!f.maintenanceMode,true)
+    +'<div class="adm-field-row">'
+    +'<span class="adm-label">Enabled</span>'
+    +'<button class="adm-toggle'+(a.enabled?' adm-toggle--on':'')+'" id="admAnnToggle" '
+    +'onclick="this.classList.toggle(\'adm-toggle--on\');this.textContent=this.classList.contains(\'adm-toggle--on\')?\'ON\':\'OFF\'">'
+    +(a.enabled?'ON':'OFF')+'</button>'
     +'</div>'
-
-    +'<div class="adm-section-title">🏆 Top Users (All Time)</div>'
-    +'<div class="adm-card">'
-    +(stats.topUsers.length
-      ? '<div class="adm-top-list">'+stats.topUsers.slice(0,5).map(function(u,i){
-          return '<div class="adm-top-row"><span class="adm-rank">#'+(i+1)+'</span>'
-            +'<span class="adm-top-name">'+_esc(u.display_name||'—')+'</span>'
-            +'<span class="adm-top-xp">'+((u.total_xp||0).toLocaleString())+' XP</span>'
-            +'<span class="adm-lv">Lv.'+u.level+'</span>'
-            +(u.streak>1?'<span class="adm-streak">🔥'+u.streak+'</span>':'')
-            +'</div>';
-        }).join('')+'</div>'
-      :'<div class="adm-hint">No leaderboard data yet.</div>')
-    +'<button class="adm-action-btn adm-action-btn--warn" '
-    +'onclick="_admResetWeekly()" style="margin-top:12px">🔄 Reset ALL Weekly XP — start a fresh leaderboard week</button>'
-    +'</div>'
-
-    +'<div class="adm-section-title">⚡ Quick Actions</div>'
-    +'<div class="adm-card adm-card--actions">'
-    +'<button class="adm-action-btn" onclick="_admForceSync()">🔄 Force Google Sheet Sync</button>'
-    +'<button class="adm-action-btn" onclick="_admClearCaches()">🗑 Clear Service Worker Caches</button>'
-    +'<button class="adm-action-btn" onclick="_adminRender()">↩ Refresh This Panel</button>'
-    +'</div>'
-
-    +'<div class="adm-section-title">🔑 Access Config</div>'
-    +'<div class="adm-card">'
-    +(ADMIN_EMAILS.length
-      ? ADMIN_EMAILS.map(function(e){return '<div class="adm-email">✓ '+_esc(e)+'</div>';}).join('')
-      :'<div class="adm-hint adm-hint--warn">⚠ No emails in ADMIN_EMAILS. Add yours to script.js to lock access.</div>')
-    +'<div class="adm-hint" style="margin-top:10px">PIN hash: <code class="adm-code">'+ADMIN_PIN_HASH.slice(0,16)+'…</code></div>'
-    +'<div class="adm-hint">Change PIN: <code>echo -n "newpin" | shasum -a 256</code> → paste into ADMIN_PIN_HASH</div>'
-    +'</div>'
-
-    +'<div id="admToast" class="adm-toast hidden"></div>'
-    +'<button class="adm-exit-btn" onclick="_adminExit()">🔒 Exit Admin Mode</button>'
-    +'<div style="height:60px"></div>';
+    +'<textarea class="adm-textarea" id="admAnnText" maxlength="300" rows="3" '
+    +'placeholder="e.g. HOSA Regionals is next Friday! Make sure to review CPR and Medical Terminology 💪">'+_esc(a.text||'')+'</textarea>'
+    +'<button class="adm-save-btn" onclick="_admSaveAnnouncement()">💾 Save Announcement</button>'
+    +'</div>';
 }
 
+function _admUpdateBannerPreview() {
+  var text    = (document.getElementById('admBannerText')||{}).value||'';
+  var tog     = document.getElementById('admBannerToggle');
+  var enabled = tog && tog.classList.contains('adm-toggle--on');
+  var sel     = document.querySelector('#admBannerStyle .adm-chip--sel');
+  var style   = sel ? sel.dataset.style : 'info';
+  var prev    = document.getElementById('admBannerPreview');
+  if (!prev) return;
+  prev.innerHTML = (enabled && text)
+    ? '<div class="admin-banner admin-banner--'+style+'" style="position:relative;padding:10px 16px;border-radius:8px">'+_esc(text)+'</div>'
+    : '<em style="color:var(--text-muted);font-size:.78rem">Banner hidden — turn on and type a message</em>';
+}
+
+async function _admSaveBanner() {
+  var text    = ((document.getElementById('admBannerText')||{}).value||'').trim();
+  var tog     = document.getElementById('admBannerToggle');
+  var enabled = tog && tog.classList.contains('adm-toggle--on');
+  var sel     = document.querySelector('#admBannerStyle .adm-chip--sel');
+  var style   = sel ? sel.dataset.style : 'info';
+  var val     = {enabled:enabled, text:text, style:style};
+  _appConfig.banner = val; _applyAppConfig();
+  if (typeof SupabaseSync!=='undefined') await SupabaseSync.saveAppConfig('banner', val);
+  _admLog(enabled ? 'Banner enabled: "'+text.slice(0,30)+'"' : 'Banner disabled');
+  _admToast(enabled ? '✓ Banner live' : '✓ Banner hidden');
+}
+
+async function _admSaveAnnouncement() {
+  var text    = ((document.getElementById('admAnnText')||{}).value||'').trim();
+  var tog     = document.getElementById('admAnnToggle');
+  var enabled = tog && tog.classList.contains('adm-toggle--on');
+  var val     = {enabled:enabled, text:text, id:'ann_'+Date.now()};
+  _appConfig.announcement = val;
+  if (typeof SupabaseSync!=='undefined') await SupabaseSync.saveAppConfig('announcement', val);
+  // Apply immediately for this session
+  _admApplyAnnouncement(val);
+  _admLog(enabled ? 'Announcement posted' : 'Announcement hidden');
+  _admToast(enabled ? '✓ Announcement live' : '✓ Announcement hidden');
+}
+
+function _admApplyAnnouncement(a) {
+  var el = document.getElementById('homeAnnouncement');
+  if (!el) return;
+  if (a && a.enabled && a.text) {
+    el.innerHTML = '<div class="home-ann-inner"><span>📣 '+_esc(a.text)+'</span>'
+      +'<button onclick="this.parentElement.parentElement.classList.add(\'hidden\');try{localStorage.setItem(\'mp_ann_dismissed\',\''+a.id+'\');}catch(e){}">✕</button></div>';
+    el.classList.remove('hidden');
+  } else { el.classList.add('hidden'); }
+}
+
+// ── Tab: Features ─────────────────────────────────────────────
+function _admTabFeatures() {
+  var f=_appConfig.features||{leaderboard:true,clubs:true,caseBackground:true,maintenanceMode:false};
+  return '<div class="adm-section-title">🚩 Feature Flags</div>'
+    +'<div class="adm-hint" style="margin-bottom:10px">All changes save instantly to Supabase and apply on next page load for all users. No redeploy needed.</div>'
+    +'<div class="adm-card">'
+    +_admFlag('Leaderboard Screen',               'leaderboard',    f.leaderboard!==false)
+    +_admFlag('Club Dashboard',                   'clubs',          f.clubs!==false)
+    +_admFlag('Case Mode background illustration','caseBackground', f.caseBackground!==false)
+    +_admFlag('🚨 Maintenance Mode',             'maintenanceMode', !!f.maintenanceMode, true)
+    +'</div>';
+}
+
+// ── Tab: Content ──────────────────────────────────────────────
+function _admTabContentTab() {
+  var fcC=typeof flashcards!=='undefined'?flashcards.length:0;
+  var csC=typeof cases!=='undefined'?cases.length:0;
+  var qC=typeof allQuestions!=='undefined'?allQuestions.length:0;
+  var sheetId=''; try{sheetId=localStorage.getItem('medpath_sheet_id')||'';}catch(e){}
+  return '<div class="adm-overview-grid" style="grid-template-columns:repeat(3,1fr)">'
+    +_admBigStat('🃏',fcC,'Flashcards','#7c3aed')
+    +_admBigStat('🩺',csC,'Cases','#0d9488')
+    +_admBigStat('📝',qC,'Quiz Qs','#d97706')
+    +'</div>'
+    +'<div class="adm-section-title" style="margin-top:14px">🔗 Google Sheet ID</div>'
+    +'<div class="adm-card">'
+    +'<div class="adm-hint" style="margin-bottom:8px">Paste the ID from your Google Sheet URL (the long string between /d/ and /edit).</div>'
+    +'<input class="adm-input" id="admSheetId" type="text" placeholder="e.g. 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms" value="'+_esc(sheetId)+'">'
+    +'<div class="adm-form-btns">'
+    +'<button class="adm-save-btn" style="flex:1" onclick="_admSaveSheetId()">💾 Save</button>'
+    +'<button class="adm-action-btn" onclick="_admForceSync()">🔄 Sync Now</button>'
+    +'</div></div>'
+    +'<div class="adm-section-title" style="margin-top:14px">📋 Category Breakdown</div>'
+    +'<div class="adm-card" style="max-height:260px;overflow-y:auto">'+_admCatBreakdown()+'</div>';
+}
+
+function _admCatBreakdown() {
+  if (typeof flashcards==='undefined'||!flashcards.length) return '<div class="adm-hint">Flashcards not loaded.</div>';
+  var cats={};
+  flashcards.forEach(function(f){cats[f.cat]=(cats[f.cat]||0)+1;});
+  var sorted=Object.entries(cats).sort(function(a,b){return b[1]-a[1];});
+  var max=sorted[0][1];
+  return sorted.map(function(e){
+    return '<div class="adm-cat-row"><span class="adm-cat-name">'+_esc(e[0])+'</span>'
+      +'<div class="adm-cat-bar-wrap"><div class="adm-cat-bar" style="width:'+Math.round(e[1]/max*100)+'%"></div></div>'
+      +'<span class="adm-cat-count">'+e[1]+'</span></div>';
+  }).join('');
+}
+
+// ── Tab: Users ────────────────────────────────────────────────
+function _admTabUsers(s) {
+  return '<div class="adm-section-title">🔍 Search Users</div>'
+    +'<div class="adm-card">'
+    +'<div class="adm-form-btns">'
+    +'<input class="adm-input" id="admUserSearch" type="text" placeholder="Search by display name…" style="flex:1" '
+    +'onkeydown="if(event.key===\'Enter\')_admSearchUsers()">'
+    +'<button class="adm-save-btn" style="padding:0 16px" onclick="_admSearchUsers()">Search</button>'
+    +'</div>'
+    +'<div id="admUserSearchResults" style="margin-top:8px"></div>'
+    +'</div>'
+    +'<div class="adm-section-title" style="margin-top:14px">🏅 Top 10 — All Time</div>'
+    +'<div class="adm-card" style="padding:0;overflow:hidden">'
+    +(s.topUsers&&s.topUsers.length
+      ? s.topUsers.slice(0,10).map(function(u,i){
+          return '<div class="adm-user-row" onclick="_admShowUserProfile('+JSON.stringify(u)+')">'
+            +'<span class="adm-rank">'+(i<3?['🥇','🥈','🥉'][i]:'#'+(i+1))+'</span>'
+            +_lbAvatar(u,'adm-u-avatar')
+            +'<div class="adm-top-info"><span class="adm-top-name">'+_esc(u.display_name||'—')+'</span>'
+            +'<span class="adm-top-meta">Lv.'+u.level+(u.streak>1?' · 🔥'+u.streak+'d':'')+'</span></div>'
+            +'<span class="adm-top-xp">'+((u.total_xp||0).toLocaleString())+' XP</span>'
+            +'<span class="adm-row-arrow">›</span></div>';
+        }).join('')
+      :'<div class="adm-hint" style="padding:16px">No users yet.</div>')
+    +'</div>'
+    +'<div class="adm-form-btns" style="margin-top:10px">'
+    +'<button class="adm-action-btn adm-action-btn--warn" onclick="_admResetWeekly()">🔄 Reset Weekly XP</button>'
+    +'<button class="adm-action-btn" onclick="_admExportUsers()">⬇ Export CSV</button>'
+    +'</div>';
+}
+
+async function _admSearchUsers() {
+  var q=((document.getElementById('admUserSearch')||{}).value||'').trim();
+  var res=document.getElementById('admUserSearchResults');
+  if (!res) return;
+  if (!q) {res.innerHTML='';return;}
+  res.innerHTML='<div class="adm-hint">Searching…</div>';
+  if (typeof SupabaseSync==='undefined'||typeof SupabaseSync.searchUsers!=='function'){
+    res.innerHTML='<div class="adm-hint">Search unavailable.</div>'; return;
+  }
+  var rows=await SupabaseSync.searchUsers(q);
+  if (!rows||!rows.length){res.innerHTML='<div class="adm-hint">No results for "'+_esc(q)+'"</div>';return;}
+  res.innerHTML='<div style="padding-top:6px">'+rows.map(function(u){
+    return '<div class="adm-user-row" onclick="_admShowUserProfile('+JSON.stringify(u)+')">'
+      +_lbAvatar(u,'adm-u-avatar')
+      +'<div class="adm-top-info"><span class="adm-top-name">'+_esc(u.display_name||'—')+'</span>'
+      +'<span class="adm-top-meta">Lv.'+u.level+'</span></div>'
+      +'<span class="adm-top-xp">'+((u.total_xp||0).toLocaleString())+' XP</span>'
+      +'<span class="adm-row-arrow">›</span></div>';
+  }).join('')+'</div>';
+}
+
+function _admExportUsers() {
+  if (typeof SupabaseSync==='undefined'){_admToast('Supabase not ready');return;}
+  SupabaseSync.fetchLeaderboard('total_xp').then(function(rows){
+    if (!rows||!rows.length){_admToast('No data to export');return;}
+    var csv='Name,Level,Total XP,Week XP,Streak\n'
+      +rows.map(function(r){return [r.display_name,r.level,r.total_xp,r.week_xp,r.streak].join(',');}).join('\n');
+    var a=document.createElement('a');
+    a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(csv);
+    a.download='medpath-users-'+new Date().toISOString().slice(0,10)+'.csv';
+    a.click();
+    _admLog('Exported '+rows.length+' users as CSV');
+    _admToast('✓ Downloaded '+rows.length+' users');
+  });
+}
+
+// ── Tab: Clubs ────────────────────────────────────────────────
+function _admTabClubs(clubs) {
+  var totalMembers=clubs.reduce(function(s,c){return s+(c.member_count||0);},0);
+  return '<div class="adm-overview-grid" style="grid-template-columns:repeat(2,1fr)">'
+    +_admBigStat('🏫',clubs.length,'Clubs','#7c3aed')
+    +_admBigStat('👥',totalMembers,'Total Members','#0d9488')
+    +'</div>'
+    +'<div class="adm-section-title" style="margin-top:14px">All Clubs</div>'
+    +(clubs.length
+      ?'<div class="adm-card" style="padding:0;overflow:hidden">'
+        +clubs.map(function(c){
+          return '<div class="adm-user-row" style="cursor:default">'
+            +'<div class="adm-top-info"><span class="adm-top-name">'+_esc(c.name)+'</span>'
+            +'<span class="adm-top-meta">Created '+_timeAgo(c.created_at)+'</span></div>'
+            +'<code class="adm-code" style="font-size:.72rem">'+_esc(c.join_code)+'</code>'
+            +'<span class="adm-top-xp" style="font-size:.78rem">'+((c.member_count||0)+' 👥')+'</span></div>';
+        }).join('')+'</div>'
+      :'<div class="adm-hint" style="margin-top:10px">No clubs yet.</div>')
+    +'<button class="adm-action-btn" style="margin-top:10px;display:block;width:100%" onclick="_admSwitchTab(\'clubs\')">↩ Refresh</button>';
+}
+
+// ── Tab: Analytics ────────────────────────────────────────────
+function _admTabAnalytics(s) {
+  var avgXP=s.totalUsers>0?Math.round((s.totalXP||0)/s.totalUsers):0;
+  var activeRate=s.totalUsers>0?Math.round(s.activeThisWeek/s.totalUsers*100):0;
+  var topStreak=(s.topUsers&&s.topUsers.length)?Math.max.apply(null,s.topUsers.map(function(u){return u.streak||0;})):0;
+  var lvDist={};
+  (s.topUsers||[]).forEach(function(u){var k='Lv.'+u.level;lvDist[k]=(lvDist[k]||0)+1;});
+  var lvEntries=Object.entries(lvDist).sort(function(a,b){return parseInt(b[0].slice(3))-parseInt(a[0].slice(3));});
+
+  return '<div class="adm-overview-grid">'
+    +_admBigStat('📊',avgXP.toLocaleString(),'Avg XP / User','#7c3aed')
+    +_admBigStat('💯',activeRate+'%','Weekly Active Rate','#0d9488')
+    +_admBigStat('🔥',topStreak+'d','Longest Streak','#d97706')
+    +_admBigStat('😴',(s.totalUsers-s.activeThisWeek),'Inactive Users','#64748b')
+    +'</div>'
+    +'<div class="adm-section-title" style="margin-top:14px">💡 Automated Insights</div>'
+    +'<div class="adm-card">'
+    +(activeRate>=60?'<div class="adm-insight adm-insight--good">✅ Strong retention — '+activeRate+'% of users studied this week. Great job!</div>'
+      :activeRate>=30?'<div class="adm-insight adm-insight--warn">⚠ Moderate retention ('+activeRate+'%) — consider posting a home screen announcement to re-engage students.</div>'
+      :'<div class="adm-insight adm-insight--bad">🚨 Low weekly activity ('+activeRate+'%) — most users aren\'t opening the app. Try a new announcement.</div>')
+    +(avgXP>1000?'<div class="adm-insight adm-insight--good" style="margin-top:6px">✅ Healthy average XP ('+avgXP.toLocaleString()+'). Students are actively studying.</div>'
+      :avgXP>200?'<div class="adm-insight adm-insight--warn" style="margin-top:6px">📉 Low average XP ('+avgXP.toLocaleString()+'). Most users may just be browsing.</div>'
+      :'<div class="adm-insight adm-insight--bad" style="margin-top:6px">📉 Very low avg XP ('+avgXP.toLocaleString()+'). Users may not have started studying yet.</div>')
+    +'</div>'
+    +'<div class="adm-section-title" style="margin-top:14px">📊 Level Distribution</div>'
+    +'<div class="adm-card">'
+    +(lvEntries.length
+      ?lvEntries.map(function(e){
+        return '<div class="adm-cat-row"><span class="adm-cat-name">'+e[0]+'</span>'
+          +'<div class="adm-cat-bar-wrap"><div class="adm-cat-bar" style="width:'+Math.round(e[1]/Math.max.apply(null,lvEntries.map(function(x){return x[1];}))*100)+'%"></div></div>'
+          +'<span class="adm-cat-count">'+e[1]+'</span></div>';
+      }).join('')
+      :'<div class="adm-hint">No user data yet.</div>')
+    +'</div>';
+}
+
+// ── Tab: Database ─────────────────────────────────────────────
+function _admTabDatabase(health) {
+  var allOk=health.length>0&&health.every(function(t){return !t.error;});
+  return (allOk?'<div class="adm-insight adm-insight--good" style="margin-bottom:12px">✅ All tables healthy — '+health.length+' tables OK</div>'
+    :health.length?'<div class="adm-insight adm-insight--warn" style="margin-bottom:12px">⚠ Some tables have issues — check below</div>':'')
+    +'<div class="adm-section-title">🛠 Table Status</div>'
+    +(health.length
+      ?'<div class="adm-card" style="padding:0;overflow:hidden">'
+        +health.map(function(t){
+          return '<div class="adm-user-row" style="cursor:default">'
+            +'<span style="font-size:1rem">'+((!t.error)?'✅':'❌')+'</span>'
+            +'<div class="adm-top-info"><span class="adm-top-name adm-code" style="font-size:.78rem">'+_esc(t.table)+'</span>'
+            +(t.error?'<span class="adm-top-meta" style="color:#dc2626">'+_esc(t.error)+'</span>':'')
+            +'</div>'
+            +(t.count!==null&&t.count!==undefined&&!t.error?'<span class="adm-cat-count">'+t.count+' rows</span>':'')
+            +'</div>';
+        }).join('')+'</div>'
+      :'<div class="adm-card"><div class="adm-hint">Click Run Health Check to ping all tables.</div></div>')
+    +'<button class="adm-action-btn" style="margin-top:10px;display:block;width:100%" onclick="_admSwitchTab(\'database\')">🔄 Run Health Check</button>'
+    +'<div class="adm-section-title" style="margin-top:14px">📋 Required Schema Files</div>'
+    +'<div class="adm-card"><div style="font-size:.75rem;line-height:2;color:var(--text-secondary)">'
+    +['schema.sql','schema_leaderboard.sql','schema_clubs.sql','schema_announcements.sql','schema_admin.sql']
+    .map(function(f,i){
+      var found=health.find(function(h){return h.table===['user_progress','leaderboard','clubs','announcements','app_config'][i]&&!h.error;});
+      return (found?'✅':'❌')+' <code class="adm-code">'+f+'</code>';
+    }).join('<br>')+'</div></div>';
+}
+
+// ── Tab: System ───────────────────────────────────────────────
+function _admTabSystem() {
+  return '<div class="adm-section-title">⚡ Quick Actions</div>'
+    +'<div class="adm-card adm-card--actions">'
+    +'<button class="adm-action-btn" onclick="_admForceSync()">🔄 Force Google Sheet Sync</button>'
+    +'<button class="adm-action-btn" onclick="_admClearCaches()">🗑 Clear All Service Worker Caches</button>'
+    +'<button class="adm-action-btn" onclick="_adminRender()">↩ Reload Admin Panel</button>'
+    +'</div>'
+    +'<div class="adm-section-title" style="margin-top:14px">🔑 Access Config</div>'
+    +'<div class="adm-card">'
+    +(ADMIN_EMAILS.length
+      ?ADMIN_EMAILS.map(function(e){return '<div class="adm-email">✓ '+_esc(e)+'</div>';}).join('')
+      :'<div class="adm-hint adm-hint--warn">⚠ ADMIN_EMAILS is empty in script.js</div>')
+    +'<div class="adm-hint" style="margin-top:8px">PIN hash: <code class="adm-code">'+ADMIN_PIN_HASH.slice(0,16)+'…</code></div>'
+    +'<div class="adm-hint">Change PIN: <code>echo -n "yourpin" | shasum -a 256</code> → paste into ADMIN_PIN_HASH</div>'
+    +'</div>'
+    +'<div class="adm-section-title" style="margin-top:14px">📱 Live App Stats</div>'
+    +'<div class="adm-card">'
+    +[['Flashcards loaded',typeof flashcards!=='undefined'?flashcards.length:0],
+      ['Cases loaded',typeof cases!=='undefined'?cases.length:0],
+      ['Quiz questions',typeof allQuestions!=='undefined'?allQuestions.length:0],
+      ['SW Cache version','medpath-v1'],
+      ['Supabase connected',typeof SupabaseSync!=='undefined'?'Yes':'No']]
+    .map(function(r){
+      return '<div class="adm-user-row" style="cursor:default"><span class="adm-top-name">'+r[0]+'</span>'
+        +'<span class="adm-top-xp" style="font-size:.8rem">'+r[1]+'</span></div>';
+    }).join('')+'</div>';
+}
+
+// ── Shared action handlers ────────────────────────────────────
 function _admC(ic,v,l){ return '<div class="adm-stat"><div class="adm-stat-icon">'+ic+'</div><div class="adm-stat-val">'+v+'</div><div class="adm-stat-lbl">'+l+'</div></div>'; }
-function _admFlag(label,key,on,danger){
+
+function _admFlag(label,key,on,danger) {
   return '<div class="adm-row adm-row--flag">'
     +'<span class="adm-label'+(danger?' adm-label--danger':'')+'">'+label+'</span>'
     +'<button class="adm-toggle'+(on?' adm-toggle--on':'')+(danger?' adm-toggle--danger':'')+'" '
-    +'id="admFlag_'+key+'" onclick="_admSaveFlag(\''+key+'\',this)">'+(on?'ON':'OFF')+'</button>'
-    +'</div>';
+    +'id="admFlag_'+key+'" onclick="_admSaveFlag(\''+key+'\',this)">'+(on?'ON':'OFF')+'</button></div>';
 }
+
 function _admPickStyle(s){ document.querySelectorAll('#admBannerStyle .adm-chip').forEach(function(b){b.classList.toggle('adm-chip--sel',b.dataset.style===s);}); }
 
-async function _admSaveBanner() {
-  var text    = (document.getElementById('admBannerText')||{}).value||'';
-  var enabled = !!(document.getElementById('admBannerToggle')||{}).classList && document.getElementById('admBannerToggle').classList.contains('adm-toggle--on');
-  var sel     = document.querySelector('#admBannerStyle .adm-chip--sel');
-  var style   = sel ? sel.dataset.style : 'info';
-  var val     = {enabled:enabled,text:text,style:style};
-  _appConfig.banner = val; _applyAppConfig();
-  if (typeof SupabaseSync!=='undefined') await SupabaseSync.saveAppConfig('banner',val);
-  _admToast(enabled?'✓ Banner live: "'+text.slice(0,50)+'"':'✓ Banner hidden');
+async function _admSaveFlag(key,btn) {
+  var next=!btn.classList.contains('adm-toggle--on');
+  btn.classList.toggle('adm-toggle--on',next); btn.textContent=next?'ON':'OFF';
+  if(!_appConfig.features)_appConfig.features={};
+  _appConfig.features[key]=next; _applyAppConfig();
+  if(typeof SupabaseSync!=='undefined') await SupabaseSync.saveAppConfig('features',_appConfig.features);
+  _admLog(key+' → '+(next?'enabled':'disabled'));
+  _admToast('✓ '+key+' '+(next?'enabled':'disabled'));
 }
 
-async function _admSaveFlag(key,btn) {
-  var next = !btn.classList.contains('adm-toggle--on');
-  btn.classList.toggle('adm-toggle--on',next); btn.textContent=next?'ON':'OFF';
-  if (!_appConfig.features) _appConfig.features={};
-  _appConfig.features[key]=next; _applyAppConfig();
-  if (typeof SupabaseSync!=='undefined') await SupabaseSync.saveAppConfig('features',_appConfig.features);
-  _admToast('✓ '+key+' → '+(next?'enabled':'disabled'));
+function _admSaveSheetId() {
+  var id=((document.getElementById('admSheetId')||{}).value||'').trim();
+  try{localStorage.setItem('medpath_sheet_id',id);}catch(e){}
+  _admLog('Sheet ID updated');
+  _admToast(id?'✓ Sheet ID saved — click Sync Now to apply':'✓ Cleared');
+}
+
+async function _admRemoveFromLb(u) {
+  if(!confirm('Remove '+u.display_name+' from the leaderboard?')) return;
+  if(typeof SupabaseSync==='undefined'){_admToast('Supabase not ready');return;}
+  var ok=typeof SupabaseSync.removeFromLeaderboard==='function'?await SupabaseSync.removeFromLeaderboard(u.user_id):false;
+  document.getElementById('admUserModal').classList.add('hidden');
+  _admLog('Removed '+u.display_name+' from leaderboard');
+  _admToast(ok?'✓ Removed':'✕ Failed'); if(ok) _admRenderTab('users');
 }
 
 async function _admResetWeekly() {
-  if (!confirm('Reset every user\'s weekly XP to zero? This starts a fresh leaderboard week.')) return;
-  if (typeof SupabaseSync==='undefined') { _admToast('Supabase not configured'); return; }
-  var ok = await SupabaseSync.resetWeeklyXP();
-  _admToast(ok?'✓ Weekly XP reset for all users':'✕ Failed — check Supabase permissions');
-  if (ok) setTimeout(_adminRender,1200);
+  if(!confirm('Reset ALL users\' weekly XP? Starts a fresh leaderboard week.')) return;
+  if(typeof SupabaseSync==='undefined'){_admToast('Supabase not ready');return;}
+  var ok=await SupabaseSync.resetWeeklyXP();
+  _admLog(ok?'Weekly XP reset for all users':'Weekly XP reset failed');
+  _admToast(ok?'✓ Weekly XP reset':'✕ Failed');
+  if(ok) setTimeout(function(){_admSwitchTab('users');},1200);
 }
 
 function _admForceSync() {
-  if (typeof MedPathContent==='undefined') { _admToast('Content loader not configured'); return; }
-  MedPathContent.refresh().then(function(r){ _admToast(r.ok?'✓ Synced':'✕ Failed: '+(r.error||'')); });
+  if(typeof MedPathContent==='undefined'){_admToast('Content loader not found');return;}
+  _admToast('Syncing…'); _admLog('Force sync started');
+  MedPathContent.refresh().then(function(r){
+    _admLog(r&&r.ok?'Content synced':'Sync failed');
+    _admToast(r&&r.ok?'✓ Content synced':'✕ Sync failed: '+(r&&r.error||''));
+  });
 }
 
 function _admClearCaches() {
-  if (!('caches' in window)) { _admToast('Cache API unavailable'); return; }
-  caches.keys().then(function(keys){ return Promise.all(keys.map(function(k){return caches.delete(k);})); })
-    .then(function(){ _admToast('✓ All caches cleared'); });
+  if(!('caches' in window)){_admToast('Cache API unavailable');return;}
+  caches.keys().then(function(k){return Promise.all(k.map(function(x){return caches.delete(x);}));})
+    .then(function(){_admLog('Service worker caches cleared');_admToast('✓ All caches cleared');});
 }
 
 function _admToast(msg) {
-  var t = document.getElementById('admToast');
-  if (!t) return;
+  var t=document.getElementById('admToast');
+  if(!t) return;
   t.textContent=msg; t.classList.remove('hidden');
   clearTimeout(t._tmr); t._tmr=setTimeout(function(){t.classList.add('hidden');},3000);
 }
+
 
 // ─────────────────────────────────────────
 //  HOSA EVENTS

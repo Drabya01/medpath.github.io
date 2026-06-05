@@ -52,6 +52,7 @@
 
 
 
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -98,8 +99,11 @@
   </div>
 </head>
 <body>
-  <!-- ── Admin: app-wide banner (controlled from admin panel) ── -->
+  <!-- ── Admin: app-wide banner ── -->
   <div id="adminBanner" class="admin-banner hidden"></div>
+
+  <!-- ── Home screen announcement (dismissible, admin-controlled) ── -->
+  <div id="homeAnnouncement" class="home-ann hidden"></div>
 
   <!-- ── Admin: PIN entry modal ────────────────────────────── -->
   <div id="adminPinModal" class="admin-pin-overlay hidden" onclick="if(event.target===this)_adminCancelPin()">
