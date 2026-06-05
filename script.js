@@ -49,6 +49,52 @@ function _afterShowScreen(id) {
   if (id === 'club')        { if (typeof initClubScreen === 'function') initClubScreen(); }
 }
 
+// ── App-wide config (feature flags + banner) ──────────────────
+var _appConfig = { banner: {}, features: {} };
+
+async function loadAppConfig() {
+  if (typeof SupabaseSync === 'undefined') return;
+  try {
+    var cfg = await SupabaseSync.fetchAppConfig();
+    if (cfg.banner)   _appConfig.banner   = cfg.banner;
+    if (cfg.features) _appConfig.features = cfg.features;
+    _applyAppConfig();
+  } catch(_) {}
+}
+
+function _applyAppConfig() {
+  // ── App-wide banner ───────────────────────────────────────
+  var bannerEl = document.getElementById('adminBanner');
+  if (bannerEl) {
+    var b = _appConfig.banner || {};
+    if (b.enabled && b.text) {
+      bannerEl.textContent = b.text;
+      bannerEl.className   = 'admin-banner admin-banner--' + (b.style || 'info');
+      bannerEl.classList.remove('hidden');
+    } else {
+      bannerEl.classList.add('hidden');
+    }
+  }
+
+  // ── Maintenance mode ──────────────────────────────────────
+  var isAdmin = _adminIsAllowed();
+  var maint   = (_appConfig.features || {}).maintenanceMode;
+  var maintEl = document.getElementById('adminMaintOverlay');
+  if (maintEl) maintEl.classList.toggle('hidden', !maint || isAdmin);
+
+  // ── Feature visibility ────────────────────────────────────
+  var feats = _appConfig.features || {};
+  _setFeatureVisible('mc--leaderboard-card', feats.leaderboard !== false);
+  _setFeatureVisible('mc--club-card',        feats.clubs       !== false);
+  // Case background is toggled via CSS class on body
+  document.body.classList.toggle('no-case-bg', feats.caseBackground === false);
+}
+
+function _setFeatureVisible(id, visible) {
+  var el = document.getElementById(id);
+  if (el) el.style.display = visible ? '' : 'none';
+}
+
 function resetQuizToStart() {
   // Always return to the mode picker when entering quiz from outside
   const picker   = document.getElementById('quiz-picker');
@@ -9044,16 +9090,15 @@ async function init() {
   sm2Load();
   SupabaseSync.init(); // set up Supabase client (no-op if not configured)
 
+  // Load app-wide config (feature flags, banner) — non-blocking
+  loadAppConfig().catch(function(){});
+
   // Load external content from Google Sheets (if configured).
-  // This await resolves immediately when using cached data or
-  // when not configured — it only blocks on a first-ever cold fetch.
   await MedPathContent.load(function onBackgroundRefresh() {
-    // Called when a background re-fetch completes after serving from cache.
-    // Rebuild derived state so new content shows without a page reload.
     allCategories = ['All', 'Saved ⭐', ...new Set(flashcards.map(f => f.cat))];
     initDiffCounts();
     renderFCCategories();
-    renderContentStatus(); // update the Settings panel badge
+    renderContentStatus();
   });
   loadProgressData();
   updateStreak();
@@ -9066,11 +9111,259 @@ async function init() {
   initSettings();
   loadCustomCards();
   showScreen('home');
+  _adminInitLogoTap(); // attach triple-click admin access to the logo
   // Inject My Cards tabs after DOM is ready
   requestAnimationFrame(initCustomCardsTabs);
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
+// ══════════════════════════════════════════════════════════════
+//  🔐 ADMIN PANEL
+//  Access: triple-click the MedPath logo
+//  Security: email allowlist + SHA-256 PIN (never stored plaintext)
+//  Session: clears when tab closes (sessionStorage)
+// ══════════════════════════════════════════════════════════════
+
+// ── CONFIG — edit these two constants ────────────────────────
+
+/** Emails that may access the admin panel. */
+var ADMIN_EMAILS = [
+  // 'yourname@gmail.com',
+  // 'codeveloper@gmail.com',
+];
+
+/**
+ * SHA-256 hash of your admin PIN.
+ * Default PIN = medpath2025
+ * To use your own:  echo -n "yourpin" | shasum -a 256  (Mac/Linux)
+ * Paste the 64-char hex string below.
+ */
+var ADMIN_PIN_HASH = '9f3a18e7c5a0fd9b07a620e7977d7c6ad27337fe887eea4cf559c61a312c18db';
+
+// ── Internal ─────────────────────────────────────────────────
+var _adminLogoTaps = 0, _adminLogoTimer = null;
+
+function _adminIsAllowed() {
+  var u = typeof getCurrentUser === 'function' ? getCurrentUser() : null;
+  return !!(u && u.email && ADMIN_EMAILS.indexOf(u.email.toLowerCase()) !== -1);
+}
+
+function _adminInitLogoTap() {
+  var logo = document.querySelector('.nav-logo');
+  if (!logo) return;
+  logo.addEventListener('click', function() {
+    _adminLogoTaps++;
+    clearTimeout(_adminLogoTimer);
+    if (_adminLogoTaps >= 3) {
+      _adminLogoTaps = 0;
+      _adminTriggerAccess();
+    } else {
+      _adminLogoTimer = setTimeout(function(){ _adminLogoTaps = 0; }, 1000);
+    }
+  });
+}
+
+function _adminTriggerAccess() {
+  if (!_adminIsAllowed()) return; // silently ignore — no hint to non-admins
+  if (sessionStorage.getItem('mp_admin_ok') === '1') { _adminOpen(); return; }
+  var m = document.getElementById('adminPinModal');
+  if (m) {
+    m.classList.remove('hidden');
+    var i = document.getElementById('adminPinInput');
+    var s = document.getElementById('adminPinSub');
+    if (i) { i.value=''; setTimeout(function(){ i.focus(); }, 80); }
+    if (s) { s.textContent='Enter your admin PIN'; s.style.color=''; }
+  }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  var p = document.getElementById('adminPinInput');
+  if (p) { p.addEventListener('keydown', function(e){ if(e.key==='Enter') _adminVerifyPin(); if(e.key==='Escape') _adminCancelPin(); }); }
+});
+
+async function _adminVerifyPin() {
+  var input = document.getElementById('adminPinInput');
+  var sub   = document.getElementById('adminPinSub');
+  var pin   = input ? input.value : '';
+  if (!pin) return;
+  try {
+    var hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pin))))
+                    .map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+    if (hash === ADMIN_PIN_HASH) {
+      sessionStorage.setItem('mp_admin_ok','1');
+      document.getElementById('adminPinModal').classList.add('hidden');
+      _adminOpen();
+    } else {
+      if (sub)   { sub.textContent='❌ Incorrect PIN'; sub.style.color='#dc2626'; }
+      if (input) { input.value=''; input.focus(); }
+    }
+  } catch(e) { if (sub) sub.textContent='Verification error'; }
+}
+
+function _adminCancelPin() {
+  var m = document.getElementById('adminPinModal');
+  if (m) m.classList.add('hidden');
+}
+
+function _adminOpen() {
+  var o = document.getElementById('adminOverlay');
+  if (o) { o.classList.remove('hidden'); _adminRender(); }
+}
+
+function _adminExit() {
+  var o = document.getElementById('adminOverlay');
+  if (o) o.classList.add('hidden');
+}
+
+// ── Render ────────────────────────────────────────────────────
+async function _adminRender() {
+  var el = document.getElementById('adminContent');
+  if (!el) return;
+  var user = typeof getCurrentUser === 'function' ? getCurrentUser() : null;
+  el.innerHTML = '<div class="adm-loading"><div class="club-spinner"></div> Loading stats…</div>';
+
+  var stats = null;
+  if (typeof SupabaseSync !== 'undefined') {
+    stats = await SupabaseSync.fetchAdminStats();
+    var cfg = await SupabaseSync.fetchAppConfig();
+    if (cfg.banner)   _appConfig.banner   = cfg.banner;
+    if (cfg.features) _appConfig.features = cfg.features;
+  }
+  stats = stats || {totalUsers:0,activeThisWeek:0,totalXP:0,topUsers:[]};
+  var b = _appConfig.banner   || {enabled:false,text:'',style:'info'};
+  var f = _appConfig.features || {leaderboard:true,clubs:true,caseBackground:true,maintenanceMode:false};
+
+  el.innerHTML =
+    '<div class="adm-welcome">'+_esc((user&&user.email)||'Unknown')
+    +'&nbsp;<span class="adm-session-note">· session expires on tab close</span></div>'
+
+    +'<div class="adm-section-title">📊 Live Stats</div>'
+    +'<div class="adm-stats-row">'
+    +_admC('👥',stats.totalUsers,'Total users')
+    +_admC('⚡',stats.activeThisWeek,'Active this week')
+    +_admC('✨',(stats.totalXP||0).toLocaleString(),'XP earned')
+    +'</div>'
+
+    +'<div class="adm-section-title">📢 App-Wide Banner</div>'
+    +'<div class="adm-card">'
+    +'<div class="adm-row"><span class="adm-label">Visible to all users</span>'
+    +'<button class="adm-toggle'+(b.enabled?' adm-toggle--on':'')+'" id="admBannerToggle" '
+    +'onclick="this.classList.toggle(\'adm-toggle--on\');this.textContent=this.classList.contains(\'adm-toggle--on\')?\'ON\':\'OFF\'">'
+    +(b.enabled?'ON':'OFF')+'</button></div>'
+    +'<label class="adm-label" style="display:block;margin:10px 0 4px">Message</label>'
+    +'<input class="adm-input" id="admBannerText" type="text" maxlength="200" '
+    +'placeholder="e.g. 🎉 New HOSA cases added!" value="'+_esc(b.text||'')+'">'
+    +'<div class="adm-row" style="margin-top:10px"><span class="adm-label">Style</span>'
+    +'<div class="adm-chip-row" id="admBannerStyle">'
+    +['info','success','warning','error'].map(function(s){
+        return '<button class="adm-chip adm-chip--'+s+(b.style===s?' adm-chip--sel':'')+'" '
+          +'onclick="_admPickStyle(\''+s+'\')" data-style="'+s+'">'+s.charAt(0).toUpperCase()+s.slice(1)+'</button>';
+      }).join('')
+    +'</div></div>'
+    +'<button class="adm-save-btn" onclick="_admSaveBanner()">💾 Save Banner</button>'
+    +'</div>'
+
+    +'<div class="adm-section-title">🚩 Feature Flags</div>'
+    +'<div class="adm-card">'
+    +_admFlag('Leaderboard visible',    'leaderboard',    f.leaderboard    !==false)
+    +_admFlag('Club Dashboard visible', 'clubs',          f.clubs          !==false)
+    +_admFlag('Case Mode Background',   'caseBackground', f.caseBackground !==false)
+    +_admFlag('🚨 Maintenance Mode',   'maintenanceMode',!!f.maintenanceMode,true)
+    +'</div>'
+
+    +'<div class="adm-section-title">🏆 Top Users (All Time)</div>'
+    +'<div class="adm-card">'
+    +(stats.topUsers.length
+      ? '<div class="adm-top-list">'+stats.topUsers.slice(0,5).map(function(u,i){
+          return '<div class="adm-top-row"><span class="adm-rank">#'+(i+1)+'</span>'
+            +'<span class="adm-top-name">'+_esc(u.display_name||'—')+'</span>'
+            +'<span class="adm-top-xp">'+((u.total_xp||0).toLocaleString())+' XP</span>'
+            +'<span class="adm-lv">Lv.'+u.level+'</span>'
+            +(u.streak>1?'<span class="adm-streak">🔥'+u.streak+'</span>':'')
+            +'</div>';
+        }).join('')+'</div>'
+      :'<div class="adm-hint">No leaderboard data yet.</div>')
+    +'<button class="adm-action-btn adm-action-btn--warn" '
+    +'onclick="_admResetWeekly()" style="margin-top:12px">🔄 Reset ALL Weekly XP — start a fresh leaderboard week</button>'
+    +'</div>'
+
+    +'<div class="adm-section-title">⚡ Quick Actions</div>'
+    +'<div class="adm-card adm-card--actions">'
+    +'<button class="adm-action-btn" onclick="_admForceSync()">🔄 Force Google Sheet Sync</button>'
+    +'<button class="adm-action-btn" onclick="_admClearCaches()">🗑 Clear Service Worker Caches</button>'
+    +'<button class="adm-action-btn" onclick="_adminRender()">↩ Refresh This Panel</button>'
+    +'</div>'
+
+    +'<div class="adm-section-title">🔑 Access Config</div>'
+    +'<div class="adm-card">'
+    +(ADMIN_EMAILS.length
+      ? ADMIN_EMAILS.map(function(e){return '<div class="adm-email">✓ '+_esc(e)+'</div>';}).join('')
+      :'<div class="adm-hint adm-hint--warn">⚠ No emails in ADMIN_EMAILS. Add yours to script.js to lock access.</div>')
+    +'<div class="adm-hint" style="margin-top:10px">PIN hash: <code class="adm-code">'+ADMIN_PIN_HASH.slice(0,16)+'…</code></div>'
+    +'<div class="adm-hint">Change PIN: <code>echo -n "newpin" | shasum -a 256</code> → paste into ADMIN_PIN_HASH</div>'
+    +'</div>'
+
+    +'<div id="admToast" class="adm-toast hidden"></div>'
+    +'<button class="adm-exit-btn" onclick="_adminExit()">🔒 Exit Admin Mode</button>'
+    +'<div style="height:60px"></div>';
+}
+
+function _admC(ic,v,l){ return '<div class="adm-stat"><div class="adm-stat-icon">'+ic+'</div><div class="adm-stat-val">'+v+'</div><div class="adm-stat-lbl">'+l+'</div></div>'; }
+function _admFlag(label,key,on,danger){
+  return '<div class="adm-row adm-row--flag">'
+    +'<span class="adm-label'+(danger?' adm-label--danger':'')+'">'+label+'</span>'
+    +'<button class="adm-toggle'+(on?' adm-toggle--on':'')+(danger?' adm-toggle--danger':'')+'" '
+    +'id="admFlag_'+key+'" onclick="_admSaveFlag(\''+key+'\',this)">'+(on?'ON':'OFF')+'</button>'
+    +'</div>';
+}
+function _admPickStyle(s){ document.querySelectorAll('#admBannerStyle .adm-chip').forEach(function(b){b.classList.toggle('adm-chip--sel',b.dataset.style===s);}); }
+
+async function _admSaveBanner() {
+  var text    = (document.getElementById('admBannerText')||{}).value||'';
+  var enabled = !!(document.getElementById('admBannerToggle')||{}).classList && document.getElementById('admBannerToggle').classList.contains('adm-toggle--on');
+  var sel     = document.querySelector('#admBannerStyle .adm-chip--sel');
+  var style   = sel ? sel.dataset.style : 'info';
+  var val     = {enabled:enabled,text:text,style:style};
+  _appConfig.banner = val; _applyAppConfig();
+  if (typeof SupabaseSync!=='undefined') await SupabaseSync.saveAppConfig('banner',val);
+  _admToast(enabled?'✓ Banner live: "'+text.slice(0,50)+'"':'✓ Banner hidden');
+}
+
+async function _admSaveFlag(key,btn) {
+  var next = !btn.classList.contains('adm-toggle--on');
+  btn.classList.toggle('adm-toggle--on',next); btn.textContent=next?'ON':'OFF';
+  if (!_appConfig.features) _appConfig.features={};
+  _appConfig.features[key]=next; _applyAppConfig();
+  if (typeof SupabaseSync!=='undefined') await SupabaseSync.saveAppConfig('features',_appConfig.features);
+  _admToast('✓ '+key+' → '+(next?'enabled':'disabled'));
+}
+
+async function _admResetWeekly() {
+  if (!confirm('Reset every user\'s weekly XP to zero? This starts a fresh leaderboard week.')) return;
+  if (typeof SupabaseSync==='undefined') { _admToast('Supabase not configured'); return; }
+  var ok = await SupabaseSync.resetWeeklyXP();
+  _admToast(ok?'✓ Weekly XP reset for all users':'✕ Failed — check Supabase permissions');
+  if (ok) setTimeout(_adminRender,1200);
+}
+
+function _admForceSync() {
+  if (typeof MedPathContent==='undefined') { _admToast('Content loader not configured'); return; }
+  MedPathContent.refresh().then(function(r){ _admToast(r.ok?'✓ Synced':'✕ Failed: '+(r.error||'')); });
+}
+
+function _admClearCaches() {
+  if (!('caches' in window)) { _admToast('Cache API unavailable'); return; }
+  caches.keys().then(function(keys){ return Promise.all(keys.map(function(k){return caches.delete(k);})); })
+    .then(function(){ _admToast('✓ All caches cleared'); });
+}
+
+function _admToast(msg) {
+  var t = document.getElementById('admToast');
+  if (!t) return;
+  t.textContent=msg; t.classList.remove('hidden');
+  clearTimeout(t._tmr); t._tmr=setTimeout(function(){t.classList.add('hidden');},3000);
+}
 
 // ─────────────────────────────────────────
 //  HOSA EVENTS

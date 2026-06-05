@@ -50,6 +50,7 @@
 
 
 
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -88,6 +89,41 @@
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
+  <!-- ── Admin: app-wide banner (controlled from admin panel) ── -->
+  <div id="adminBanner" class="admin-banner hidden"></div>
+
+  <!-- ── Admin: PIN entry modal ────────────────────────────── -->
+  <div id="adminPinModal" class="admin-pin-overlay hidden" onclick="if(event.target===this)_adminCancelPin()">
+    <div class="admin-pin-box">
+      <div class="admin-pin-icon">🔐</div>
+      <div class="admin-pin-title">Admin Access</div>
+      <div class="admin-pin-sub" id="adminPinSub">Enter your admin PIN</div>
+      <input id="adminPinInput" type="password" class="admin-pin-input" maxlength="30"
+             placeholder="PIN" autocomplete="off" autocorrect="off" spellcheck="false">
+      <button class="admin-pin-btn" onclick="_adminVerifyPin()">Unlock →</button>
+      <button class="admin-pin-cancel" onclick="_adminCancelPin()">Cancel</button>
+    </div>
+  </div>
+
+  <!-- ── Admin: full panel overlay ─────────────────────────── -->
+  <div id="adminOverlay" class="admin-overlay hidden">
+    <div class="admin-panel">
+      <div class="admin-panel-header">
+        <div class="admin-panel-title">🔐 MedPath Admin</div>
+        <button class="admin-panel-close" onclick="_adminExit()">✕ Close</button>
+      </div>
+      <div id="adminContent" class="admin-panel-body"></div>
+    </div>
+  </div>
+
+  <!-- ── Admin: maintenance mode overlay (shown to non-admins) ── -->
+  <div id="adminMaintOverlay" class="admin-maint-overlay hidden">
+    <div class="admin-maint-box">
+      <div class="admin-maint-icon">🔧</div>
+      <h2>Down for Maintenance</h2>
+      <p>MedPath is currently undergoing maintenance. We'll be back shortly!</p>
+    </div>
+  </div>
 
   <!-- DISCLAIMER BANNER -->
   <div class="disclaimer-bar">
