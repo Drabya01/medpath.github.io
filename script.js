@@ -52,6 +52,61 @@ function _afterShowScreen(id) {
 // ── App-wide config (feature flags + banner) ──────────────────
 var _appConfig = { banner: {}, features: {} };
 
+// ── Global utilities (used by club, leaderboard, admin) ───────
+
+function _esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function _lbAvatar(row, cls) {
+  if (row && row.avatar_url) {
+    return '<img class="'+cls+'" src="'+_esc(row.avatar_url)+'" alt="" '
+      +'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'">'
+      +'<div class="'+cls+' '+cls+'--init" style="display:none">'+_lbInitials((row.display_name||row.name||''))+'</div>';
+  }
+  return '<div class="'+cls+' '+cls+'--init">'+_lbInitials((row&&(row.display_name||row.name))||'?')+'</div>';
+}
+function _lbInitials(name) {
+  var p = String(name||'?').split(' ');
+  return (p[0].charAt(0)+(p[1]?p[1].charAt(0):'')).toUpperCase();
+}
+function _timeAgo(iso) {
+  if (!iso) return '';
+  var diff = Math.floor((Date.now()-new Date(iso))/1000);
+  if (diff<60)    return 'Just now';
+  if (diff<3600)  return Math.floor(diff/60)+'m ago';
+  if (diff<86400) return Math.floor(diff/3600)+'h ago';
+  return Math.floor(diff/86400)+'d ago';
+}
+function updateLbTeaser() {
+  var el = document.getElementById('lbTeaser');
+  if (!el) return;
+  var user = typeof getCurrentUser==='function' ? getCurrentUser() : null;
+  if (!user) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  if (typeof SupabaseSync==='undefined'||typeof SupabaseSync.fetchLeaderboard!=='function') return;
+  var sub = document.getElementById('lbTeaserSub');
+  SupabaseSync.fetchLeaderboard('week_xp').then(function(rows){
+    if (!rows||!rows.length) { if(sub) sub.textContent='Be first on the board!'; return; }
+    SupabaseSync.fetchMyRank('week_xp').then(function(rank){
+      var names=rows.slice(0,3).map(function(r,i){return ['🥇','🥈','🥉'][i]+' '+r.display_name.split(' ')[0];}).join('  ');
+      if(sub) sub.textContent=(rank?'Your rank: #'+rank+'  ·  ':'')+names;
+    });
+  });
+}
+function initLeaderboardScreen() {
+  var user = typeof getCurrentUser==='function' ? getCurrentUser() : null;
+  var el   = document.getElementById('lbSigninPrompt');
+  if (el) el.classList.toggle('hidden', !!user);
+  var loading = document.getElementById('lbLoading');
+  if (!user) { if(loading) loading.classList.add('hidden'); return; }
+  if (typeof _lbFetch==='function') _lbFetch(typeof _lbTab!=='undefined'?_lbTab:'week');
+}
+function switchLbTab(tab) {
+  if (typeof _lbTab!=='undefined') _lbTab=tab;
+  document.querySelectorAll('.lb-tab').forEach(function(b){b.classList.toggle('active',b.dataset.tab===tab);});
+  if (typeof _lbFetch==='function') _lbFetch(tab);
+}
+
 async function loadAppConfig() {
   if (typeof SupabaseSync === 'undefined') return;
   try {
@@ -86,24 +141,8 @@ function _applyAppConfig() {
   var feats = _appConfig.features || {};
   _setFeatureVisible('mc--leaderboard-card', feats.leaderboard !== false);
   _setFeatureVisible('mc--club-card',        feats.clubs       !== false);
+  // Case background is toggled via CSS class on body
   document.body.classList.toggle('no-case-bg', feats.caseBackground === false);
-
-  // ── Home screen announcement ──────────────────────────────
-  var ann = _appConfig.announcement;
-  if (ann && ann.enabled && ann.text) {
-    var dismissed = false;
-    try { dismissed = localStorage.getItem('mp_ann_dismissed') === ann.id; } catch(e){}
-    var annEl = document.getElementById('homeAnnouncement');
-    if (annEl && !dismissed) {
-      annEl.innerHTML = '<div class="home-ann-inner"><span>📣 '+_esc(ann.text)+'</span>'
-        +'<button onclick="this.parentElement.parentElement.classList.add(\'hidden\');'
-        +'try{localStorage.setItem(\'mp_ann_dismissed\',\''+ann.id+'\');}catch(e){}">✕</button></div>';
-      annEl.classList.remove('hidden');
-    }
-  } else {
-    var annEl2 = document.getElementById('homeAnnouncement');
-    if (annEl2) annEl2.classList.add('hidden');
-  }
 }
 
 function _setFeatureVisible(id, visible) {
@@ -9145,7 +9184,8 @@ document.addEventListener('DOMContentLoaded', init);
 
 /** Emails that may access the admin panel. */
 var ADMIN_EMAILS = [
-  'golussaud@gmail.com',
+  // 'yourname@gmail.com',
+  // 'codeveloper@gmail.com',
 ];
 
 /**
