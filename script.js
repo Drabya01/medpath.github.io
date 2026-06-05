@@ -14256,32 +14256,49 @@ async function initClubScreen() {
 
   el.innerHTML = '<div class="club-loading"><div class="club-spinner"></div><p>Loading your club…</p></div>';
 
-  _clubState.clubs = await SupabaseSync.fetchMyClubs();
+  try {
+    // Guard: make sure the Supabase club API is actually present
+    if (typeof SupabaseSync.fetchMyClubs !== 'function') {
+      throw new Error('Club features not available — please redeploy supabase-sync.js');
+    }
 
-  if (!_clubState.clubs.length) { el.innerHTML = _clubRenderNoClub(); return; }
+    _clubState.clubs = await SupabaseSync.fetchMyClubs();
 
-  // Preserve active selection or default to first
-  if (!_clubState.active || !_clubState.clubs.find(function(c){return c.id===_clubState.active.id;})) {
-    _clubState.active = _clubState.clubs[0];
+    if (!_clubState.clubs.length) { el.innerHTML = _clubRenderNoClub(); return; }
+
+    if (!_clubState.active || !_clubState.clubs.find(function(c){return c.id===_clubState.active.id;})) {
+      _clubState.active = _clubState.clubs[0];
+    }
+
+    var clubId = _clubState.active.id;
+    var results = await Promise.all([
+      SupabaseSync.fetchClubMembers(clubId),
+      SupabaseSync.fetchClubStats(clubId),
+      SupabaseSync.fetchAssignments(clubId),
+      typeof SupabaseSync.fetchAnnouncements === 'function'
+        ? SupabaseSync.fetchAnnouncements(clubId)
+        : Promise.resolve([])
+    ]);
+    _clubState.members       = results[0];
+    _clubState.stats         = results[1];
+    _clubState.assignments   = results[2];
+    _clubState.announcements = results[3];
+
+    SupabaseSync.pushMemberStats(clubId, _buildMemberStats());
+
+    var isOwner = _clubState.active.myRole === 'owner';
+    el.innerHTML = isOwner ? _clubRenderTeacher() : _clubRenderStudent();
+
+  } catch(err) {
+    console.error('[Club] initClubScreen error:', err);
+    el.innerHTML = '<div class="club-empty-state">'
+      + '<div class="club-empty-icon">⚠️</div>'
+      + '<div class="club-empty-title">Couldn\'t load club data</div>'
+      + '<div class="club-empty-desc">' + (err.message || 'Unknown error') + '<br><br>'
+      + 'Make sure you\'re signed in and have deployed the latest supabase-sync.js.</div>'
+      + '<button class="club-setup-btn club-setup-btn--primary" onclick="initClubScreen()" style="margin-top:16px">↩ Retry</button>'
+      + '</div>';
   }
-
-  var clubId = _clubState.active.id;
-  var results = await Promise.all([
-    SupabaseSync.fetchClubMembers(clubId),
-    SupabaseSync.fetchClubStats(clubId),
-    SupabaseSync.fetchAssignments(clubId),
-    SupabaseSync.fetchAnnouncements(clubId)
-  ]);
-  _clubState.members       = results[0];
-  _clubState.stats         = results[1];
-  _clubState.assignments   = results[2];
-  _clubState.announcements = results[3];
-
-  // Push this user's stats to the club
-  SupabaseSync.pushMemberStats(clubId, _buildMemberStats());
-
-  var isOwner = _clubState.active.myRole === 'owner';
-  el.innerHTML = isOwner ? _clubRenderTeacher() : _clubRenderStudent();
 }
 
 async function _clubSwitchTo(clubId) {
@@ -14989,45 +15006,7 @@ function _daysUntil(dateStr) {
 
 // ── Screen init ───────────────────────────────────────────────
 
-async function initClubScreen() {
-  var user = typeof getCurrentUser === 'function' ? getCurrentUser() : null;
-  var el   = document.getElementById('clubContent');
-  if (!el) return;
-
-  if (!user) {
-    el.innerHTML = _clubRenderSignIn();
-    return;
-  }
-
-  el.innerHTML = '<div class="club-loading"><div class="club-spinner"></div><p>Loading your club…</p></div>';
-
-  _clubState.clubs = await SupabaseSync.fetchMyClubs();
-
-  if (!_clubState.clubs.length) {
-    el.innerHTML = _clubRenderNoClub();
-    return;
-  }
-
-  // Default to first club
-  if (!_clubState.active) _clubState.active = _clubState.clubs[0];
-
-  // Load data for active club
-  var clubId = _clubState.active.id;
-  var [members, stats, assignments] = await Promise.all([
-    SupabaseSync.fetchClubMembers(clubId),
-    SupabaseSync.fetchClubStats(clubId),
-    SupabaseSync.fetchAssignments(clubId)
-  ]);
-  _clubState.members     = members;
-  _clubState.stats       = stats;
-  _clubState.assignments = assignments;
-
-  // Push fresh member stats (for student) or owner already has them
-  SupabaseSync.pushMemberStats(clubId, _buildMemberStats());
-
-  var isOwner = _clubState.active.myRole === 'owner';
-  el.innerHTML = isOwner ? _clubRenderTeacher() : _clubRenderStudent();
-}
+// (initClubScreen defined earlier — this duplicate removed)
 
 function switchClubTab(tab) {
   _clubState.tab = tab;
