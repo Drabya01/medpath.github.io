@@ -48,6 +48,8 @@
 
 
 
+
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -410,6 +412,23 @@
         </div>
         <div class="mc-arrow">→</div>
       </button>
+      <!-- Club Dashboard — full width -->
+      <button class="mode-card mc--club mode-card--wide" onclick="showScreen('club')">
+        <div class="mc-accent"></div>
+        <div class="mc-icon-wrap">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+            <circle cx="9" cy="7" r="4"/>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+          </svg>
+        </div>
+        <div class="mc-body">
+          <div class="mc-label">Club Dashboard</div>
+          <div class="mc-desc">Create a study group, assign practice, and track HOSA progress together</div>
+        </div>
+        <div class="mc-arrow">→</div>
+      </button>
     </div>
 
     <div class="home-footer">
@@ -658,6 +677,12 @@
       <button class="fc-search-clear hidden" id="fcSearchClear" onclick="clearFCSearch()" aria-label="Clear search">✕</button>
     </div>
 
+    <!-- Anki-style deck counter: blue=new · red=learning · green=review -->
+    <div class="fc-deck-counts hidden" id="fcDeckCounts">
+      <span class="dc-chip dc-chip--new"><span id="dcNew">0</span> new</span>
+      <span class="dc-chip dc-chip--learning"><span id="dcLearning">0</span> learning</span>
+      <span class="dc-chip dc-chip--review"><span id="dcReview">0</span> review</span>
+    </div>
     <div class="fc-category-row" id="fcCategories"></div>
 
     <div class="fc-search-results hidden" id="fcSearchResults"></div>
@@ -750,7 +775,7 @@
         <div class="fc-stat-divider"></div>
         <div class="fc-stat">
           <span class="fc-stat-val" id="statUnseen">0</span>
-          <span class="fc-stat-lbl">Unseen</span>
+          <span class="fc-stat-lbl">New/day</span>
         </div>
       </div>
     </div>
@@ -4623,6 +4648,17 @@
   </section>
 
   <!-- ═══════════════════════════════════════════ -->
+  <!--  CLUB DASHBOARD                             -->
+  <!-- ═══════════════════════════════════════════ -->
+  <section class="screen" id="screen-club">
+    <div class="screen-header">
+      <h2>🏫 Club Dashboard</h2>
+      <p>Study together, track progress, and assign practice for your HOSA club or class.</p>
+    </div>
+    <div id="clubContent"></div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════ -->
   <!--  PROGRESS DASHBOARD                         -->
   <!-- ═══════════════════════════════════════════ -->
   <section class="screen" id="screen-progress">
@@ -4783,13 +4819,27 @@
       </div>
 
       <div class="st-row">
-        <div class="st-row-label">Cards per Session</div>
-        <div class="st-row-desc">How many cards to study before the deck loops</div>
-        <div class="st-seg" id="stCardsSeg">
-          <button class="st-seg-btn" data-val="10"  onclick="setPref('cardsPerSession','10')">10</button>
-          <button class="st-seg-btn" data-val="25"  onclick="setPref('cardsPerSession','25')">25</button>
-          <button class="st-seg-btn" data-val="50"  onclick="setPref('cardsPerSession','50')">50</button>
-          <button class="st-seg-btn" data-val="all" onclick="setPref('cardsPerSession','all')">All</button>
+        <div class="st-row-label">New Cards / Day</div>
+        <div class="st-row-desc">Max new cards introduced each day — like Anki's daily new limit</div>
+        <div class="st-seg" id="stNewPerDaySeg">
+          <button class="st-seg-btn" data-val="5"         onclick="setPref('newCardsPerDay','5')">5</button>
+          <button class="st-seg-btn" data-val="10"        onclick="setPref('newCardsPerDay','10')">10</button>
+          <button class="st-seg-btn" data-val="20"        onclick="setPref('newCardsPerDay','20')">20</button>
+          <button class="st-seg-btn" data-val="50"        onclick="setPref('newCardsPerDay','50')">50</button>
+          <button class="st-seg-btn" data-val="unlimited" onclick="setPref('newCardsPerDay','unlimited')">∞</button>
+        </div>
+      </div>
+
+      <div class="st-divider"></div>
+
+      <div class="st-row">
+        <div class="st-row-label">Max Reviews / Day</div>
+        <div class="st-row-desc">Cap on due review cards shown per day — prevents review pile-ups</div>
+        <div class="st-seg" id="stMaxReviewsSeg">
+          <button class="st-seg-btn" data-val="50"        onclick="setPref('maxReviewsPerDay','50')">50</button>
+          <button class="st-seg-btn" data-val="100"       onclick="setPref('maxReviewsPerDay','100')">100</button>
+          <button class="st-seg-btn" data-val="200"       onclick="setPref('maxReviewsPerDay','200')">200</button>
+          <button class="st-seg-btn" data-val="unlimited" onclick="setPref('maxReviewsPerDay','unlimited')">∞</button>
         </div>
       </div>
 

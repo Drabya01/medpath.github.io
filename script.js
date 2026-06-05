@@ -41,10 +41,12 @@ function showScreen(id) {
 }
 
 function _afterShowScreen(id) {
-  if (id === 'progress') renderProgressDashboard();
-  if (id === 'quiz')     resetQuizToStart();
-  if (id === 'settings') renderSettingsScreen();
-  if (id === 'home')     updateResumeBanner();
+  if (id === 'progress')    renderProgressDashboard();
+  if (id === 'quiz')        resetQuizToStart();
+  if (id === 'settings')    renderSettingsScreen();
+  if (id === 'home')        { updateResumeBanner(); if (typeof updateLbTeaser === 'function') updateLbTeaser(); }
+  if (id === 'leaderboard') { if (typeof initLeaderboardScreen === 'function') initLeaderboardScreen(); }
+  if (id === 'club')        { if (typeof initClubScreen === 'function') initClubScreen(); }
 }
 
 function resetQuizToStart() {
@@ -7535,6 +7537,41 @@ function loadSRS()  { sm2Load(); }
 function saveSRS()  { sm2Save(); }
 function srsKey(t)  { return 'fc:' + t; }
 
+// ── Daily limits tracking  (Anki-style) ──────────────────────
+// Resets automatically each day. Tracks new cards introduced and
+// reviews completed today. Learning cards have no daily cap.
+var DAILY_KEY = 'medpath_daily';
+
+function _getDailyData() {
+  try {
+    var today = new Date().toISOString().split('T')[0];
+    var raw   = localStorage.getItem(DAILY_KEY);
+    if (raw) {
+      var d = JSON.parse(raw);
+      if (d.date === today) return d;
+    }
+  } catch(e) {}
+  // New day (or first run) — fresh counters
+  return { date: new Date().toISOString().split('T')[0], newSeen: 0, reviewSeen: 0 };
+}
+
+function _saveDailyData(d) {
+  try { localStorage.setItem(DAILY_KEY, JSON.stringify(d)); } catch(e) {}
+}
+
+function _incrementDaily(type) {
+  var d = _getDailyData();
+  if      (type === 'new')    d.newSeen++;
+  else if (type === 'review') d.reviewSeen++;
+  _saveDailyData(d);
+}
+
+// Resolve a daily-limit setting to a number (handles 'unlimited')
+function _dailyLimit(key) {
+  var v = appSettings[key];
+  return (v === 'unlimited' || v === '∞') ? Infinity : (parseInt(v) || 0);
+}
+
 // ── Get card state (returns default for new card) ─────────────
 function sm2Get(id) {
   return sm2Data[id] || { state:'new', ease:SM2.START_EASE, interval:0, step:0, lapses:0, due:0, reps:0 };
@@ -7702,9 +7739,18 @@ function getCardData(term) {
 // ── Main rateCard — now accepts 1/2/3/4 ──────────────────────
 function rateCard(rating) {
   const card = fcFiltered[fcIndex];
-  if (!card) return;
+  if (!card || card.cat === '_done') return; // skip virtual completion card
   const id = 'fc:' + card.term;
+
+  // Capture state BEFORE scheduling so we know which counter to increment
+  const prevState = sm2Get(id).state;
+
   sm2Schedule(id, rating);
+
+  // Track daily counts — learning cards don't count (Anki behaviour)
+  if      (prevState === 'new')                                   _incrementDaily('new');
+  else if (prevState === 'review' || prevState === 'relearning')  _incrementDaily('review');
+
   updateStatsStrip();
 
   const srsRow = document.getElementById('fcSrsRow');
@@ -7783,20 +7829,26 @@ function getNextSRSIndex(currentIndex) {
 
 // ── Stats Strip ───────────────────────────
 function updateStatsStrip() {
-  const now = Date.now();
-  let review = 0, learning = 0, newCards = 0, due = 0;
+  const now   = Date.now();
+  const daily = _getDailyData();
+  let review = 0, learning = 0, totalNew = 0;
+
   flashcards.forEach(function(f) {
     const c = sm2Get('fc:' + f.term);
-    if (c.state === 'new')                               newCards++;
+    if      (c.state === 'review')                               review++;
     else if (c.state === 'learning' || c.state === 'relearning') learning++;
-    else if (c.state === 'review')                       review++;
-    if (c.due <= now && c.state !== 'new')               due++;
+    else if (c.state === 'new')                                  totalNew++;
   });
+
+  // "Unseen" shows new cards still available today (not all 3072)
+  const newLimit        = _dailyLimit('newCardsPerDay');
+  const newAvailToday   = Math.min(totalNew, Math.max(0, newLimit - daily.newSeen));
+
   const setEl = function(id, v) { const el = document.getElementById(id); if (el) el.textContent = v; };
   setEl('statKnow',     review);
   setEl('statLearning', learning);
   setEl('statSaved',    savedCards.size);
-  setEl('statUnseen',   newCards);
+  setEl('statUnseen',   newAvailToday);
 }
 
 // ── Rendering ────────────────────────────
@@ -7826,15 +7878,45 @@ function filterFC(cat) {
       fcFiltered = [{ term: 'No saved cards yet!', def: 'Tap the ☆ star on any flashcard to save it here for quick review.', cat: 'Saved ⭐' }];
     }
   } else if (cat === 'All') {
-    // SM-2 queue ordering: due review/relearning → due learning → new → not-yet-due
     const now = Date.now();
-    const dueReview   = flashcards.filter(f => { const c = sm2Get('fc:'+f.term); return (c.state==='review'||c.state==='relearning') && c.due <= now; });
-    const dueLearning = flashcards.filter(f => { const c = sm2Get('fc:'+f.term); return c.state==='learning' && c.due <= now; });
-    const newCards    = flashcards.filter(f => sm2Get('fc:'+f.term).state==='new');
-    const notDue      = flashcards.filter(f => { const c = sm2Get('fc:'+f.term); return c.state!=='new' && c.due > now; });
-    // Sort due review by most overdue first
-    dueReview.sort((a,b) => sm2Get('fc:'+a.term).due - sm2Get('fc:'+b.term).due);
-    fcFiltered = [...dueReview, ...dueLearning, ...newCards, ...notDue];
+    const daily          = _getDailyData();
+    const newLimit       = _dailyLimit('newCardsPerDay');
+    const reviewLimit    = _dailyLimit('maxReviewsPerDay');
+    const remainingNew   = Math.max(0, newLimit    - daily.newSeen);
+    const remainingReview= Math.max(0, reviewLimit - daily.reviewSeen);
+
+    // Learning / relearning — no daily cap (minute-scale, must clear)
+    const dueLearning = flashcards.filter(f => {
+      const c = sm2Get('fc:' + f.term);
+      return (c.state === 'learning' || c.state === 'relearning') && c.due <= now;
+    });
+
+    // Reviews — sorted oldest-due first, capped at today's remaining allowance
+    const allDueReview = flashcards
+      .filter(f => { const c = sm2Get('fc:' + f.term); return c.state === 'review' && c.due <= now; })
+      .sort((a, b) => sm2Get('fc:' + a.term).due - sm2Get('fc:' + b.term).due);
+    const dueReview = allDueReview.slice(0, remainingReview);
+
+    // New cards — capped at today's remaining allowance
+    const allNew   = flashcards.filter(f => sm2Get('fc:' + f.term).state === 'new');
+    const newCards = allNew.slice(0, remainingNew);
+
+    fcFiltered = [...dueReview, ...dueLearning, ...newCards];
+
+    // Show completion card when session queue is empty
+    if (fcFiltered.length === 0) {
+      const limitsHit = (allDueReview.length > remainingReview) || (allNew.length > remainingNew);
+      if (limitsHit) {
+        fcFiltered = [{ term: '✅ Daily limit reached', cat: '_done',
+          def: `You've reviewed ${daily.reviewSeen} card${daily.reviewSeen!==1?'s':''} and learned ${daily.newSeen} new card${daily.newSeen!==1?'s':''} today — great work!\n\nCome back tomorrow for more, or go to Settings → Flashcards to adjust your daily limits.` }];
+      } else {
+        fcFiltered = [{ term: '🎉 All caught up!', cat: '_done',
+          def: 'No cards due right now.\n\nYour next reviews are scheduled for later. Keep your streak going by coming back tomorrow!' }];
+      }
+    }
+
+    // Update the Anki-style deck counter bar
+    _updateDeckCounts(dueLearning.length, dueReview.length, newCards.length);
   } else {
     fcFiltered = flashcards.filter(f => f.cat === cat);
   }
@@ -7851,17 +7933,23 @@ function updateFC() {
 
   document.getElementById('fcTerm').textContent = card.term;
   document.getElementById('fcDef').textContent = card.def;
-  document.getElementById('fcCatTag').textContent = card.cat;
-  document.getElementById('fcProgress').textContent = `${fcIndex + 1} / ${fcFiltered.length}`;
-  document.getElementById('fcBarFill').style.width = `${((fcIndex + 1) / fcFiltered.length) * 100}%`;
+  document.getElementById('fcCatTag').textContent = card.cat === '_done' ? '' : card.cat;
+  document.getElementById('fcProgress').textContent = card.cat === '_done' ? '' : `${fcIndex + 1} / ${fcFiltered.length}`;
+  document.getElementById('fcBarFill').style.width = card.cat === '_done' ? '100%' : `${((fcIndex + 1) / fcFiltered.length) * 100}%`;
 
   // Reset flip state
   fcFlipped = false;
   document.getElementById('fcInner').classList.remove('flipped');
 
-  // Hide SRS row until card is flipped
+  // Hide SRS row until card is flipped (always hide for completion card)
   const srsRow = document.getElementById('fcSrsRow');
   srsRow.classList.remove('visible');
+
+  if (card.cat === '_done') {
+    // Completion card: auto-show definition, hide SRS controls
+    document.getElementById('fcInner').classList.add('flipped');
+    return;
+  }
 
   // Update interval previews on the 4 buttons
   const prev = sm2Preview('fc:' + card.term);
@@ -9895,6 +9983,8 @@ var appSettings = {
   textSize:         'medium',   // 'small' | 'medium' | 'large'
   reduceMotion:     false,
   cardsPerSession:  '25',
+  newCardsPerDay:   '20',       // Anki-style: max new cards introduced per day
+  maxReviewsPerDay: '200',      // Anki-style: max review cards shown per day
   showCategory:     true,
   autoAdvance:      true,
   rememberDiff:     false,
@@ -9985,8 +10075,11 @@ function renderSettingsScreen() {
   syncToggle('togRememberDiff', appSettings.rememberDiff);
   syncToggle('togShowTag',      appSettings.showTag);
 
-  // Cards per session
+  // Cards per session (legacy)
   syncSeg('stCardsSeg', appSettings.cardsPerSession);
+  // Daily limits (Anki-style)
+  syncSeg('stNewPerDaySeg',   appSettings.newCardsPerDay);
+  syncSeg('stMaxReviewsSeg',  appSettings.maxReviewsPerDay);
 
   // Quiz
   var modeEl = document.getElementById('stQuizMode');
@@ -10173,8 +10266,10 @@ function setPref(key, val) {
   }
 
   var segMap = {
-    cardsPerSession: 'stCardsSeg',
-    defaultQuizLen:  'stQuizLenSeg'
+    cardsPerSession:  'stCardsSeg',
+    defaultQuizLen:   'stQuizLenSeg',
+    newCardsPerDay:   'stNewPerDaySeg',
+    maxReviewsPerDay: 'stMaxReviewsSeg'
   };
   if (segMap[key]) syncSeg(segMap[key], val);
   showSettingsToast('Saved');
@@ -12862,34 +12957,53 @@ document.addEventListener('click', function(e) {
 //  Shows when SM-2 cards are due; updates on every home visit
 // ═══════════════════════════════════════════════════════════════
 
+// ── Anki-style deck counter bar (blue=new, red=learning, green=review) ──
+function _updateDeckCounts(learning, review, newCount) {
+  var el = document.getElementById('fcDeckCounts');
+  if (!el) return;
+  if (fcActiveCategory !== 'All') { el.classList.add('hidden'); return; }
+  el.classList.toggle('hidden', (learning + review + newCount) === 0);
+  var s  = document.getElementById('dcNew'),
+      l  = document.getElementById('dcLearning'),
+      r  = document.getElementById('dcReview');
+  if (s) s.textContent = newCount;
+  if (l) l.textContent = learning;
+  if (r) r.textContent = review;
+}
+
 function updateResumeBanner() {
   var banner = document.getElementById('resumeBanner');
   var subEl  = document.getElementById('resumeBannerSub');
   if (!banner || !subEl) return;
 
-  var now = Date.now();
-  // Count due cards across ALL SM-2 namespaces (fc:, cpr:, hosa:)
-  var dueCount = 0;
-  var newCount = 0;
+  var now          = Date.now();
+  var daily        = _getDailyData();
+  var newLimit     = _dailyLimit('newCardsPerDay');
+  var reviewLimit  = _dailyLimit('maxReviewsPerDay');
 
-  // Main flashcards
+  var learningDue = 0, reviewDue = 0, newAvail = 0;
+
   if (typeof flashcards !== 'undefined') {
+    var totalReviewDue = 0, totalNew = 0;
     flashcards.forEach(function(f) {
       var c = sm2Get('fc:' + f.term);
-      if (c.state === 'new') newCount++;
-      else if (c.due <= now) dueCount++;
+      if ((c.state === 'learning' || c.state === 'relearning') && c.due <= now) learningDue++;
+      if (c.state === 'review' && c.due <= now)  totalReviewDue++;
+      if (c.state === 'new')                     totalNew++;
     });
+    reviewDue = Math.min(totalReviewDue, Math.max(0, reviewLimit - daily.reviewSeen));
+    newAvail  = Math.min(totalNew,       Math.max(0, newLimit    - daily.newSeen));
   }
 
-  // Streak info
+  var total = learningDue + reviewDue + newAvail;
   var streak = (typeof progressStreak !== 'undefined') ? progressStreak.currentStreak : 0;
   var streakTxt = streak > 1 ? ' · 🔥 ' + streak + ' day streak' : '';
 
-  if (dueCount > 0) {
-    subEl.textContent = dueCount + ' card' + (dueCount !== 1 ? 's' : '') + ' due now' + streakTxt;
-    banner.classList.remove('hidden');
-  } else if (newCount > 0) {
-    subEl.textContent = newCount + ' new card' + (newCount !== 1 ? 's' : '') + ' to learn' + streakTxt;
+  if (total > 0) {
+    var parts = [];
+    if (learningDue + reviewDue > 0) parts.push((learningDue + reviewDue) + ' due');
+    if (newAvail > 0)                parts.push(newAvail + ' new');
+    subEl.textContent = parts.join(' · ') + streakTxt;
     banner.classList.remove('hidden');
   } else if (streak > 0) {
     subEl.textContent = 'All caught up' + streakTxt;
@@ -13645,8 +13759,16 @@ function earnXP(amount, source) {
   var prevLevel = xpGetLevel(xpData.totalXP);
   xpData.totalXP += amount;
   var newLevel  = xpGetLevel(xpData.totalXP);
+
+  // Weekly XP — resets on Monday; drives leaderboard "This Week" tab
+  var monday = typeof _lbGetMonday === 'function' ? _lbGetMonday() : null;
+  if (monday && xpData.weekStart !== monday) { xpData.weekXP = 0; xpData.weekStart = monday; }
+  xpData.weekXP = (xpData.weekXP || 0) + amount;
+
   xpSave();
   updateXPBar();
+  if (typeof _lbSchedulePush   === 'function') _lbSchedulePush();
+  if (typeof _clubOnXP         === 'function') _clubOnXP();
 
   // Level up!
   if (newLevel.level > prevLevel.level) {
@@ -13680,6 +13802,1395 @@ function updateXPBar() {
     ? total.toLocaleString() + ' / ' + next.xp.toLocaleString() + ' XP'
     : total.toLocaleString() + ' XP · Max Level';
   if (fill)  fill.style.width   = pct + '%';
+}
+
+// ── Level-up celebration ───────────────────────────────────────
+
+// ══════════════════════════════════════════════════════════════
+//  CLUB DASHBOARD
+// ══════════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════════
+//  CLUB DASHBOARD  — v2 (Announcements · Smart Assign ·
+//                        HOSA Events · Multi-Club · Settings)
+// ══════════════════════════════════════════════════════════════
+
+var _clubState = {
+  clubs:         [],    // every club this user belongs to
+  active:        null,  // currently-viewed club (with .myRole)
+  members:       [],
+  stats:         [],
+  assignments:   [],
+  announcements: [],
+  tab:           'overview'
+};
+
+// ── HOSA events catalogue ────────────────────────────────────
+var _HOSA_EVENTS = [
+  { id:'cpr',                 name:'CPR / First Aid' },
+  { id:'emt',                 name:'Emergency Medical Tech' },
+  { id:'clinical-nursing',    name:'Clinical Nursing' },
+  { id:'sports-medicine',     name:'Sports Medicine' },
+  { id:'medical-terminology', name:'Medical Terminology' },
+  { id:'pathophysiology',     name:'Pathophysiology' },
+  { id:'pharmacy-science',    name:'Pharmacy Science' },
+  { id:'physical-therapy',    name:'Physical Therapy' },
+  { id:'clinical-lab',        name:'Clinical Lab Science' },
+  { id:'dental-science',      name:'Dental Science' },
+  { id:'veterinary-science',  name:'Veterinary Science' },
+  { id:'biotechnology',       name:'Biotechnology' },
+  { id:'medical-math',        name:'Medical Math' },
+  { id:'forensic-science',    name:'Forensic Science' },
+  { id:'behavioral-health',   name:'Behavioral Health' },
+  { id:'medical-spelling',    name:'Medical Spelling' },
+  { id:'human-growth',        name:'Human Growth & Dev.' },
+  { id:'medical-law',         name:'Medical Law & Ethics' },
+  { id:'epidemiology',        name:'Epidemiology' },
+  { id:'nutrition',           name:'Nutrition' },
+  { id:'creative-problem',    name:'Creative Problem Solving' },
+  { id:'hosa-bowl',           name:'HOSA Bowl' },
+  { id:'biomedical-debate',   name:'Biomedical Debate' },
+  { id:'community-awareness', name:'Community Awareness' },
+  { id:'medical-innovation',  name:'Medical Innovation' }
+];
+function _hosaName(id) {
+  var e = _HOSA_EVENTS.find(function(x){return x.id===id;});
+  return e ? e.name : id;
+}
+
+// ── User helpers ─────────────────────────────────────────────
+function _clubUserName() {
+  var u = typeof getCurrentUser === 'function' ? getCurrentUser() : null;
+  if (!u) return 'Unknown';
+  var ln = (u.name || '').split(' ').slice(1).join(' ');
+  return u.name.split(' ')[0] + (ln ? ' ' + ln.charAt(0) + '.' : '');
+}
+function _clubAvatar() {
+  var u = typeof getCurrentUser === 'function' ? getCurrentUser() : null;
+  return u ? (u.picture || '') : '';
+}
+
+// ── Weak-cats / member-stats helpers ─────────────────────────
+function _computeWeakCats() {
+  var catStats = {};
+  if (typeof flashcards === 'undefined') return [];
+  flashcards.forEach(function(f) {
+    if (!catStats[f.cat]) catStats[f.cat] = { total:0, mastered:0 };
+    catStats[f.cat].total++;
+    var c = sm2Get('fc:' + f.term);
+    if (c.state === 'review' && c.interval >= 7) catStats[f.cat].mastered++;
+  });
+  return Object.entries(catStats)
+    .filter(function(e){return e[1].total >= 8;})
+    .map(function(e){return {cat:e[0], rate:e[1].mastered/e[1].total};})
+    .sort(function(a,b){return a.rate-b.rate;})
+    .slice(0,5).map(function(e){return e.cat;});
+}
+function _buildMemberStats() {
+  var qs  = typeof progressQuizStats !== 'undefined' ? progressQuizStats : {};
+  var avg = qs.totalQ ? Math.round((qs.totalCorrect/qs.totalQ)*100) : 0;
+  return {
+    total_xp:        (typeof xpData !== 'undefined' ? xpData.totalXP      : 0) || 0,
+    week_xp:         (typeof xpData !== 'undefined' ? xpData.weekXP       : 0) || 0,
+    streak:          (typeof progressStreak !== 'undefined' ? progressStreak.currentStreak : 0) || 0,
+    level:           (typeof xpGetLevel === 'function' ? xpGetLevel((xpData||{}).totalXP||0).level : 1),
+    cards_reviewed:  (typeof xpData !== 'undefined' ? xpData.cardsReviewed   : 0) || 0,
+    cases_completed: (typeof xpData !== 'undefined' ? xpData.casesCompleted  : 0) || 0,
+    quizzes_done:    qs.quizzesDone || 0,
+    quiz_avg:        avg,
+    weak_cats:       _computeWeakCats()
+  };
+}
+var _clubStatsPushTimer = null;
+function _scheduleMemberStatsPush() {
+  clearTimeout(_clubStatsPushTimer);
+  _clubStatsPushTimer = setTimeout(function() {
+    _clubState.clubs.forEach(function(club) {
+      SupabaseSync.pushMemberStats(club.id, _buildMemberStats());
+    });
+  }, 8000);
+}
+
+// ── Assignment progress ───────────────────────────────────────
+function _assignmentProgress(a) {
+  var done = 0, total = a.target_count || 0;
+  if (a.type === 'flashcards' && a.target_cat) {
+    if (typeof flashcards !== 'undefined') {
+      done = flashcards.filter(function(f) {
+        if (f.cat !== a.target_cat) return false;
+        return sm2Get('fc:'+f.term).reps > 0;
+      }).length;
+      if (!total) total = flashcards.filter(function(f){return f.cat===a.target_cat;}).length;
+    }
+  } else if (a.type === 'cases' && a.target_cat) {
+    if (typeof progressCaseStats !== 'undefined') {
+      done = Object.values(progressCaseStats.byId||{})
+        .filter(function(c){return c.difficulty===a.target_cat&&c.attempts>0;}).length;
+      if (!total) total = (typeof cases!=='undefined') ? cases.filter(function(c){return c.difficulty===a.target_cat;}).length : 0;
+    }
+  } else if (a.type === 'quiz') {
+    if (typeof progressQuizStats !== 'undefined') {
+      done = progressQuizStats.quizzesDone||0; total = total||1;
+    }
+  } else if (a.type === 'hosa' && a.target_cat) {
+    // Tracked via hosaPanelsOpened in xpData
+    var opened = (typeof xpData!=='undefined'&&xpData.hosaPanelsOpened)
+      ? xpData.hosaPanelsOpened.includes(a.target_cat) : false;
+    return { done: opened?1:0, total:1 };
+  }
+  return { done:Math.min(done, total||done), total:total||0 };
+}
+function _isDue(d)    { return !!d && new Date(d) < new Date(); }
+function _daysUntil(d) {
+  if (!d) return null;
+  var diff = Math.ceil((new Date(d)-new Date())/86400000);
+  if (diff<0)  return 'Overdue';
+  if (diff===0) return 'Due today';
+  if (diff===1) return 'Due tomorrow';
+  return 'Due in '+diff+' days';
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SCREEN INIT
+// ═══════════════════════════════════════════════════════════════
+
+async function initClubScreen() {
+  var user = typeof getCurrentUser==='function' ? getCurrentUser() : null;
+  var el   = document.getElementById('clubContent');
+  if (!el) return;
+
+  if (!user) { el.innerHTML = _clubRenderSignIn(); return; }
+
+  el.innerHTML = '<div class="club-loading"><div class="club-spinner"></div><p>Loading your club…</p></div>';
+
+  _clubState.clubs = await SupabaseSync.fetchMyClubs();
+
+  if (!_clubState.clubs.length) { el.innerHTML = _clubRenderNoClub(); return; }
+
+  // Preserve active selection or default to first
+  if (!_clubState.active || !_clubState.clubs.find(function(c){return c.id===_clubState.active.id;})) {
+    _clubState.active = _clubState.clubs[0];
+  }
+
+  var clubId = _clubState.active.id;
+  var results = await Promise.all([
+    SupabaseSync.fetchClubMembers(clubId),
+    SupabaseSync.fetchClubStats(clubId),
+    SupabaseSync.fetchAssignments(clubId),
+    SupabaseSync.fetchAnnouncements(clubId)
+  ]);
+  _clubState.members       = results[0];
+  _clubState.stats         = results[1];
+  _clubState.assignments   = results[2];
+  _clubState.announcements = results[3];
+
+  // Push this user's stats to the club
+  SupabaseSync.pushMemberStats(clubId, _buildMemberStats());
+
+  var isOwner = _clubState.active.myRole === 'owner';
+  el.innerHTML = isOwner ? _clubRenderTeacher() : _clubRenderStudent();
+}
+
+async function _clubSwitchTo(clubId) {
+  _clubState.active = _clubState.clubs.find(function(c){return c.id===clubId;}) || _clubState.clubs[0];
+  _clubState.tab    = 'overview';
+  initClubScreen();
+}
+
+function switchClubTab(tab) {
+  _clubState.tab = tab;
+  document.querySelectorAll('.club-tab').forEach(function(b){
+    b.classList.toggle('active', b.dataset.tab===tab);
+  });
+  var content = document.getElementById('clubTabContent');
+  if (content) {
+    var isOwner = _clubState.active && _clubState.active.myRole==='owner';
+    content.innerHTML = isOwner ? _clubTeacherTab(tab) : '';
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SIGN-IN / NO-CLUB STATES
+// ═══════════════════════════════════════════════════════════════
+
+function _clubRenderSignIn() {
+  return '<div class="club-empty-state">'
+    +'<div class="club-empty-icon">🏫</div>'
+    +'<div class="club-empty-title">Sign in to join a club</div>'
+    +'<div class="club-empty-desc">Sign in with Google to create or join a study group.</div>'
+    +'<button class="club-cta-btn" onclick="triggerGoogleSignIn()">Sign in with Google</button>'
+    +'</div>';
+}
+
+function _clubRenderNoClub() {
+  return '<div class="club-setup">'
+    +'<div class="club-setup-hero">'
+    +'<div class="club-empty-icon">🏫</div>'
+    +'<h3>Study together, improve faster</h3>'
+    +'<p>Create a club to track your group\'s progress and assign practice, or join an existing one with a code.</p>'
+    +'</div>'
+    +'<div class="club-setup-actions">'
+    +'<button class="club-setup-btn club-setup-btn--primary" onclick="_clubShowCreate()">+ Create a Club</button>'
+    +'<div class="club-setup-or">or</div>'
+    +'<div class="club-join-row">'
+    +'<input class="club-join-input" id="clubJoinCodeInput" type="text" maxlength="8" placeholder="Enter join code (e.g. 7K3X9P)" autocomplete="off" spellcheck="false">'
+    +'<button class="club-setup-btn" onclick="_clubJoin()">Join</button>'
+    +'</div>'
+    +'<div class="club-join-error hidden" id="clubJoinError"></div>'
+    +'</div>'
+    +'<div class="club-create-form hidden" id="clubCreateForm">'
+    +'<input class="club-join-input" id="clubNameInput" type="text" maxlength="60" placeholder="Club name (e.g. Milton HOSA Club)" autocomplete="off">'
+    +'<div class="club-form-row">'
+    +'<button class="club-setup-btn club-setup-btn--primary" onclick="_clubCreate()">Create</button>'
+    +'<button class="club-setup-btn" onclick="_clubHideCreate()">Cancel</button>'
+    +'</div>'
+    +'<div class="club-join-error hidden" id="clubCreateError"></div>'
+    +'</div>'
+    +'</div>';
+}
+
+function _clubShowCreate() { document.getElementById('clubCreateForm').classList.remove('hidden'); document.getElementById('clubNameInput').focus(); }
+function _clubHideCreate() { document.getElementById('clubCreateForm').classList.add('hidden'); }
+
+async function _clubCreate() {
+  var nameEl = document.getElementById('clubNameInput');
+  var errEl  = document.getElementById('clubCreateError');
+  var name   = nameEl ? nameEl.value.trim() : '';
+  if (!name) { if(errEl){errEl.textContent='Enter a club name';errEl.classList.remove('hidden');} return; }
+  var btn = document.querySelector('[onclick="_clubCreate()"]');
+  if (btn) { btn.textContent='Creating…'; btn.disabled=true; }
+  var result = await SupabaseSync.createClub(name, _clubUserName(), _clubAvatar());
+  if (!result) { if(errEl){errEl.textContent='Failed — try again';errEl.classList.remove('hidden');} if(btn){btn.textContent='Create';btn.disabled=false;} return; }
+  _clubState.clubs = await SupabaseSync.fetchMyClubs();
+  _clubState.active = _clubState.clubs.find(function(c){return c.id===result.id;})||_clubState.clubs[0];
+  initClubScreen();
+}
+
+async function _clubJoin() {
+  var codeEl = document.getElementById('clubJoinCodeInput');
+  var errEl  = document.getElementById('clubJoinError');
+  var code   = codeEl ? codeEl.value.trim() : '';
+  if (!code) { if(errEl){errEl.textContent='Enter a join code';errEl.classList.remove('hidden');} return; }
+  var btn = document.querySelector('[onclick="_clubJoin()"]');
+  if (btn) { btn.textContent='Joining…'; btn.disabled=true; }
+  var result = await SupabaseSync.joinClub(code, _clubUserName(), _clubAvatar());
+  if (typeof result==='string' && !result.startsWith('already_member:')) {
+    if(errEl){errEl.textContent=result;errEl.classList.remove('hidden');}
+    if(btn){btn.textContent='Join';btn.disabled=false;}
+    return;
+  }
+  _clubState.clubs = await SupabaseSync.fetchMyClubs();
+  _clubState.active = _clubState.clubs[0];
+  initClubScreen();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  CLUB SELECTOR (multi-club dropdown)
+// ═══════════════════════════════════════════════════════════════
+
+function _clubSelectorHTML() {
+  if (_clubState.clubs.length <= 1) return '';
+  var opts = _clubState.clubs.map(function(c) {
+    return '<option value="'+c.id+'"'+(c.id===_clubState.active.id?' selected':'')+'>'+_esc(c.name)+(c.myRole==='owner'?' (owner)':'')+'</option>';
+  }).join('');
+  return '<div class="club-selector-wrap">'
+    +'<select class="club-selector" onchange="_clubSwitchTo(this.value)">'+opts+'</select>'
+    +'</div>';
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  TEACHER VIEW
+// ═══════════════════════════════════════════════════════════════
+
+function _clubRenderTeacher() {
+  var club = _clubState.active;
+  return _clubSelectorHTML()
+    +'<div class="club-header">'
+    +'<div class="club-header-left">'
+    +'<h3 class="club-name">'+_esc(club.name)+'</h3>'
+    +'<div class="club-meta">'+_clubState.members.length+' member'+(_clubState.members.length!==1?'s':'')+'</div>'
+    +'</div>'
+    +'<div class="club-header-right">'
+    +'<div class="club-code-box" onclick="_clubCopyCode(\''+club.join_code+'\')" title="Click to copy">'
+    +'<span class="club-code-label">Join Code</span>'
+    +'<span class="club-code-val">'+club.join_code+'</span>'
+    +'</div>'
+    +'</div>'
+    +'</div>'
+    +'<div class="club-tabs">'
+    +'<button class="club-tab'+(_clubState.tab==='overview'?' active':'')+'" data-tab="overview" onclick="switchClubTab(\'overview\')">Overview</button>'
+    +'<button class="club-tab'+(_clubState.tab==='students'?' active':'')+'" data-tab="students" onclick="switchClubTab(\'students\')">Students</button>'
+    +'<button class="club-tab'+(_clubState.tab==='assignments'?' active':'')+'" data-tab="assignments" onclick="switchClubTab(\'assignments\')">Assignments</button>'
+    +'<button class="club-tab'+(_clubState.tab==='announcements'?' active':'')+'" data-tab="announcements" onclick="switchClubTab(\'announcements\')">Announce</button>'
+    +'<button class="club-tab'+(_clubState.tab==='settings'?' active':'')+'" data-tab="settings" onclick="switchClubTab(\'settings\')">⚙ Settings</button>'
+    +'</div>'
+    +'<div id="clubTabContent">'+_clubTeacherTab(_clubState.tab)+'</div>';
+}
+
+function _clubTeacherTab(tab) {
+  if (tab==='overview')      return _clubTeacherOverview();
+  if (tab==='students')      return _clubTeacherStudents();
+  if (tab==='assignments')   return _clubTeacherAssignments();
+  if (tab==='announcements') return _clubTeacherAnnouncements();
+  if (tab==='settings')      return _clubTeacherSettings();
+  return '';
+}
+
+// ── Overview + smart "Assign this" ───────────────────────────
+
+function _clubTeacherOverview() {
+  var stats   = _clubState.stats;
+  var members = _clubState.members;
+  var totalCards   = stats.reduce(function(s,r){return s+(r.cards_reviewed||0);},0);
+  var quizAvgs     = stats.filter(function(r){return r.quizzes_done>0;}).map(function(r){return r.quiz_avg;});
+  var avgQuiz      = quizAvgs.length ? Math.round(quizAvgs.reduce(function(a,b){return a+b;},0)/quizAvgs.length) : null;
+  var activeThisWeek = stats.filter(function(r){return r.week_xp>0;}).length;
+
+  var catCount = {};
+  stats.forEach(function(r){ (r.weak_cats||[]).forEach(function(cat){ catCount[cat]=(catCount[cat]||0)+1; }); });
+  var weakList = Object.entries(catCount).sort(function(a,b){return b[1]-a[1];}).slice(0,8);
+
+  var html = '<div class="club-stats-grid">'
+    +_clubStatCard('👥', members.length, 'Members')
+    +_clubStatCard('⚡', activeThisWeek, 'Active this week')
+    +_clubStatCard('🃏', totalCards.toLocaleString(), 'Cards studied')
+    +(avgQuiz!==null ? _clubStatCard('📝', avgQuiz+'%', 'Avg quiz score') : '')
+    +'</div>';
+
+  if (weakList.length) {
+    var maxCount = weakList[0][1];
+    html += '<div class="club-section-title">📉 Class Weak Spots <span class="club-hint">— click Assign to create a targeted assignment</span></div>'
+      +'<div class="club-heatmap">';
+    weakList.forEach(function(e, i) {
+      var pct = Math.round((e[1]/(stats.length||1))*100);
+      var cls = pct>=60?'club-heat--danger':pct>=30?'club-heat--warn':'club-heat--ok';
+      html += '<div class="club-heat-row">'
+        +'<span class="club-heat-cat">'+_esc(e[0])+'</span>'
+        +'<div class="club-heat-bar-wrap"><div class="club-heat-bar '+cls+'" style="width:'+Math.round((e[1]/maxCount)*100)+'%"></div></div>'
+        +'<span class="club-heat-count">'+e[1]+'/'+stats.length+'</span>'
+        +(i===0
+          ? '<button class="club-smart-assign" onclick="_clubQuickAssign(\'flashcards\',\''+_esc(e[0])+'\',30)" title="Assign 30 cards on this topic">Assign →</button>'
+          : '<button class="club-smart-assign club-smart-assign--sm" onclick="_clubQuickAssign(\'flashcards\',\''+_esc(e[0])+'\',20)">Assign</button>')
+        +'</div>';
+    });
+    html += '</div>';
+
+    // Smart recommendation card
+    var top = weakList[0];
+    html += '<div class="club-recommend">'
+      +'<div class="club-recommend-label">💡 Recommended Assignment</div>'
+      +'<div class="club-recommend-text">Your class is weakest in <strong>'+_esc(top[0])+'</strong> '
+      +'— '+top[1]+' of '+stats.length+' students flagged it as a weak spot.</div>'
+      +'<button class="club-recommend-btn" onclick="_clubQuickAssign(\'flashcards\',\''+_esc(top[0])+'\',30)">'
+      +'📋 Assign: Review '+_esc(top[0])+' (30 cards)'
+      +'</button>'
+      +'</div>';
+  } else {
+    html += '<div class="club-empty-hint">No weak-spot data yet — students will appear here after they study flashcards.</div>';
+  }
+  return html;
+}
+
+async function _clubQuickAssign(type, cat, count) {
+  var title = 'Review: ' + cat;
+  var result = await SupabaseSync.createAssignment({
+    club_id: _clubState.active.id, title: title,
+    type: type, target_cat: cat, target_count: count, due_date: null
+  });
+  if (result) {
+    _clubState.assignments.unshift(result);
+    showSettingsToast('✓ Assignment created: ' + title);
+  }
+}
+
+function _clubStatCard(icon,val,label) {
+  return '<div class="club-stat-card"><div class="club-stat-icon">'+icon+'</div>'
+    +'<div class="club-stat-val">'+val+'</div><div class="club-stat-lbl">'+label+'</div></div>';
+}
+
+// ── Students ──────────────────────────────────────────────────
+
+function _clubTeacherStudents() {
+  var members  = _clubState.members.filter(function(m){return m.role!=='owner';});
+  var statsMap = {};
+  _clubState.stats.forEach(function(s){statsMap[s.user_id]=s;});
+  if (!members.length) return '<div class="club-empty-hint">No students yet. Share your join code: <strong>'+_esc(_clubState.active.join_code)+'</strong></div>';
+  var html = '<div class="club-student-table">'
+    +'<div class="club-table-head"><span>Student</span><span>XP</span><span>Cards</span><span>Streak</span><span>Quiz avg</span></div>';
+  members.sort(function(a,b){return ((statsMap[b.user_id]||{}).total_xp||0)-((statsMap[a.user_id]||{}).total_xp||0);})
+    .forEach(function(m) {
+      var s = statsMap[m.user_id]||{};
+      var status = (s.streak||0)>=5 ? '<span class="club-badge club-badge--strong">Strong</span>'
+        : (s.week_xp||0)>0 ? '<span class="club-badge club-badge--ok">Active</span>'
+        : '<span class="club-badge club-badge--warn">Inactive</span>';
+      html += '<div class="club-student-row">'
+        +'<div class="club-student-info">'+_lbAvatar(m,'club-s-avatar')+'<span>'+_esc(m.display_name||'Student')+'</span>'+status+'</div>'
+        +'<span class="club-td">'+((s.total_xp||0).toLocaleString())+' XP</span>'
+        +'<span class="club-td">'+(s.cards_reviewed||0)+'</span>'
+        +'<span class="club-td">'+(s.streak?'🔥 '+s.streak+'d':'—')+'</span>'
+        +'<span class="club-td">'+(s.quizzes_done>0?(s.quiz_avg||0)+'%':'—')+'</span>'
+        +'</div>';
+    });
+  return html + '</div>';
+}
+
+// ── Assignments (now with HOSA type) ─────────────────────────
+
+function _clubTeacherAssignments() {
+  var assignments = _clubState.assignments;
+  var html = '<button class="club-new-btn" onclick="_clubShowAssignForm()">+ New Assignment</button>'
+    +'<div class="club-assign-form hidden" id="clubAssignForm">'+_clubAssignFormHTML()+'</div>';
+  if (!assignments.length) {
+    html += '<div class="club-empty-hint">No assignments yet. Create one above.</div>';
+  } else {
+    html += '<div class="club-assign-list">';
+    assignments.forEach(function(a) {
+      var due = _daysUntil(a.due_date);
+      var dueClass = _isDue(a.due_date)?'club-due--overdue':'club-due--ok';
+      html += '<div class="club-assign-card">'
+        +'<div class="club-assign-top">'
+        +'<span class="club-assign-title">'+_esc(a.title)+'</span>'
+        +'<button class="club-assign-delete" onclick="_clubDeleteAssignment(\''+a.id+'\')" title="Delete">✕</button>'
+        +'</div>'
+        +'<div class="club-assign-meta">'+_clubAssignTypeChip(a.type)+(a.target_cat?' · '+_esc(a.type==='hosa'?_hosaName(a.target_cat):a.target_cat):'')+'</div>'
+        +(due?'<div class="club-assign-due '+dueClass+'">'+due+'</div>':'')
+        +'</div>';
+    });
+    html += '</div>';
+  }
+  return html;
+}
+
+function _clubAssignTypeChip(type) {
+  return {flashcards:'🃏 Flashcards', cases:'🩺 Cases', quiz:'📝 Quiz', hosa:'🏆 HOSA Event'}[type] || type;
+}
+
+function _clubAssignFormHTML() {
+  var cats = typeof flashcards!=='undefined' ? [...new Set(flashcards.map(function(f){return f.cat;}))] : [];
+  var catOptions = cats.map(function(c){return '<option value="'+_esc(c)+'">'+_esc(c)+'</option>';}).join('');
+  var hosaOptions = _HOSA_EVENTS.map(function(e){return '<option value="'+e.id+'">'+_esc(e.name)+'</option>';}).join('');
+  var caseOptions = ['beginner','intermediate','advanced','expert'].map(function(d){return '<option value="'+d+'">'+d.charAt(0).toUpperCase()+d.slice(1)+'</option>';}).join('');
+  return '<div class="club-form-title">New Assignment</div>'
+    +'<input class="club-input" id="afTitle" type="text" placeholder="Assignment title" maxlength="80">'
+    +'<select class="club-input" id="afType" onchange="_clubAssignTypeChange()">'
+    +'<option value="flashcards">Flashcards</option>'
+    +'<option value="cases">Clinical Cases</option>'
+    +'<option value="hosa">HOSA Event</option>'
+    +'<option value="quiz">Quiz</option>'
+    +'</select>'
+    +'<div id="afTargetWrap"><select class="club-input" id="afCat">'+catOptions+'</select></div>'
+    +'<div class="club-form-row">'
+    +'<input class="club-input" id="afCount" type="number" min="1" max="500" placeholder="Target count (optional)">'
+    +'<input class="club-input" id="afDue" type="date">'
+    +'</div>'
+    +'<div class="club-form-row">'
+    +'<button class="club-setup-btn club-setup-btn--primary" onclick="_clubCreateAssignment()">Add Assignment</button>'
+    +'<button class="club-setup-btn" onclick="_clubHideAssignForm()">Cancel</button>'
+    +'</div>'
+    +'<div class="club-join-error hidden" id="clubAssignError"></div>';
+}
+
+function _clubAssignTypeChange() {
+  var type = (document.getElementById('afType')||{}).value;
+  var wrap = document.getElementById('afTargetWrap');
+  var countEl = document.getElementById('afCount');
+  if (!wrap) return;
+  var cats = typeof flashcards!=='undefined' ? [...new Set(flashcards.map(function(f){return f.cat;}))] : [];
+  if (type==='flashcards') {
+    wrap.innerHTML = '<select class="club-input" id="afCat">'+cats.map(function(c){return '<option value="'+_esc(c)+'">'+_esc(c)+'</option>';}).join('')+'</select>';
+    if (countEl) { countEl.placeholder='Target count (optional)'; countEl.style.display=''; }
+  } else if (type==='cases') {
+    wrap.innerHTML = '<select class="club-input" id="afCat"><option value="beginner">Beginner</option><option value="intermediate">Intermediate</option><option value="advanced">Advanced</option><option value="expert">Expert</option></select>';
+    if (countEl) { countEl.placeholder='Number of cases'; countEl.style.display=''; }
+  } else if (type==='hosa') {
+    wrap.innerHTML = '<select class="club-input" id="afCat">'+_HOSA_EVENTS.map(function(e){return '<option value="'+e.id+'">'+_esc(e.name)+'</option>';}).join('')+'</select>';
+    if (countEl) { countEl.style.display='none'; }
+  } else {
+    wrap.innerHTML = '<select class="club-input" id="afCat"><option value="any">Any topic</option></select>';
+    if (countEl) { countEl.placeholder='Number of quizzes'; countEl.style.display=''; }
+  }
+}
+
+function _clubShowAssignForm()  { var e=document.getElementById('clubAssignForm'); if(e){e.classList.remove('hidden');e.scrollIntoView({behavior:'smooth',block:'nearest'});} }
+function _clubHideAssignForm()  { var e=document.getElementById('clubAssignForm'); if(e) e.classList.add('hidden'); }
+
+async function _clubCreateAssignment() {
+  var title = (document.getElementById('afTitle')||{}).value||'';
+  var type  = (document.getElementById('afType') ||{}).value||'flashcards';
+  var cat   = (document.getElementById('afCat')  ||{}).value||'';
+  var count = parseInt((document.getElementById('afCount')||{}).value||'')||null;
+  var due   = (document.getElementById('afDue')  ||{}).value||null;
+  var errEl = document.getElementById('clubAssignError');
+  if (!title.trim()) { if(errEl){errEl.textContent='Enter a title';errEl.classList.remove('hidden');} return; }
+  var result = await SupabaseSync.createAssignment({
+    club_id:_clubState.active.id, title:title.trim(), type:type,
+    target_cat:cat==='any'?null:cat, target_count:type==='hosa'?null:count, due_date:due||null
+  });
+  if (!result) { if(errEl){errEl.textContent='Failed — try again';errEl.classList.remove('hidden');} return; }
+  _clubState.assignments.unshift(result);
+  _clubHideAssignForm();
+  switchClubTab('assignments');
+}
+
+async function _clubDeleteAssignment(id) {
+  if (!confirm('Delete this assignment?')) return;
+  await SupabaseSync.deleteAssignment(id);
+  _clubState.assignments = _clubState.assignments.filter(function(a){return a.id!==id;});
+  switchClubTab('assignments');
+}
+
+// ── Announcements ─────────────────────────────────────────────
+
+function _clubTeacherAnnouncements() {
+  var anns = _clubState.announcements;
+  var html = '<div class="club-ann-compose">'
+    +'<textarea class="club-ann-input" id="annInput" placeholder="Post an announcement to your club… (meeting times, reminders, encouragement)" rows="3" maxlength="500"></textarea>'
+    +'<div class="club-form-row">'
+    +'<button class="club-setup-btn club-setup-btn--primary" onclick="_clubPostAnnouncement()">Post</button>'
+    +'</div>'
+    +'</div>';
+  if (!anns.length) {
+    html += '<div class="club-empty-hint">No announcements yet. Post one above — students will see it at the top of their club view.</div>';
+  } else {
+    html += '<div class="club-ann-list">';
+    anns.forEach(function(a) {
+      var ago = _timeAgo(a.created_at);
+      html += '<div class="club-ann-card">'
+        +'<div class="club-ann-body">'+_esc(a.message)+'</div>'
+        +'<div class="club-ann-footer">'
+        +'<span class="club-ann-time">'+ago+'</span>'
+        +'<button class="club-assign-delete" onclick="_clubDeleteAnnouncement(\''+a.id+'\')" title="Delete">✕</button>'
+        +'</div>'
+        +'</div>';
+    });
+    html += '</div>';
+  }
+  return html;
+}
+
+async function _clubPostAnnouncement() {
+  var input = document.getElementById('annInput');
+  var msg   = input ? input.value.trim() : '';
+  if (!msg) return;
+  var result = await SupabaseSync.createAnnouncement({ club_id:_clubState.active.id, message:msg });
+  if (result) {
+    _clubState.announcements.unshift(result);
+    if (input) input.value = '';
+    switchClubTab('announcements');
+    showSettingsToast('Announcement posted');
+  }
+}
+
+async function _clubDeleteAnnouncement(id) {
+  await SupabaseSync.deleteAnnouncement(id);
+  _clubState.announcements = _clubState.announcements.filter(function(a){return a.id!==id;});
+  switchClubTab('announcements');
+}
+
+// ── Settings ──────────────────────────────────────────────────
+
+function _clubTeacherSettings() {
+  var club = _clubState.active;
+  return '<div class="club-settings">'
+    +'<div class="club-section-title">Club Name</div>'
+    +'<div class="club-form-row">'
+    +'<input class="club-input" id="csName" type="text" value="'+_esc(club.name)+'" maxlength="60">'
+    +'<button class="club-setup-btn club-setup-btn--primary" onclick="_clubSaveName()">Save</button>'
+    +'</div>'
+    +'<div class="club-join-error hidden" id="csNameErr"></div>'
+
+    +'<div class="club-section-title" style="margin-top:20px">Join Code</div>'
+    +'<div class="club-settings-code-row">'
+    +'<div class="club-code-display">'+club.join_code+'</div>'
+    +'<button class="club-setup-btn" onclick="_clubCopyCode(\''+club.join_code+'\')" title="Copy">Copy</button>'
+    +'<button class="club-setup-btn" onclick="_clubRegenCode()">🔄 Regenerate</button>'
+    +'</div>'
+    +'<div class="club-hint-text">Regenerate if the code was shared with unintended people. Old code immediately stops working.</div>'
+
+    +'<div class="club-section-title" style="margin-top:24px">Members ('+club.join_code+')</div>'
+    +'<div class="club-hint-text" style="margin-bottom:8px">Students can leave by tapping "Leave club" in their view.</div>'
+
+    +'<div class="club-danger-zone">'
+    +'<div class="club-section-title club-section-title--danger">⚠ Danger Zone</div>'
+    +'<div class="club-hint-text" style="margin-bottom:10px">Permanently deletes the club, all members, assignments, and announcements. This cannot be undone.</div>'
+    +'<button class="club-danger-btn" onclick="_clubDeleteClub()">Delete Club</button>'
+    +'</div>'
+    +'</div>';
+}
+
+async function _clubSaveName() {
+  var input = document.getElementById('csName');
+  var errEl = document.getElementById('csNameErr');
+  var name  = input ? input.value.trim() : '';
+  if (!name) { if(errEl){errEl.textContent='Enter a name';errEl.classList.remove('hidden');} return; }
+  var ok = await SupabaseSync.updateClub(_clubState.active.id, { name:name });
+  if (ok) {
+    _clubState.active.name = name;
+    // Update the club in the clubs list too
+    var c = _clubState.clubs.find(function(c){return c.id===_clubState.active.id;});
+    if (c) c.name = name;
+    document.querySelector('.club-name') && (document.querySelector('.club-name').textContent = name);
+    showSettingsToast('Club renamed to "'+name+'"');
+    if(errEl) errEl.classList.add('hidden');
+  } else {
+    if(errEl){errEl.textContent='Failed — try again';errEl.classList.remove('hidden');}
+  }
+}
+
+async function _clubRegenCode() {
+  if (!confirm('Regenerate the join code? The old code will stop working immediately.')) return;
+  var newCode = Math.random().toString(36).substr(2,6).toUpperCase();
+  var ok = await SupabaseSync.updateClub(_clubState.active.id, { join_code:newCode });
+  if (ok) {
+    _clubState.active.join_code = newCode;
+    var c = _clubState.clubs.find(function(c){return c.id===_clubState.active.id;});
+    if (c) c.join_code = newCode;
+    switchClubTab('settings');
+    showSettingsToast('New join code: ' + newCode);
+  }
+}
+
+async function _clubDeleteClub() {
+  if (!confirm('Delete "'+_clubState.active.name+'"? This is permanent and cannot be undone.')) return;
+  await SupabaseSync.deleteClub(_clubState.active.id);
+  _clubState.active = null;
+  _clubState.clubs  = await SupabaseSync.fetchMyClubs();
+  initClubScreen();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  STUDENT VIEW
+// ═══════════════════════════════════════════════════════════════
+
+function _clubRenderStudent() {
+  var club    = _clubState.active;
+  var members = _clubState.members;
+  var statsMap = {};
+  _clubState.stats.forEach(function(s){statsMap[s.user_id]=s;});
+
+  var html = _clubSelectorHTML()
+    +'<div class="club-header">'
+    +'<div class="club-header-left">'
+    +'<h3 class="club-name">'+_esc(club.name)+'</h3>'
+    +'<div class="club-meta">'+members.length+' members</div>'
+    +'</div>'
+    +'</div>';
+
+  // Announcements banner (latest 2)
+  var anns = (_clubState.announcements||[]).slice(0,2);
+  if (anns.length) {
+    html += '<div class="club-ann-banner">';
+    anns.forEach(function(a) {
+      html += '<div class="club-ann-banner-item">'
+        +'<span class="club-ann-banner-icon">📢</span>'
+        +'<div class="club-ann-banner-body">'
+        +'<span class="club-ann-banner-msg">'+_esc(a.message)+'</span>'
+        +'<span class="club-ann-banner-time">'+_timeAgo(a.created_at)+'</span>'
+        +'</div>'
+        +'</div>';
+    });
+    html += '</div>';
+  }
+
+  // Assignments
+  var assignments = _clubState.assignments;
+  if (assignments.length) {
+    html += '<div class="club-section-title">📋 Assignments</div><div class="club-assign-list">';
+    assignments.forEach(function(a) {
+      var prog = _assignmentProgress(a);
+      var pct  = prog.total>0 ? Math.min(100,Math.round((prog.done/prog.total)*100)) : 0;
+      var done = pct>=100;
+      var due  = _daysUntil(a.due_date);
+      var dueClass = _isDue(a.due_date)&&!done?'club-due--overdue':'club-due--ok';
+
+      // Action for "Study now" button
+      var action;
+      if (a.type==='hosa' && a.target_cat) {
+        action = 'showScreen(\'hosa\');setTimeout(function(){showHosaEvent(\''+a.target_cat+'\',\''+_esc(_hosaName(a.target_cat))+'\');},250)';
+      } else if (a.type==='cases') {
+        action = 'showScreen(\'case\')';
+      } else if (a.type==='quiz') {
+        action = 'showScreen(\'quiz\')';
+      } else {
+        action = 'showScreen(\'flashcards\')';
+      }
+
+      html += '<div class="club-assign-card'+(done?' club-assign-card--done':'')+'">'
+        +'<div class="club-assign-top">'
+        +'<span class="club-assign-title">'+_esc(a.title)+'</span>'
+        +(done?'<span class="club-done-badge">✓ Done</span>':'')
+        +'</div>'
+        +'<div class="club-assign-meta">'+_clubAssignTypeChip(a.type)+(a.target_cat?' · '+_esc(a.type==='hosa'?_hosaName(a.target_cat):a.target_cat):'')+'</div>'
+        +(due&&!done?'<div class="club-assign-due '+dueClass+'">'+due+'</div>':'')
+        +(prog.total>0
+          ? '<div class="club-prog-wrap"><div class="club-prog-bar'+(done?' club-prog-bar--done':'')+'" style="width:'+pct+'%"></div></div>'
+            +'<div class="club-prog-label">'+prog.done+' / '+prog.total+(a.type==='hosa'?' (opened)':'')+'</div>'
+          : '')
+        +(!done?'<button class="club-go-btn" onclick="'+action+'">Study now →</button>':'')
+        +'</div>';
+    });
+    html += '</div>';
+  } else {
+    html += '<div class="club-empty-hint">No assignments yet — your teacher hasn\'t posted any.</div>';
+  }
+
+  // Mini leaderboard
+  var ranked = members
+    .map(function(m){return Object.assign({},m,statsMap[m.user_id]||{});})
+    .sort(function(a,b){return (b.week_xp||0)-(a.week_xp||0);})
+    .slice(0,5);
+  if (ranked.length>1) {
+    html += '<div class="club-section-title">🏆 This Week — Club Rankings</div><div class="lb-list">';
+    ranked.forEach(function(m,i) {
+      html += '<div class="lb-row">'
+        +'<div class="lb-row-rank">'+(['🥇','🥈','🥉'][i]||'<span class="lb-rank-num">'+(i+1)+'</span>')+'</div>'
+        +_lbAvatar(m,'lb-row-avatar')
+        +'<div class="lb-row-info"><span class="lb-row-name">'+_esc(m.display_name||'Student')+'</span>'
+        +'<span class="lb-row-level">Lv. '+(m.level||1)+'</span></div>'
+        +'<div class="lb-row-right"><span class="lb-row-xp">'+((m.week_xp||0).toLocaleString())+' XP</span></div>'
+        +'</div>';
+    });
+    html += '</div>';
+  }
+
+  html += '<div class="club-leave-wrap">'
+    +'<button class="club-leave-btn" onclick="_clubLeave()">Leave club</button>'
+    +'</div>';
+
+  return html;
+}
+
+async function _clubLeave() {
+  if (!confirm('Leave '+(_clubState.active?_clubState.active.name:'this club')+'?')) return;
+  await SupabaseSync.leaveClub(_clubState.active.id);
+  _clubState.active = null;
+  _clubState.clubs  = await SupabaseSync.fetchMyClubs();
+  initClubScreen();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  UTILITIES
+// ═══════════════════════════════════════════════════════════════
+
+function _clubCopyCode(code) {
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(code).then(function(){ showSettingsToast('Join code copied: '+code); });
+  }
+}
+
+function _timeAgo(iso) {
+  if (!iso) return '';
+  var diff = Math.floor((Date.now()-new Date(iso))/1000);
+  if (diff<60)    return 'Just now';
+  if (diff<3600)  return Math.floor(diff/60)+'m ago';
+  if (diff<86400) return Math.floor(diff/3600)+'h ago';
+  return Math.floor(diff/86400)+'d ago';
+}
+
+function _clubStudentTab() { return ''; }
+
+function _clubOnXP() {
+  if (_clubState.clubs.length) _scheduleMemberStatsPush();
+}
+
+// ── Helpers ───────────────────────────────────────────────────
+
+function _clubUserName() {
+  var u = typeof getCurrentUser === 'function' ? getCurrentUser() : null;
+  if (!u) return 'Unknown';
+  var ln = (u.name || '').split(' ').slice(1).join(' ');
+  return u.name.split(' ')[0] + (ln ? ' ' + ln.charAt(0) + '.' : '');
+}
+
+function _clubAvatar() {
+  var u = typeof getCurrentUser === 'function' ? getCurrentUser() : null;
+  return u ? (u.picture || '') : '';
+}
+
+// Compute this user's top weak flashcard categories from local SM-2 data
+function _computeWeakCats() {
+  var catStats = {};
+  if (typeof flashcards === 'undefined') return [];
+  flashcards.forEach(function(f) {
+    if (!catStats[f.cat]) catStats[f.cat] = { total: 0, mastered: 0 };
+    catStats[f.cat].total++;
+    var c = sm2Get('fc:' + f.term);
+    if (c.state === 'review' && c.interval >= 7) catStats[f.cat].mastered++;
+  });
+  return Object.entries(catStats)
+    .filter(function(e) { return e[1].total >= 8; })
+    .map(function(e) { return { cat: e[0], rate: e[1].mastered / e[1].total }; })
+    .sort(function(a, b) { return a.rate - b.rate; })
+    .slice(0, 5)
+    .map(function(e) { return e.cat; });
+}
+
+// Build member stats payload from current local data
+function _buildMemberStats() {
+  var qs = typeof progressQuizStats !== 'undefined' ? progressQuizStats : {};
+  var avg = qs.totalQ ? Math.round((qs.totalCorrect / qs.totalQ) * 100) : 0;
+  return {
+    total_xp:        (typeof xpData !== 'undefined' ? xpData.totalXP : 0) || 0,
+    week_xp:         (typeof xpData !== 'undefined' ? xpData.weekXP  : 0) || 0,
+    streak:          (typeof progressStreak !== 'undefined' ? progressStreak.currentStreak : 0) || 0,
+    level:           (typeof xpGetLevel === 'function' ? xpGetLevel(xpData.totalXP || 0).level : 1) || 1,
+    cards_reviewed:  (typeof xpData !== 'undefined' ? xpData.cardsReviewed : 0) || 0,
+    cases_completed: (typeof xpData !== 'undefined' ? xpData.casesCompleted : 0) || 0,
+    quizzes_done:    qs.quizzesDone || 0,
+    quiz_avg:        avg,
+    weak_cats:       _computeWeakCats()
+  };
+}
+
+// Push member stats to every club the user belongs to
+var _clubStatsPushTimer = null;
+function _scheduleMemberStatsPush() {
+  clearTimeout(_clubStatsPushTimer);
+  _clubStatsPushTimer = setTimeout(function() {
+    _clubState.clubs.forEach(function(club) {
+      SupabaseSync.pushMemberStats(club.id, _buildMemberStats());
+    });
+  }, 8000);
+}
+
+// Assignment progress — computed entirely from local data, no extra DB writes
+function _assignmentProgress(a) {
+  var done = 0, total = a.target_count || 0;
+  if (a.type === 'flashcards' && a.target_cat) {
+    if (typeof flashcards !== 'undefined') {
+      done = flashcards.filter(function(f) {
+        if (f.cat !== a.target_cat) return false;
+        var c = sm2Get('fc:' + f.term);
+        return c.reps > 0;
+      }).length;
+      if (!total) total = flashcards.filter(function(f) { return f.cat === a.target_cat; }).length;
+    }
+  } else if (a.type === 'cases' && a.target_cat) {
+    if (typeof progressCaseStats !== 'undefined') {
+      done = Object.values(progressCaseStats.byId || {})
+        .filter(function(c) { return c.difficulty === a.target_cat && c.attempts > 0; }).length;
+      if (!total) total = (typeof cases !== 'undefined') ? cases.filter(function(c) { return c.difficulty === a.target_cat; }).length : 0;
+    }
+  } else if (a.type === 'quiz') {
+    if (typeof progressQuizStats !== 'undefined') {
+      done = progressQuizStats.quizzesDone || 0;
+      total = total || 1;
+    }
+  }
+  return { done: Math.min(done, total || done), total: total || 0 };
+}
+
+function _isDue(dateStr) {
+  if (!dateStr) return false;
+  return new Date(dateStr) < new Date();
+}
+
+function _daysUntil(dateStr) {
+  if (!dateStr) return null;
+  var diff = Math.ceil((new Date(dateStr) - new Date()) / 86400000);
+  if (diff < 0)  return 'Overdue';
+  if (diff === 0) return 'Due today';
+  if (diff === 1) return 'Due tomorrow';
+  return 'Due in ' + diff + ' days';
+}
+
+// ── Screen init ───────────────────────────────────────────────
+
+async function initClubScreen() {
+  var user = typeof getCurrentUser === 'function' ? getCurrentUser() : null;
+  var el   = document.getElementById('clubContent');
+  if (!el) return;
+
+  if (!user) {
+    el.innerHTML = _clubRenderSignIn();
+    return;
+  }
+
+  el.innerHTML = '<div class="club-loading"><div class="club-spinner"></div><p>Loading your club…</p></div>';
+
+  _clubState.clubs = await SupabaseSync.fetchMyClubs();
+
+  if (!_clubState.clubs.length) {
+    el.innerHTML = _clubRenderNoClub();
+    return;
+  }
+
+  // Default to first club
+  if (!_clubState.active) _clubState.active = _clubState.clubs[0];
+
+  // Load data for active club
+  var clubId = _clubState.active.id;
+  var [members, stats, assignments] = await Promise.all([
+    SupabaseSync.fetchClubMembers(clubId),
+    SupabaseSync.fetchClubStats(clubId),
+    SupabaseSync.fetchAssignments(clubId)
+  ]);
+  _clubState.members     = members;
+  _clubState.stats       = stats;
+  _clubState.assignments = assignments;
+
+  // Push fresh member stats (for student) or owner already has them
+  SupabaseSync.pushMemberStats(clubId, _buildMemberStats());
+
+  var isOwner = _clubState.active.myRole === 'owner';
+  el.innerHTML = isOwner ? _clubRenderTeacher() : _clubRenderStudent();
+}
+
+function switchClubTab(tab) {
+  _clubState.tab = tab;
+  document.querySelectorAll('.club-tab').forEach(function(b) {
+    b.classList.toggle('active', b.dataset.tab === tab);
+  });
+  var content = document.getElementById('clubTabContent');
+  if (content) {
+    var isOwner = _clubState.active && _clubState.active.myRole === 'owner';
+    content.innerHTML = isOwner ? _clubTeacherTab(tab) : _clubStudentTab(tab);
+    _bindClubTabEvents();
+  }
+}
+
+// ── Render: no club ───────────────────────────────────────────
+
+function _clubRenderSignIn() {
+  return '<div class="club-empty-state">'
+    + '<div class="club-empty-icon">🏫</div>'
+    + '<div class="club-empty-title">Sign in to join a club</div>'
+    + '<div class="club-empty-desc">Sign in with Google to create or join a study group.</div>'
+    + '<button class="club-cta-btn" onclick="triggerGoogleSignIn()">Sign in with Google</button>'
+    + '</div>';
+}
+
+function _clubRenderNoClub() {
+  return '<div class="club-setup">'
+    + '<div class="club-setup-hero">'
+    + '<div class="club-setup-icon">🏫</div>'
+    + '<h3>Study together, improve faster</h3>'
+    + '<p>Create a club to track your group\'s progress and assign practice, or join an existing one with a code.</p>'
+    + '</div>'
+    + '<div class="club-setup-actions">'
+    + '<button class="club-setup-btn club-setup-btn--primary" onclick="_clubShowCreate()">+ Create a Club</button>'
+    + '<div class="club-setup-or">or</div>'
+    + '<div class="club-join-row">'
+    + '<input class="club-join-input" id="clubJoinCodeInput" type="text" maxlength="8" placeholder="Enter join code (e.g. 7K3X9P)" autocomplete="off" spellcheck="false">'
+    + '<button class="club-setup-btn" onclick="_clubJoin()">Join</button>'
+    + '</div>'
+    + '<div class="club-join-error hidden" id="clubJoinError"></div>'
+    + '</div>'
+    + '<div class="club-create-form hidden" id="clubCreateForm">'
+    + '<input class="club-join-input" id="clubNameInput" type="text" maxlength="60" placeholder="Club name (e.g. Milton HOSA Club)" autocomplete="off">'
+    + '<div class="club-form-row">'
+    + '<button class="club-setup-btn club-setup-btn--primary" onclick="_clubCreate()">Create</button>'
+    + '<button class="club-setup-btn" onclick="_clubHideCreate()">Cancel</button>'
+    + '</div>'
+    + '<div class="club-join-error hidden" id="clubCreateError"></div>'
+    + '</div>'
+    + '</div>';
+}
+
+function _clubShowCreate() {
+  document.getElementById('clubCreateForm').classList.remove('hidden');
+  document.getElementById('clubNameInput').focus();
+}
+function _clubHideCreate() {
+  document.getElementById('clubCreateForm').classList.add('hidden');
+}
+
+async function _clubCreate() {
+  var nameEl = document.getElementById('clubNameInput');
+  var errEl  = document.getElementById('clubCreateError');
+  var name   = nameEl ? nameEl.value.trim() : '';
+  if (!name) { if (errEl) { errEl.textContent = 'Enter a club name'; errEl.classList.remove('hidden'); } return; }
+  var btn = document.querySelector('[onclick="_clubCreate()"]');
+  if (btn) { btn.textContent = 'Creating…'; btn.disabled = true; }
+  var result = await SupabaseSync.createClub(name, _clubUserName(), _clubAvatar());
+  if (!result) {
+    if (errEl) { errEl.textContent = 'Failed to create — try again'; errEl.classList.remove('hidden'); }
+    if (btn) { btn.textContent = 'Create'; btn.disabled = false; }
+    return;
+  }
+  _clubState.clubs = await SupabaseSync.fetchMyClubs();
+  _clubState.active = _clubState.clubs.find(function(c) { return c.id === result.id; }) || _clubState.clubs[0];
+  initClubScreen();
+}
+
+async function _clubJoin() {
+  var codeEl = document.getElementById('clubJoinCodeInput');
+  var errEl  = document.getElementById('clubJoinError');
+  var code   = codeEl ? codeEl.value.trim() : '';
+  if (!code) { if (errEl) { errEl.textContent = 'Enter a join code'; errEl.classList.remove('hidden'); } return; }
+  var btn = document.querySelector('[onclick="_clubJoin()"]');
+  if (btn) { btn.textContent = 'Joining…'; btn.disabled = true; }
+  var result = await SupabaseSync.joinClub(code, _clubUserName(), _clubAvatar());
+  if (typeof result === 'string' && result.startsWith('already_member:')) {
+    // Already a member — just load that club
+  } else if (typeof result === 'string') {
+    if (errEl) { errEl.textContent = result; errEl.classList.remove('hidden'); }
+    if (btn) { btn.textContent = 'Join'; btn.disabled = false; }
+    return;
+  }
+  _clubState.clubs = await SupabaseSync.fetchMyClubs();
+  _clubState.active = _clubState.clubs[0];
+  initClubScreen();
+}
+
+// ── Render: teacher dashboard ──────────────────────────────────
+
+function _clubRenderTeacher() {
+  var club = _clubState.active;
+  return '<div class="club-header">'
+    + '<div class="club-header-left">'
+    + '<h3 class="club-name">' + _esc(club.name) + '</h3>'
+    + '<div class="club-meta">'
+    + _clubState.members.length + ' member' + (_clubState.members.length !== 1 ? 's' : '')
+    + '</div>'
+    + '</div>'
+    + '<div class="club-code-box" onclick="_clubCopyCode(\'' + club.join_code + '\')" title="Click to copy join code">'
+    + '<span class="club-code-label">Join Code</span>'
+    + '<span class="club-code-val">' + club.join_code + '</span>'
+    + '</div>'
+    + '</div>'
+    + '<div class="club-tabs">'
+    + '<button class="club-tab' + (_clubState.tab === 'overview' ? ' active' : '') + '" data-tab="overview" onclick="switchClubTab(\'overview\')">Overview</button>'
+    + '<button class="club-tab' + (_clubState.tab === 'students' ? ' active' : '') + '" data-tab="students" onclick="switchClubTab(\'students\')">Students</button>'
+    + '<button class="club-tab' + (_clubState.tab === 'assignments' ? ' active' : '') + '" data-tab="assignments" onclick="switchClubTab(\'assignments\')">Assignments</button>'
+    + '</div>'
+    + '<div id="clubTabContent">' + _clubTeacherTab(_clubState.tab) + '</div>';
+}
+
+function _clubTeacherTab(tab) {
+  if (tab === 'overview')    return _clubTeacherOverview();
+  if (tab === 'students')    return _clubTeacherStudents();
+  if (tab === 'assignments') return _clubTeacherAssignments();
+  return '';
+}
+
+function _clubTeacherOverview() {
+  var stats    = _clubState.stats;
+  var members  = _clubState.members;
+  var totalXP  = stats.reduce(function(s, r) { return s + (r.total_xp || 0); }, 0);
+  var totalCards = stats.reduce(function(s, r) { return s + (r.cards_reviewed || 0); }, 0);
+  var quizAvgs = stats.filter(function(r) { return r.quizzes_done > 0; }).map(function(r) { return r.quiz_avg; });
+  var avgQuiz  = quizAvgs.length ? Math.round(quizAvgs.reduce(function(a,b){return a+b;},0) / quizAvgs.length) : null;
+  var activeThisWeek = stats.filter(function(r) { return r.week_xp > 0; }).length;
+
+  // Weak categories heatmap: count how many members flagged each category
+  var catCount = {};
+  stats.forEach(function(r) {
+    (r.weak_cats || []).forEach(function(cat) {
+      catCount[cat] = (catCount[cat] || 0) + 1;
+    });
+  });
+  var weakList = Object.entries(catCount)
+    .sort(function(a, b) { return b[1] - a[1]; }).slice(0, 8);
+
+  var html = '<div class="club-stats-grid">'
+    + _clubStatCard('👥', members.length, 'Members')
+    + _clubStatCard('⚡', activeThisWeek, 'Active this week')
+    + _clubStatCard('🃏', totalCards.toLocaleString(), 'Cards studied')
+    + (avgQuiz !== null ? _clubStatCard('📝', avgQuiz + '%', 'Avg quiz score') : '')
+    + '</div>';
+
+  if (weakList.length) {
+    html += '<div class="club-section-title">📉 Class Weak Spots</div>'
+      + '<div class="club-heatmap">';
+    var maxCount = weakList[0][1];
+    weakList.forEach(function(e) {
+      var pct = Math.round((e[1] / (stats.length || 1)) * 100);
+      var cls = pct >= 60 ? 'club-heat--danger' : pct >= 30 ? 'club-heat--warn' : 'club-heat--ok';
+      html += '<div class="club-heat-row">'
+        + '<span class="club-heat-cat">' + _esc(e[0]) + '</span>'
+        + '<div class="club-heat-bar-wrap"><div class="club-heat-bar ' + cls + '" style="width:' + Math.round((e[1]/maxCount)*100) + '%"></div></div>'
+        + '<span class="club-heat-count">' + e[1] + '/' + stats.length + ' students</span>'
+        + '</div>';
+    });
+    html += '</div>';
+  } else {
+    html += '<div class="club-empty-hint">No weak-spot data yet — students will appear here after they study flashcards.</div>';
+  }
+  return html;
+}
+
+function _clubStatCard(icon, val, label) {
+  return '<div class="club-stat-card"><div class="club-stat-icon">' + icon + '</div>'
+    + '<div class="club-stat-val">' + val + '</div>'
+    + '<div class="club-stat-lbl">' + label + '</div></div>';
+}
+
+function _clubTeacherStudents() {
+  var members = _clubState.members.filter(function(m) { return m.role !== 'owner'; });
+  var statsMap = {};
+  _clubState.stats.forEach(function(s) { statsMap[s.user_id] = s; });
+
+  if (!members.length) {
+    return '<div class="club-empty-hint">No students yet. Share your join code: <strong>' + _esc(_clubState.active.join_code) + '</strong></div>';
+  }
+
+  var html = '<div class="club-student-table">'
+    + '<div class="club-table-head"><span>Student</span><span>XP</span><span>Cards</span><span>Streak</span><span>Quiz avg</span></div>';
+
+  members.sort(function(a, b) {
+    var sa = statsMap[a.user_id] || {}, sb = statsMap[b.user_id] || {};
+    return (sb.total_xp || 0) - (sa.total_xp || 0);
+  }).forEach(function(m) {
+    var s = statsMap[m.user_id] || {};
+    var status = '';
+    if ((s.streak || 0) >= 5)           status = '<span class="club-badge club-badge--strong">Strong</span>';
+    else if ((s.week_xp || 0) > 0)      status = '<span class="club-badge club-badge--ok">Active</span>';
+    else                                 status = '<span class="club-badge club-badge--warn">Inactive</span>';
+
+    html += '<div class="club-student-row">'
+      + '<div class="club-student-info">' + _lbAvatar(m, 'club-s-avatar') + '<span>' + _esc(m.display_name || 'Student') + '</span>' + status + '</div>'
+      + '<span class="club-td">' + ((s.total_xp || 0).toLocaleString()) + ' XP</span>'
+      + '<span class="club-td">' + (s.cards_reviewed || 0) + '</span>'
+      + '<span class="club-td">' + (s.streak ? '🔥 ' + s.streak + 'd' : '—') + '</span>'
+      + '<span class="club-td">' + (s.quizzes_done > 0 ? (s.quiz_avg || 0) + '%' : '—') + '</span>'
+      + '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+function _clubTeacherAssignments() {
+  var assignments = _clubState.assignments;
+  var members     = _clubState.members.filter(function(m) { return m.role !== 'owner'; });
+  var statsMap    = {};
+  _clubState.stats.forEach(function(s) { statsMap[s.user_id] = s; });
+
+  var html = '<button class="club-new-btn" onclick="_clubShowAssignForm()">+ New Assignment</button>'
+    + '<div class="club-assign-form hidden" id="clubAssignForm">' + _clubAssignFormHTML() + '</div>';
+
+  if (!assignments.length) {
+    html += '<div class="club-empty-hint">No assignments yet. Create one above.</div>';
+  } else {
+    html += '<div class="club-assign-list">';
+    assignments.forEach(function(a) {
+      var due      = _daysUntil(a.due_date);
+      var dueClass = _isDue(a.due_date) ? 'club-due--overdue' : 'club-due--ok';
+      html += '<div class="club-assign-card">'
+        + '<div class="club-assign-top">'
+        + '<span class="club-assign-title">' + _esc(a.title) + '</span>'
+        + '<button class="club-assign-delete" onclick="_clubDeleteAssignment(\'' + a.id + '\')" title="Delete">✕</button>'
+        + '</div>'
+        + '<div class="club-assign-meta">'
+        + _clubAssignTypeChip(a.type) + ' · ' + _esc(a.target_cat || '')
+        + (a.target_count ? ' · ' + a.target_count + ' items' : '')
+        + '</div>'
+        + (due ? '<div class="club-assign-due ' + dueClass + '">' + due + '</div>' : '')
+        + '</div>';
+    });
+    html += '</div>';
+  }
+  return html;
+}
+
+function _clubAssignTypeChip(type) {
+  var map = { flashcards: '🃏 Flashcards', cases: '🩺 Cases', quiz: '📝 Quiz' };
+  return map[type] || type;
+}
+
+function _clubAssignFormHTML() {
+  var cats = typeof flashcards !== 'undefined'
+    ? [...new Set(flashcards.map(function(f){return f.cat;}))]
+    : [];
+  var caseOptions = ['beginner','intermediate','advanced','expert'].map(function(d){
+    return '<option value="' + d + '">' + d.charAt(0).toUpperCase() + d.slice(1) + '</option>';
+  }).join('');
+  var catOptions = cats.map(function(c){
+    return '<option value="' + _esc(c) + '">' + _esc(c) + '</option>';
+  }).join('');
+
+  return '<div class="club-form-title">New Assignment</div>'
+    + '<input class="club-input" id="afTitle" type="text" placeholder="Assignment title" maxlength="80">'
+    + '<div class="club-form-row">'
+    + '<select class="club-input" id="afType" onchange="_clubAssignTypeChange()">'
+    + '<option value="flashcards">Flashcards</option>'
+    + '<option value="cases">Clinical Cases</option>'
+    + '<option value="quiz">Quiz</option>'
+    + '</select>'
+    + '</div>'
+    + '<div id="afTargetWrap">'
+    + '<select class="club-input" id="afCat">' + catOptions + '</select>'
+    + '</div>'
+    + '<div class="club-form-row">'
+    + '<input class="club-input" id="afCount" type="number" min="1" max="500" placeholder="Target count (optional)">'
+    + '<input class="club-input" id="afDue" type="date">'
+    + '</div>'
+    + '<div class="club-form-row">'
+    + '<button class="club-setup-btn club-setup-btn--primary" onclick="_clubCreateAssignment()">Add Assignment</button>'
+    + '<button class="club-setup-btn" onclick="_clubHideAssignForm()">Cancel</button>'
+    + '</div>'
+    + '<div class="club-join-error hidden" id="clubAssignError"></div>';
+}
+
+function _clubAssignTypeChange() {
+  var type = document.getElementById('afType').value;
+  var wrap = document.getElementById('afTargetWrap');
+  if (!wrap) return;
+  var caseOptions = ['beginner','intermediate','advanced','expert'].map(function(d){
+    return '<option value="' + d + '">' + d.charAt(0).toUpperCase() + d.slice(1) + '</option>';
+  }).join('');
+  var cats = typeof flashcards !== 'undefined'
+    ? [...new Set(flashcards.map(function(f){return f.cat;}))]
+    : [];
+  var catOptions = cats.map(function(c){
+    return '<option value="' + _esc(c) + '">' + _esc(c) + '</option>';
+  }).join('');
+
+  if (type === 'cases') {
+    wrap.innerHTML = '<select class="club-input" id="afCat">' + caseOptions + '</select>';
+  } else if (type === 'flashcards') {
+    wrap.innerHTML = '<select class="club-input" id="afCat">' + catOptions + '</select>';
+  } else {
+    wrap.innerHTML = '<select class="club-input" id="afCat"><option value="any">Any topic</option></select>';
+  }
+}
+
+function _clubShowAssignForm() {
+  var el = document.getElementById('clubAssignForm');
+  if (el) { el.classList.remove('hidden'); el.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+}
+function _clubHideAssignForm() {
+  var el = document.getElementById('clubAssignForm');
+  if (el) el.classList.add('hidden');
+}
+
+async function _clubCreateAssignment() {
+  var title = (document.getElementById('afTitle') || {}).value || '';
+  var type  = (document.getElementById('afType')  || {}).value || 'flashcards';
+  var cat   = (document.getElementById('afCat')   || {}).value || '';
+  var count = parseInt((document.getElementById('afCount') || {}).value || '') || null;
+  var due   = (document.getElementById('afDue')   || {}).value || null;
+  var errEl = document.getElementById('clubAssignError');
+
+  if (!title.trim()) {
+    if (errEl) { errEl.textContent = 'Enter a title'; errEl.classList.remove('hidden'); }
+    return;
+  }
+
+  var result = await SupabaseSync.createAssignment({
+    club_id: _clubState.active.id,
+    title: title.trim(), type: type,
+    target_cat: cat === 'any' ? null : cat,
+    target_count: count, due_date: due || null
+  });
+
+  if (!result) {
+    if (errEl) { errEl.textContent = 'Failed — try again'; errEl.classList.remove('hidden'); }
+    return;
+  }
+
+  _clubState.assignments.unshift(result);
+  _clubHideAssignForm();
+  switchClubTab('assignments');
+}
+
+async function _clubDeleteAssignment(id) {
+  if (!confirm('Delete this assignment?')) return;
+  await SupabaseSync.deleteAssignment(id);
+  _clubState.assignments = _clubState.assignments.filter(function(a) { return a.id !== id; });
+  switchClubTab('assignments');
+}
+
+// ── Render: student view ──────────────────────────────────────
+
+function _clubRenderStudent() {
+  var club = _clubState.active;
+  var members = _clubState.members;
+  var statsMap = {};
+  _clubState.stats.forEach(function(s) { statsMap[s.user_id] = s; });
+
+  var html = '<div class="club-header">'
+    + '<div class="club-header-left">'
+    + '<h3 class="club-name">' + _esc(club.name) + '</h3>'
+    + '<div class="club-meta">' + members.length + ' members</div>'
+    + '</div>'
+    + '</div>';
+
+  // Assignments section
+  var assignments = _clubState.assignments;
+  if (assignments.length) {
+    html += '<div class="club-section-title">📋 Assignments</div>'
+      + '<div class="club-assign-list">';
+    assignments.forEach(function(a) {
+      var prog    = _assignmentProgress(a);
+      var pct     = prog.total > 0 ? Math.min(100, Math.round((prog.done / prog.total) * 100)) : 0;
+      var done    = pct >= 100;
+      var due     = _daysUntil(a.due_date);
+      var dueClass = _isDue(a.due_date) && !done ? 'club-due--overdue' : 'club-due--ok';
+      var action  = a.type === 'flashcards' ? 'showScreen(\'flashcards\')' : a.type === 'cases' ? 'showScreen(\'case\')' : 'showScreen(\'quiz\')';
+
+      html += '<div class="club-assign-card' + (done ? ' club-assign-card--done' : '') + '">'
+        + '<div class="club-assign-top">'
+        + '<span class="club-assign-title">' + _esc(a.title) + '</span>'
+        + (done ? '<span class="club-done-badge">✓ Done</span>' : '')
+        + '</div>'
+        + '<div class="club-assign-meta">' + _clubAssignTypeChip(a.type) + (a.target_cat ? ' · ' + _esc(a.target_cat) : '') + '</div>'
+        + (due && !done ? '<div class="club-assign-due ' + dueClass + '">' + due + '</div>' : '')
+        + (prog.total > 0
+          ? '<div class="club-prog-wrap"><div class="club-prog-bar' + (done ? ' club-prog-bar--done' : '') + '" style="width:' + pct + '%"></div></div>'
+            + '<div class="club-prog-label">' + prog.done + ' / ' + prog.total + '</div>'
+          : '')
+        + (!done ? '<button class="club-go-btn" onclick="' + action + '">Study now →</button>' : '')
+        + '</div>';
+    });
+    html += '</div>';
+  } else {
+    html += '<div class="club-empty-hint">No assignments yet — your teacher hasn\'t posted any.</div>';
+  }
+
+  // Mini class leaderboard
+  var ranked = members
+    .map(function(m) { return Object.assign({}, m, statsMap[m.user_id] || {}); })
+    .sort(function(a, b) { return (b.week_xp || 0) - (a.week_xp || 0); })
+    .slice(0, 5);
+
+  if (ranked.length > 1) {
+    html += '<div class="club-section-title">🏆 This Week — Club Rankings</div><div class="lb-list">';
+    ranked.forEach(function(m, i) {
+      html += '<div class="lb-row">'
+        + '<div class="lb-row-rank">' + (['🥇','🥈','🥉'][i] || '<span class="lb-rank-num">' + (i+1) + '</span>') + '</div>'
+        + _lbAvatar(m, 'lb-row-avatar')
+        + '<div class="lb-row-info"><span class="lb-row-name">' + _esc(m.display_name || 'Student') + '</span>'
+        + '<span class="lb-row-level">Lv. ' + (m.level || 1) + '</span></div>'
+        + '<div class="lb-row-right"><span class="lb-row-xp">' + ((m.week_xp || 0).toLocaleString()) + ' XP</span></div>'
+        + '</div>';
+    });
+    html += '</div>';
+  }
+
+  // Leave button
+  html += '<div class="club-leave-wrap">'
+    + '<button class="club-leave-btn" onclick="_clubLeave()">Leave club</button>'
+    + '</div>';
+
+  return html;
+}
+
+function _clubStudentTab(tab) { return ''; }
+
+async function _clubLeave() {
+  if (!confirm('Leave ' + (_clubState.active ? _clubState.active.name : 'this club') + '?')) return;
+  await SupabaseSync.leaveClub(_clubState.active.id);
+  _clubState.active = null;
+  _clubState.clubs  = await SupabaseSync.fetchMyClubs();
+  initClubScreen();
+}
+
+// ── Utilities ─────────────────────────────────────────────────
+
+function _clubCopyCode(code) {
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(code).then(function() {
+      showSettingsToast('Join code copied: ' + code);
+    });
+  }
+}
+
+function _bindClubTabEvents() {} // future use
+
+// Call this after earning XP to keep club stats fresh
+function _clubOnXP() {
+  if (_clubState.clubs.length) _scheduleMemberStatsPush();
 }
 
 // ── Level-up celebration ───────────────────────────────────────
