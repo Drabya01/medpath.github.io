@@ -14967,7 +14967,6 @@ function _clubSelectorHTML() {
 
 function _clubRenderTeacher() {
   var club = _clubState.active;
-  var settingsIcon = '<svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;vertical-align:-1px;"><circle cx="10" cy="10" r="2.5"/><path d="M10 1.5v2m0 13v2M1.5 10h2m13 0h2m-3.4-5.1-1.4 1.4M5.8 14.2l-1.4 1.4m0-11.2 1.4 1.4m8.4 8.4 1.4 1.4"/></svg>';
   return _clubSelectorHTML()
     +'<div class="club-header">'
     +'<div class="club-header-left">'
@@ -14986,7 +14985,7 @@ function _clubRenderTeacher() {
     +'<button class="club-tab'+(_clubState.tab==='students'?' active':'')+'" data-tab="students" onclick="switchClubTab(\'students\')">Students</button>'
     +'<button class="club-tab'+(_clubState.tab==='assignments'?' active':'')+'" data-tab="assignments" onclick="switchClubTab(\'assignments\')">Assignments</button>'
     +'<button class="club-tab'+(_clubState.tab==='announcements'?' active':'')+'" data-tab="announcements" onclick="switchClubTab(\'announcements\')">Announce</button>'
-    +'<button class="club-tab'+(_clubState.tab==='settings'?' active':'')+'" data-tab="settings" onclick="switchClubTab(\'settings\')">'+settingsIcon+'Settings</button>'
+    +'<button class="club-tab'+(_clubState.tab==='settings'?' active':'')+'" data-tab="settings" onclick="switchClubTab(\'settings\')">Settings</button>'
     +'</div>'
     +'<div id="clubTabContent">'+_clubTeacherTab(_clubState.tab)+'</div>';
 }

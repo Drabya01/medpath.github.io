@@ -6884,6 +6884,10 @@ select.club-input { cursor: pointer; }
   border-radius: 14px;
   padding: 14px 12px;
 }
+.club-stat-card:nth-child(1) { box-shadow: inset 3px 0 0 #0d9488; }
+.club-stat-card:nth-child(2) { box-shadow: inset 3px 0 0 #d97706; }
+.club-stat-card:nth-child(3) { box-shadow: inset 3px 0 0 #0284c7; }
+.club-stat-card:nth-child(4) { box-shadow: inset 3px 0 0 #9333ea; }
 
 .club-stat-icon-wrap {
   width: 38px; height: 38px;
@@ -6930,9 +6934,9 @@ select.club-input { cursor: pointer; }
    HEAT MAP — Weak Spots
 ══════════════════════════════════════════ */
 
-.club-heatmap { display: flex; flex-direction: column; gap: 9px; margin-bottom: 8px; }
+.club-heatmap { display: flex; flex-direction: column; gap: 10px; margin-bottom: 8px; }
 .club-heat-row {
-  display: flex; align-items: center; gap: 8px; font-size: .78rem;
+  display: flex; align-items: center; gap: 10px; font-size: .8rem;
 }
 .club-heat-cat {
   width: 110px; flex-shrink: 0;
@@ -6940,8 +6944,8 @@ select.club-input { cursor: pointer; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .club-heat-bar-wrap {
-  flex: 1; height: 6px;
-  background: var(--bg-subtle); border-radius: 3px; overflow: hidden;
+  flex: 1; height: 8px;
+  background: var(--bg-subtle); border-radius: 4px; overflow: hidden;
 }
 .club-heat-bar   { height: 100%; border-radius: 3px; transition: width .4s ease; }
 .club-heat-bar--danger { background: #ef4444; }
@@ -6965,12 +6969,14 @@ select.club-input { cursor: pointer; }
 }
 .club-smart-assign:hover { background: rgba(13,148,136,.2); border-color: rgba(13,148,136,.5); }
 .club-smart-assign--sm {
-  background: transparent; color: var(--text-muted);
-  border-color: var(--border);
+  background: transparent;
+  color: #0d9488;
+  border-color: rgba(13,148,136,.35);
 }
 .club-smart-assign--sm:hover {
-  background: var(--bg-subtle); border-color: var(--border-strong);
-  color: var(--text-secondary);
+  background: rgba(13,148,136,.08);
+  border-color: rgba(13,148,136,.55);
+  color: #0f766e;
 }
 .club-hint {
   font-size: .65rem; font-weight: 400;
