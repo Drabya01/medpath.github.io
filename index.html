@@ -51,6 +51,7 @@
 
 
 
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -87,6 +88,14 @@
 
   <!-- Google Identity Services -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
+
+  <!-- Google Identity — client_id tells Google which app this is -->
+  <div id="g_id_onload"
+       data-client_id="931875899245-pgent8burrtlbb9trsd5n4p31ita2m5j.apps.googleusercontent.com"
+       data-callback="handleGoogleCredential"
+       data-auto_prompt="false"
+       data-cancel_on_tap_outside="false">
+  </div>
 </head>
 <body>
   <!-- ── Admin: app-wide banner (controlled from admin panel) ── -->
