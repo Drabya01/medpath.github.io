@@ -50,6 +50,63 @@ function _afterShowScreen(id) {
 }
 
 // ── App-wide config (feature flags + banner) ──────────────────
+
+// ── Global utility functions (used by club, leaderboard, admin) ──
+
+/** HTML-escape a string to prevent XSS in rendered HTML */
+function _esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+/** Render a user avatar — photo if available, else initials circle */
+function _lbAvatar(row, cls) {
+  if (row && row.avatar_url) {
+    return '<img class="'+cls+'" src="'+_esc(row.avatar_url)+'" alt="" '
+      +'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'">'
+      +'<div class="'+cls+' '+cls+'--init" style="display:none">'+_lbInitials(row.display_name||row.name||'')+'</div>';
+  }
+  return '<div class="'+cls+' '+cls+'--init">'+_lbInitials((row&&(row.display_name||row.name))||'?')+'</div>';
+}
+
+function _lbInitials(name) {
+  var parts = String(name||'?').split(' ');
+  return (parts[0].charAt(0)+(parts[1]?parts[1].charAt(0):'')).toUpperCase();
+}
+
+/** Leaderboard teaser on home screen — stub if full leaderboard not loaded */
+function updateLbTeaser() {
+  var teaser = document.getElementById('lbTeaser');
+  if (!teaser) return;
+  var user = typeof getCurrentUser === 'function' ? getCurrentUser() : null;
+  if (!user) { teaser.classList.add('hidden'); return; }
+  teaser.classList.remove('hidden');
+  if (typeof SupabaseSync === 'undefined' || typeof SupabaseSync.fetchLeaderboard !== 'function') return;
+  var subEl = document.getElementById('lbTeaserSub');
+  SupabaseSync.fetchLeaderboard('week_xp').then(function(rows) {
+    if (!rows || !rows.length) { if(subEl) subEl.textContent = 'Be the first on the board!'; return; }
+    SupabaseSync.fetchMyRank('week_xp').then(function(myRank) {
+      var names = rows.slice(0,3).map(function(r,i){ return ['🥇','🥈','🥉'][i]+' '+r.display_name.split(' ')[0]; }).join('  ');
+      if(subEl) subEl.textContent = (myRank?'Your rank: #'+myRank+'  ·  ':'')+names;
+    });
+  });
+}
+
+/** Leaderboard screen init — stub so navigation doesn't break */
+function initLeaderboardScreen() {
+  var el = document.getElementById('lbSigninPrompt');
+  var user = typeof getCurrentUser === 'function' ? getCurrentUser() : null;
+  if (el) el.classList.toggle('hidden', !!user);
+  var loadingEl = document.getElementById('lbLoading');
+  var contentEl = document.getElementById('lbContent');
+  if (!user) { if(loadingEl) loadingEl.classList.add('hidden'); return; }
+  if (typeof _lbFetch === 'function') _lbFetch(_lbTab||'week');
+}
+
+function switchLbTab(tab) {
+  if (typeof _lbTab !== 'undefined') _lbTab = tab;
+  document.querySelectorAll('.lb-tab').forEach(function(b){ b.classList.toggle('active', b.dataset.tab===tab); });
+  if (typeof _lbFetch === 'function') _lbFetch(tab);
+}
 var _appConfig = { banner: {}, features: {} };
 
 async function loadAppConfig() {
