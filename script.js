@@ -9184,8 +9184,7 @@ document.addEventListener('DOMContentLoaded', init);
 
 /** Emails that may access the admin panel. */
 var ADMIN_EMAILS = [
-  // 'yourname@gmail.com',
-  // 'codeveloper@gmail.com',
+  'golussaud@gmail.com',
 ];
 
 /**
