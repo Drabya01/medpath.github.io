@@ -14967,6 +14967,7 @@ function _clubSelectorHTML() {
 
 function _clubRenderTeacher() {
   var club = _clubState.active;
+  var settingsIcon = '<svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;vertical-align:-1px;"><circle cx="10" cy="10" r="2.5"/><path d="M10 1.5v2m0 13v2M1.5 10h2m13 0h2m-3.4-5.1-1.4 1.4M5.8 14.2l-1.4 1.4m0-11.2 1.4 1.4m8.4 8.4 1.4 1.4"/></svg>';
   return _clubSelectorHTML()
     +'<div class="club-header">'
     +'<div class="club-header-left">'
@@ -14985,7 +14986,7 @@ function _clubRenderTeacher() {
     +'<button class="club-tab'+(_clubState.tab==='students'?' active':'')+'" data-tab="students" onclick="switchClubTab(\'students\')">Students</button>'
     +'<button class="club-tab'+(_clubState.tab==='assignments'?' active':'')+'" data-tab="assignments" onclick="switchClubTab(\'assignments\')">Assignments</button>'
     +'<button class="club-tab'+(_clubState.tab==='announcements'?' active':'')+'" data-tab="announcements" onclick="switchClubTab(\'announcements\')">Announce</button>'
-    +'<button class="club-tab'+(_clubState.tab==='settings'?' active':'')+'" data-tab="settings" onclick="switchClubTab(\'settings\')">⚙ Settings</button>'
+    +'<button class="club-tab'+(_clubState.tab==='settings'?' active':'')+'" data-tab="settings" onclick="switchClubTab(\'settings\')">'+settingsIcon+'Settings</button>'
     +'</div>'
     +'<div id="clubTabContent">'+_clubTeacherTab(_clubState.tab)+'</div>';
 }
@@ -15022,7 +15023,7 @@ function _clubTeacherOverview() {
 
   if (weakList.length) {
     var maxCount = weakList[0][1];
-    html += '<div class="club-section-title">📉 Class Weak Spots <span class="club-hint">— click Assign to create a targeted assignment</span></div>'
+    html += '<div class="club-section-title">Weak spots by category <span class="club-hint">— click Assign to create a targeted assignment</span></div>'
       +'<div class="club-heatmap">';
     weakList.forEach(function(e, i) {
       var pct = Math.round((e[1]/(stats.length||1))*100);
@@ -15041,7 +15042,7 @@ function _clubTeacherOverview() {
     // Smart recommendation card
     var top = weakList[0];
     html += '<div class="club-recommend">'
-      +'<div class="club-recommend-label">💡 Recommended Assignment</div>'
+      +'<div class="club-recommend-label">Recommended assignment</div>'
       +'<div class="club-recommend-text">Your class is weakest in <strong>'+_esc(top[0])+'</strong> '
       +'— '+top[1]+' of '+stats.length+' students flagged it as a weak spot.</div>'
       +'<button class="club-recommend-btn" onclick="_clubQuickAssign(\'flashcards\',\''+_esc(top[0])+'\',30)">'
@@ -15066,9 +15067,24 @@ async function _clubQuickAssign(type, cat, count) {
   }
 }
 
-function _clubStatCard(icon,val,label) {
-  return '<div class="club-stat-card"><div class="club-stat-icon">'+icon+'</div>'
-    +'<div class="club-stat-val">'+val+'</div><div class="club-stat-lbl">'+label+'</div></div>';
+var _CLUB_ICONS = {
+  members: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 17v-1.5A3 3 0 0 0 10.5 12.5H4.5A3 3 0 0 0 1.5 15.5V17"/><circle cx="7.5" cy="6.5" r="2.8"/><path d="M18.5 17v-1.5a3 3 0 0 0-2.5-2.97"/><path d="M12 3.2a2.8 2.8 0 0 1 0 5.4"/></svg>',
+  active:   '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 2 3 12 10 12 9 18 17 8 10 8 11 2"/></svg>',
+  cards:    '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="16" height="12" rx="2"/><path d="M6 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+  quiz:     '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="15.5" y1="4.5" x2="4.5" y2="15.5"/><circle cx="5.5" cy="5.5" r="2"/><circle cx="14.5" cy="14.5" r="2"/></svg>'
+};
+
+function _clubStatCard(icon, val, label) {
+  var typeMap = { '👥': 'members', '⚡': 'active', '🃏': 'cards', '📝': 'quiz' };
+  var type = typeMap[icon] || 'cards';
+  var svg  = _CLUB_ICONS[type] || '';
+  return '<div class="club-stat-card">'
+    +'<div class="club-stat-icon-wrap club-stat-icon-wrap--'+type+'">'+svg+'</div>'
+    +'<div class="club-stat-body">'
+    +'<div class="club-stat-val">'+val+'</div>'
+    +'<div class="club-stat-lbl">'+label+'</div>'
+    +'</div>'
+    +'</div>';
 }
 
 // ── Students ──────────────────────────────────────────────────
