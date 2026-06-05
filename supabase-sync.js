@@ -51,6 +51,7 @@ var SupabaseSync = (function () {
   var _uid    = null;   // Supabase user UUID (set after sign-in)
   var _ready  = false;  // true once init() succeeds
   var _timers = {};     // debounce timer per data-type key
+  var _authError = null; // stores last Supabase auth error for diagnostics
 
   // ════════════════════════════════════════════════════════════════
   //  INIT
@@ -115,6 +116,7 @@ var SupabaseSync = (function () {
    */
   async function onGoogleSignIn(googleIdToken) {
     if (!_ready) return;
+    _authError = null;
     try {
       var result = await _db.auth.signInWithIdToken({
         provider: 'google',
@@ -122,12 +124,14 @@ var SupabaseSync = (function () {
       });
       if (result.error) throw result.error;
       _uid = result.data.user.id;
+      _authError = null;
       // Pull cloud data and merge — never blocks the UI (runs in background)
       _pullAndMerge().catch(function (err) {
         console.warn('[MedPath Sync] Pull error:', err.message);
       });
     } catch (err) {
-      console.warn('[MedPath Sync] Sign-in error:', err.message);
+      _authError = err.message || 'Unknown Supabase auth error';
+      console.warn('[MedPath Sync] Sign-in error:', _authError);
       // Auth failure is non-fatal — app still works offline
     }
   }
@@ -564,21 +568,26 @@ var SupabaseSync = (function () {
 
     // ── Clubs ──────────────────────────────────────────────────
     createClub: async function(name, displayName, avatar) {
-      if (!_ready || !_uid) return null;
+      if (!_ready) return { error: 'Supabase not ready — check your connection' };
+      if (!_uid)   return { error: _authError
+        ? 'Supabase sign-in failed: ' + _authError + ' → Go to Supabase Dashboard → Authentication → Providers → Google → make sure "Skip nonce checks" is ON → Save → then sign out and back in to MedPath.'
+        : 'Not authenticated with Supabase. Sign out and sign back in to MedPath, then try again.' };
       var id   = Math.random().toString(36).substr(2, 8).toUpperCase();
       var code = Math.random().toString(36).substr(2, 6).toUpperCase();
       try {
         var r = await _db.from('clubs')
           .insert({ id: id, name: name, join_code: code, owner_id: _uid })
           .select().single();
-        if (r.error) throw r.error;
+        if (r.error) return { error: r.error.message };
         await _db.from('club_members').insert({
           club_id: id, user_id: _uid, role: 'owner',
           display_name: displayName || '', avatar_url: avatar || ''
         });
         return r.data;
-      } catch(e) { console.warn('[Clubs] create:', e.message); return null; }
+      } catch(e) { return { error: e.message }; }
     },
+    isAuthenticated: function() { return !!_uid; },
+    getAuthError:    function() { return _authError; },
     joinClub: async function(code, displayName, avatar) {
       if (!_ready || !_uid) return 'Not signed in';
       try {

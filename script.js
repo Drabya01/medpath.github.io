@@ -14371,9 +14371,10 @@ async function _clubCreate() {
   if (btn) { btn.textContent='Creating…'; btn.disabled=true; }
   try {
     var result = await SupabaseSync.createClub(name, _clubUserName(), _clubAvatar());
-    if (!result) {
-      if(errEl){errEl.textContent='Failed — make sure you\'ve run schema_clubs.sql in Supabase (see setup guide)';errEl.classList.remove('hidden');}
-      if(btn){btn.textContent='Create';btn.disabled=false;}
+    if (!result || result.error) {
+      var msg = (result && result.error) ? result.error : 'Unknown error';
+      if(errEl){ errEl.textContent = msg; errEl.classList.remove('hidden'); }
+      if(btn){ btn.textContent='Create'; btn.disabled=false; }
       return;
     }
     _clubState.clubs = await SupabaseSync.fetchMyClubs();
@@ -14381,9 +14382,8 @@ async function _clubCreate() {
     initClubScreen();
   } catch(e) {
     var msg = e && e.message ? e.message : 'Unknown error';
-    if(errEl){errEl.textContent='Error: '+msg;errEl.classList.remove('hidden');}
-    if(btn){btn.textContent='Create';btn.disabled=false;}
-    console.error('[Club] createClub error:', e);
+    if(errEl){ errEl.textContent = 'Error: ' + msg; errEl.classList.remove('hidden'); }
+    if(btn){ btn.textContent='Create'; btn.disabled=false; }
   }
 }
 
