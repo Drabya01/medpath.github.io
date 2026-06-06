@@ -10,7 +10,7 @@
  * The old cache is deleted automatically on activate.
  */
 
-const CACHE_VERSION  = 'medpath-v7';
+const CACHE_VERSION  = 'medpath-v8';
 const FONT_CACHE     = 'medpath-fonts-v1';
 const DYNAMIC_CACHE  = 'medpath-dynamic-v1';
 
@@ -18,9 +18,9 @@ const DYNAMIC_CACHE  = 'medpath-dynamic-v1';
 const PRECACHE_URLS = [
   './index.html',
   './script.js?v=3',
-  './style.css?v=5',
+  './style.css?v=6',
   './manifest.json',
-  './tour.js?v=2',
+  './tour.js?v=3',
   './icons/icon-192.png',
   './icons/icon-512.png',
 ];
