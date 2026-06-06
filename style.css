@@ -7823,3 +7823,564 @@ body.no-case-bg #case-bg { display: none !important; }
 .home-ann-inner button:hover { opacity: 1; }
 .dark .home-ann-inner { background: rgba(21,128,61,.1); border-color: rgba(21,128,61,.25); color: #86efac; }
 .dark .home-ann-inner button { color: #86efac; }
+
+
+/* ══════════════════════════════════════════
+   MEDPATH FEATURE TOUR
+   Premium spotlight + spring animation system
+══════════════════════════════════════════ */
+
+/* ── Root container ───────────────────── */
+.tour-root {
+  position: fixed;
+  inset: 0;
+  z-index: 9970;
+  pointer-events: none;
+}
+.t-exit {
+  animation: t-root-out 0.46s ease forwards;
+  pointer-events: none !important;
+}
+@keyframes t-root-out { to { opacity: 0; } }
+
+/* ── 4 backdrop panels ────────────────── */
+.t-panel {
+  position: fixed;
+  left: 0; right: 0;
+  background: rgba(6, 14, 24, 0.74);
+  pointer-events: all;
+  animation: t-panel-in 0.35s ease both;
+  transition:
+    height 0.46s cubic-bezier(0.34, 1.56, 0.64, 1),
+    top    0.46s cubic-bezier(0.34, 1.56, 0.64, 1),
+    width  0.46s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+#tp-top { top: 0; }
+#tp-bot { bottom: 0; }
+#tp-lft,
+#tp-rgt { left: auto; right: auto; }
+#tp-lft { left: 0; }
+#tp-rgt { right: 0; }
+
+@keyframes t-panel-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* ── Spotlight ring ───────────────────── */
+.t-ring {
+  position: fixed;
+  border-radius: 18px;
+  border: 2px solid #0d9488;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 9971;
+  transition:
+    left    0.46s cubic-bezier(0.34, 1.56, 0.64, 1),
+    top     0.46s cubic-bezier(0.34, 1.56, 0.64, 1),
+    width   0.46s cubic-bezier(0.34, 1.56, 0.64, 1),
+    height  0.46s cubic-bezier(0.34, 1.56, 0.64, 1),
+    border-color 0.3s ease,
+    box-shadow   0.3s ease,
+    opacity 0.3s ease;
+  animation: t-ring-pulse 2s ease-in-out infinite;
+}
+@keyframes t-ring-pulse {
+  0%, 100% { transform: scale(1);     filter: brightness(1); }
+  50%       { transform: scale(1.018); filter: brightness(1.2); }
+}
+
+/* ── Tooltip card ─────────────────────── */
+.t-tip {
+  position: fixed;
+  width: 300px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  padding: 18px 18px 16px;
+  z-index: 9972;
+  pointer-events: all;
+  box-shadow:
+    0 2px 4px rgba(0,0,0,.06),
+    0 12px 32px rgba(0,0,0,.18),
+    0 40px 80px rgba(0,0,0,.16);
+  /* entrance applied via class */
+}
+.t-tip::before {
+  content: '';
+  position: absolute;
+  width: 12px; height: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  transform: rotate(45deg);
+  left: 50%; margin-left: -6px;
+  transition: none;
+}
+.t-tip[data-arrow="up"]::before   { top: -7px;    border-bottom: none; border-right: none; }
+.t-tip[data-arrow="down"]::before { bottom: -7px;  border-top: none;    border-left: none;  }
+.t-tip[data-arrow="none"]::before { display: none; }
+
+.t-tip-enter {
+  animation: t-tip-in 0.48s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+@keyframes t-tip-in {
+  0%   { opacity: 0; transform: scale(0.78) translateY(16px); }
+  100% { opacity: 1; transform: scale(1)    translateY(0); }
+}
+
+/* ── Tooltip progress bar ─────────────── */
+.t-tip-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.t-tip-progress {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+.t-dot {
+  height: 4px;
+  width: 16px;
+  border-radius: 2px;
+  background: var(--border);
+  transition: all 0.38s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.t-dot.done   { background: var(--teal); opacity: .45; }
+.t-dot.active { background: var(--teal); width: 28px; }
+
+.t-skip {
+  background: none; border: none;
+  font-size: .72rem; font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer; padding: 4px 6px;
+  border-radius: 6px;
+  transition: color .15s, background .15s;
+  white-space: nowrap;
+}
+.t-skip:hover { color: var(--text-secondary); background: var(--bg-subtle); }
+
+/* ── Emoji ────────────────────────────── */
+.t-emoji {
+  display: block;
+  font-size: 2rem;
+  line-height: 1;
+  margin-bottom: 10px;
+}
+.t-emoji-pop {
+  animation: t-emoji-bounce 0.52s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+@keyframes t-emoji-bounce {
+  0%   { transform: scale(0) rotate(-18deg); }
+  70%  { transform: scale(1.15) rotate(4deg); }
+  100% { transform: scale(1)   rotate(0deg); }
+}
+
+/* ── Text content ─────────────────────── */
+.t-title {
+  font-size: .92rem;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: -.022em;
+  margin-bottom: 6px;
+  line-height: 1.3;
+}
+.t-body {
+  font-size: .78rem;
+  color: var(--text-secondary);
+  line-height: 1.58;
+  margin-bottom: 14px;
+}
+
+/* ── Footer buttons ───────────────────── */
+.t-footer {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.t-btn-next {
+  flex: 1;
+  height: 40px;
+  background: var(--teal);
+  color: #fff;
+  border: none;
+  border-radius: 12px;
+  font-size: .84rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: filter .18s, transform .12s;
+  letter-spacing: -.01em;
+}
+.t-btn-next:hover  { filter: brightness(1.1); }
+.t-btn-next:active { transform: scale(0.96); }
+
+.t-btn-back {
+  height: 40px; padding: 0 14px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: .78rem; font-weight: 600;
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.t-btn-back:hover {
+  color: var(--text-secondary);
+  border-color: var(--border-strong);
+  background: var(--bg-subtle);
+}
+
+/* ── Finish overlay ───────────────────── */
+.t-finish {
+  position: fixed;
+  inset: 0;
+  z-index: 9975;
+  background: rgba(6, 14, 24, 0.82);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  animation: t-panel-in 0.3s ease both;
+  pointer-events: all;
+}
+.t-finish.hidden { display: none; }
+
+.t-finish-card {
+  background: var(--bg-card);
+  border-radius: 28px;
+  padding: 44px 32px 36px;
+  text-align: center;
+  max-width: 340px;
+  width: 100%;
+  position: relative;
+  overflow: visible;
+  box-shadow:
+    0 4px 8px rgba(0,0,0,.08),
+    0 24px 56px rgba(0,0,0,.28);
+  animation: t-card-spring 0.58s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+@keyframes t-card-spring {
+  0%   { opacity: 0; transform: scale(0.72) translateY(32px); }
+  100% { opacity: 1; transform: scale(1)    translateY(0); }
+}
+
+.t-confetti-wrap {
+  position: absolute;
+  left: 50%; top: 40%;
+  width: 1px; height: 1px;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.t-finish-emoji {
+  font-size: 3.4rem;
+  line-height: 1;
+  display: block;
+  margin-bottom: 16px;
+  animation: t-emoji-bounce 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) 0.18s both;
+}
+.t-finish-h {
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: -.035em;
+  margin-bottom: 10px;
+}
+.t-finish-p {
+  font-size: .84rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: 28px;
+}
+.t-finish-btn {
+  display: block;
+  width: 100%;
+  height: 52px;
+  background: var(--teal);
+  color: #fff;
+  border: none;
+  border-radius: 16px;
+  font-size: 1rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition: filter .18s, transform .12s;
+  letter-spacing: -.015em;
+}
+.t-finish-btn:hover  { filter: brightness(1.1); }
+.t-finish-btn:active { transform: scale(0.97); }
+
+/* ── Confetti particles ───────────────── */
+.t-conf {
+  position: absolute;
+  background: var(--c, #0d9488);
+  left: 0; bottom: 0;
+  transform-origin: center;
+  animation: t-conf-fly 1s cubic-bezier(.25,.46,.45,.94) var(--d, 0s) both;
+}
+@keyframes t-conf-fly {
+  0%   { opacity: 1; transform: translate(0, 0) rotate(0deg) scale(1); }
+  100% { opacity: 0; transform: translate(var(--dx, 0px), var(--dy, -100px)) rotate(var(--r, 180deg)) scale(0.4); }
+}
+
+/* ── Dark mode ────────────────────────── */
+.dark .t-tip {
+  box-shadow:
+    0 2px 4px rgba(0,0,0,.18),
+    0 12px 32px rgba(0,0,0,.42),
+    0 40px 80px rgba(0,0,0,.35);
+}
+.dark .t-finish-card {
+  box-shadow:
+    0 4px 8px rgba(0,0,0,.22),
+    0 24px 56px rgba(0,0,0,.55);
+}
+
+/* ── Mobile ───────────────────────────── */
+@media (max-width: 520px) {
+  .t-tip {
+    position: fixed !important;
+    left: 12px !important;
+    right: 12px !important;
+    bottom: 18px !important;
+    top: auto !important;
+    width: auto !important;
+    border-radius: 20px;
+  }
+}
+
+
+/* ══════════════════════════════════════════
+   MEDPATH FEATURE TOUR
+   Premium spotlight + spring animation system
+══════════════════════════════════════════ */
+
+/* ── Root container ───────────────────── */
+.tour-root {
+  position: fixed;
+  inset: 0;
+  z-index: 9970;
+  pointer-events: none;
+}
+.t-exit {
+  animation: t-root-out 0.46s ease forwards;
+  pointer-events: none !important;
+}
+@keyframes t-root-out { to { opacity: 0; } }
+
+/* ── 4 backdrop panels ────────────────── */
+.t-panel {
+  position: fixed;
+  left: 0; right: 0;
+  background: rgba(6, 14, 24, 0.74);
+  pointer-events: all;
+  animation: t-panel-in 0.35s ease both;
+  transition:
+    height 0.46s cubic-bezier(0.34, 1.56, 0.64, 1),
+    top    0.46s cubic-bezier(0.34, 1.56, 0.64, 1),
+    width  0.46s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+#tp-top { top: 0; }
+#tp-bot { bottom: 0; }
+#tp-lft, #tp-rgt { left: auto; right: auto; }
+#tp-lft { left: 0; }
+#tp-rgt { right: 0; }
+@keyframes t-panel-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* ── Spotlight ring ───────────────────── */
+.t-ring {
+  position: fixed;
+  border-radius: 18px;
+  border: 2px solid #0d9488;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 9971;
+  transition:
+    left    0.46s cubic-bezier(0.34, 1.56, 0.64, 1),
+    top     0.46s cubic-bezier(0.34, 1.56, 0.64, 1),
+    width   0.46s cubic-bezier(0.34, 1.56, 0.64, 1),
+    height  0.46s cubic-bezier(0.34, 1.56, 0.64, 1),
+    border-color 0.3s ease,
+    box-shadow   0.3s ease,
+    opacity      0.3s ease;
+  animation: t-ring-pulse 2s ease-in-out infinite;
+}
+@keyframes t-ring-pulse {
+  0%, 100% { transform: scale(1);     filter: brightness(1); }
+  50%       { transform: scale(1.018); filter: brightness(1.2); }
+}
+
+/* ── Tooltip card ─────────────────────── */
+.t-tip {
+  position: fixed;
+  width: 300px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  padding: 18px 18px 16px;
+  z-index: 9972;
+  pointer-events: all;
+  box-shadow:
+    0 2px 4px rgba(0,0,0,.06),
+    0 12px 32px rgba(0,0,0,.18),
+    0 40px 80px rgba(0,0,0,.16);
+}
+.t-tip::before {
+  content: '';
+  position: absolute;
+  width: 12px; height: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  transform: rotate(45deg);
+  left: 50%; margin-left: -6px;
+}
+.t-tip[data-arrow="up"]::before   { top: -7px;   border-bottom: none; border-right: none; }
+.t-tip[data-arrow="down"]::before { bottom: -7px; border-top: none;    border-left: none;  }
+.t-tip[data-arrow="none"]::before { display: none; }
+
+.t-tip-enter {
+  animation: t-tip-in 0.48s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+@keyframes t-tip-in {
+  0%   { opacity: 0; transform: scale(0.78) translateY(16px); }
+  100% { opacity: 1; transform: scale(1)    translateY(0); }
+}
+
+/* ── Progress dots ────────────────────── */
+.t-tip-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.t-tip-progress { display: flex; gap: 5px; align-items: center; }
+.t-dot {
+  height: 4px; width: 16px;
+  border-radius: 2px;
+  background: var(--border);
+  transition: all 0.38s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.t-dot.done   { background: var(--teal); opacity: .45; }
+.t-dot.active { background: var(--teal); width: 28px; }
+.t-skip {
+  background: none; border: none;
+  font-size: .72rem; font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer; padding: 4px 6px; border-radius: 6px;
+  transition: color .15s, background .15s;
+}
+.t-skip:hover { color: var(--text-secondary); background: var(--bg-subtle); }
+
+/* ── Emoji ────────────────────────────── */
+.t-emoji {
+  display: block; font-size: 2rem;
+  line-height: 1; margin-bottom: 10px;
+}
+.t-emoji-pop {
+  animation: t-emoji-bounce 0.52s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+@keyframes t-emoji-bounce {
+  0%   { transform: scale(0) rotate(-18deg); }
+  70%  { transform: scale(1.15) rotate(4deg); }
+  100% { transform: scale(1)   rotate(0deg); }
+}
+
+/* ── Text content ─────────────────────── */
+.t-title {
+  font-size: .92rem; font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: -.022em;
+  margin-bottom: 6px; line-height: 1.3;
+}
+.t-body {
+  font-size: .78rem; color: var(--text-secondary);
+  line-height: 1.58; margin-bottom: 14px;
+}
+
+/* ── Footer buttons ───────────────────── */
+.t-footer { display: flex; gap: 8px; align-items: center; }
+.t-btn-next {
+  flex: 1; height: 40px;
+  background: var(--teal); color: #fff;
+  border: none; border-radius: 12px;
+  font-size: .84rem; font-weight: 700;
+  cursor: pointer;
+  transition: filter .18s, transform .12s;
+  letter-spacing: -.01em;
+}
+.t-btn-next:hover  { filter: brightness(1.1); }
+.t-btn-next:active { transform: scale(0.96); }
+.t-btn-back {
+  height: 40px; padding: 0 14px;
+  background: transparent; color: var(--text-muted);
+  border: 1px solid var(--border); border-radius: 12px;
+  font-size: .78rem; font-weight: 600; cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.t-btn-back:hover { color: var(--text-secondary); border-color: var(--border-strong); background: var(--bg-subtle); }
+
+/* ── Finish overlay ───────────────────── */
+.t-finish {
+  position: fixed; inset: 0; z-index: 9975;
+  background: rgba(6,14,24,.82);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  animation: t-panel-in 0.3s ease both;
+  pointer-events: all;
+}
+.t-finish.hidden { display: none; }
+.t-finish-card {
+  background: var(--bg-card); border-radius: 28px;
+  padding: 44px 32px 36px; text-align: center;
+  max-width: 340px; width: 100%;
+  position: relative; overflow: visible;
+  box-shadow: 0 4px 8px rgba(0,0,0,.08), 0 24px 56px rgba(0,0,0,.28);
+  animation: t-card-spring 0.58s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+@keyframes t-card-spring {
+  0%   { opacity: 0; transform: scale(0.72) translateY(32px); }
+  100% { opacity: 1; transform: scale(1)    translateY(0); }
+}
+.t-confetti-wrap {
+  position: absolute; left: 50%; top: 40%;
+  width: 1px; height: 1px;
+  pointer-events: none; overflow: visible;
+}
+.t-finish-emoji {
+  font-size: 3.4rem; line-height: 1; display: block;
+  margin-bottom: 16px;
+  animation: t-emoji-bounce 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) 0.18s both;
+}
+.t-finish-h { font-size: 1.5rem; font-weight: 800; color: var(--text-primary); letter-spacing: -.035em; margin-bottom: 10px; }
+.t-finish-p { font-size: .84rem; color: var(--text-secondary); line-height: 1.6; margin-bottom: 28px; }
+.t-finish-btn {
+  display: block; width: 100%; height: 52px;
+  background: var(--teal); color: #fff;
+  border: none; border-radius: 16px;
+  font-size: 1rem; font-weight: 800; cursor: pointer;
+  transition: filter .18s, transform .12s; letter-spacing: -.015em;
+}
+.t-finish-btn:hover  { filter: brightness(1.1); }
+.t-finish-btn:active { transform: scale(0.97); }
+
+/* ── Confetti ─────────────────────────── */
+.t-conf {
+  position: absolute; background: var(--c, #0d9488);
+  left: 0; bottom: 0; transform-origin: center;
+  animation: t-conf-fly 1s cubic-bezier(.25,.46,.45,.94) var(--d, 0s) both;
+}
+@keyframes t-conf-fly {
+  0%   { opacity: 1; transform: translate(0,0) rotate(0deg) scale(1); }
+  100% { opacity: 0; transform: translate(var(--dx,0px), var(--dy,-100px)) rotate(var(--r,180deg)) scale(0.4); }
+}
+
+/* ── Dark mode ────────────────────────── */
+.dark .t-tip { box-shadow: 0 2px 4px rgba(0,0,0,.18), 0 12px 32px rgba(0,0,0,.42), 0 40px 80px rgba(0,0,0,.35); }
+.dark .t-finish-card { box-shadow: 0 4px 8px rgba(0,0,0,.22), 0 24px 56px rgba(0,0,0,.55); }
+
+/* ── Mobile ───────────────────────────── */
+@media (max-width: 520px) {
+  .t-tip {
+    position: fixed !important;
+    left: 12px !important; right: 12px !important;
+    bottom: 18px !important; top: auto !important;
+    width: auto !important; border-radius: 20px;
+  }
+}

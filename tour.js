@@ -150,6 +150,17 @@ function _tourBuildDOM() {
    +  '</div>'
    +'</div>';
   document.body.appendChild(r);
+
+  // Initialise panel sizes to 0px so CSS transitions have a concrete
+  // start value — height/width:auto cannot be transitioned
+  document.getElementById('tp-top').style.height = '0px';
+  document.getElementById('tp-bot').style.height = '0px';
+  ['tp-lft','tp-rgt'].forEach(function(id) {
+    var el = document.getElementById(id);
+    el.style.width  = '0px';
+    el.style.height = '0px';
+  });
+
   window.addEventListener('resize', _tourOnResize);
 }
 
