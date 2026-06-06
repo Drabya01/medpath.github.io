@@ -14664,6 +14664,16 @@ var _clubState = {
 };
 
 // ── HOSA events catalogue ────────────────────────────────────
+// ── Club theme definitions ─────────────────────────────────────
+var _CLUB_THEMES = {
+  teal:   { grad:'linear-gradient(135deg,#0d9488 0%,#0a7c70 100%)', accent:'#0d9488' },
+  indigo: { grad:'linear-gradient(135deg,#4f46e5 0%,#3730a3 100%)', accent:'#4f46e5' },
+  amber:  { grad:'linear-gradient(135deg,#f59e0b 0%,#d97706 100%)', accent:'#d97706' },
+  rose:   { grad:'linear-gradient(135deg,#f43f5e 0%,#e11d48 100%)', accent:'#e11d48' },
+  violet: { grad:'linear-gradient(135deg,#8b5cf6 0%,#7c3aed 100%)', accent:'#7c3aed' },
+  slate:  { grad:'linear-gradient(135deg,#64748b 0%,#334155 100%)', accent:'#334155' },
+};
+
 var _HOSA_EVENTS = [
   { id:'cpr',                 name:'CPR / First Aid' },
   { id:'emt',                 name:'Emergency Medical Tech' },
@@ -14969,28 +14979,31 @@ function _clubSelectorHTML() {
 // ═══════════════════════════════════════════════════════════════
 
 function _clubRenderTeacher() {
-  var club = _clubState.active;
-  var tab  = _clubState.tab;
+  var club  = _clubState.active;
+  var tab   = _clubState.tab;
   if (tab==='overview'||tab==='announcements') tab='stream';
   if (tab==='students')   tab='people';
   if (tab==='assignments') tab='classwork';
+  var ct   = _CLUB_THEMES[club.theme] || _CLUB_THEMES.teal;
+  var init = (club.name||'?').charAt(0).toUpperCase();
   var gearSVG = '<svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="2.5"/><path d="M10 1.5v2m0 13v2M1.5 10h2m13 0h2m-3.4-5.1-1.4 1.4M5.8 14.2l-1.4 1.4m0-11.2 1.4 1.4m8.4 8.4 1.4 1.4"/></svg>';
   return _clubSelectorHTML()
-    +'<div class="club-header">'
-    +'<div class="club-header-left">'
-    +'<h3 class="club-name">'+_esc(club.name)+'</h3>'
-    +'<div class="club-meta">'+_clubState.members.length+' member'+(_clubState.members.length!==1?'s':'')+'</div>'
+    +'<div class="club-root" id="clubRoot" style="--club-accent:'+ct.accent+'">'
+    +'<div class="club-banner" id="clubBanner" style="background:'+ct.grad+'">'
+    +'<div class="club-banner-initial">'+init+'</div>'
+    +'<div class="club-banner-content">'
+    +'<h3 class="club-banner-name">'+_esc(club.name)+'</h3>'
+    +'<div class="club-banner-meta">'+_clubState.members.length+' member'+(_clubState.members.length!==1?'s':'')+'</div>'
     +'</div>'
-    +'<div class="club-header-right">'
-    +'<button class="club-gear-btn" onclick="switchClubTab(\'settings\')" title="Settings">'+gearSVG+'</button>'
-    +'</div>'
+    +'<button class="club-banner-gear" onclick="switchClubTab(\'settings\')" title="Settings">'+gearSVG+'</button>'
     +'</div>'
     +'<div class="club-tabs">'
     +'<button class="club-tab'+(tab==='stream'?' active':'')+' " data-tab="stream" onclick="switchClubTab(\'stream\')">Stream</button>'
     +'<button class="club-tab'+(tab==='classwork'?' active':'')+' " data-tab="classwork" onclick="switchClubTab(\'classwork\')">Classwork</button>'
     +'<button class="club-tab'+(tab==='people'?' active':'')+' " data-tab="people" onclick="switchClubTab(\'people\')">People</button>'
     +'</div>'
-    +'<div id="clubTabContent">'+_clubTeacherTab(tab)+'</div>';
+    +'<div id="clubTabContent">'+_clubTeacherTab(tab)+'</div>'
+    +'</div>'; /* end club-root */
 }
 
 function _clubTeacherTab(tab) {
@@ -15348,7 +15361,21 @@ async function _clubDeleteAnnouncement(id) {
 
 function _clubTeacherSettings() {
   var club = _clubState.active;
+  var cur  = club.theme || 'teal';
+  var swatches = Object.keys(_CLUB_THEMES).map(function(key) {
+    var t = _CLUB_THEMES[key];
+    var lbl = key.charAt(0).toUpperCase()+key.slice(1);
+    return '<button class="club-theme-swatch'+(key===cur?' active':'')+' " '
+      +'data-theme="'+key+'" onclick="_clubSetTheme(\''+key+'\')" '
+      +'style="background:'+t.grad+'" title="'+lbl+'">'
+      +'<span class="club-swatch-check">✓</span>'
+      +'</button>';
+  }).join('');
   return '<div class="club-settings">'
+    +'<div class="club-section-title">Banner Theme</div>'
+    +'<div class="club-theme-grid">'+swatches+'</div>'
+    +'<div class="club-hint-text" style="margin-bottom:20px">Sets the banner color for your class.</div>'
+
     +'<div class="club-section-title">Club Name</div>'
     +'<div class="club-form-row">'
     +'<input class="club-input" id="csName" type="text" value="'+_esc(club.name)+'" maxlength="60">'
@@ -15363,9 +15390,6 @@ function _clubTeacherSettings() {
     +'<button class="club-setup-btn" onclick="_clubRegenCode()">🔄 Regenerate</button>'
     +'</div>'
     +'<div class="club-hint-text">Regenerate if the code was shared with unintended people. Old code immediately stops working.</div>'
-
-    +'<div class="club-section-title" style="margin-top:24px">Members ('+club.join_code+')</div>'
-    +'<div class="club-hint-text" style="margin-bottom:8px">Students can leave by tapping "Leave club" in their view.</div>'
 
     +'<div class="club-danger-zone">'
     +'<div class="club-section-title club-section-title--danger">⚠ Danger Zone</div>'
@@ -15392,6 +15416,25 @@ async function _clubSaveName() {
   } else {
     if(errEl){errEl.textContent='Failed — try again';errEl.classList.remove('hidden');}
   }
+
+async function _clubSetTheme(theme) {
+  if (!_CLUB_THEMES[theme] || !_clubState.active) return;
+  var ok = await SupabaseSync.updateClub(_clubState.active.id, { theme:theme });
+  if (ok) {
+    _clubState.active.theme = theme;
+    var c = _clubState.clubs.find(function(c){return c.id===_clubState.active.id;});
+    if (c) c.theme = theme;
+    var ct     = _CLUB_THEMES[theme];
+    var banner = document.getElementById('clubBanner');
+    var root   = document.getElementById('clubRoot');
+    if (banner) { banner.style.background = ct.grad; }
+    if (root)   { root.style.setProperty('--club-accent', ct.accent); }
+    document.querySelectorAll('.club-theme-swatch').forEach(function(s){
+      s.classList.toggle('active', s.dataset.theme===theme);
+    });
+    showSettingsToast(theme.charAt(0).toUpperCase()+theme.slice(1)+' theme applied ✓');
+  }
+}
 }
 
 async function _clubRegenCode() {

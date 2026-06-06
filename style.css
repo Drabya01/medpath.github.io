@@ -6855,12 +6855,12 @@ select.club-input { cursor: pointer; }
   position: absolute;
   bottom: -1px; left: 10px; right: 10px;
   height: 2px;
-  background: #0d9488;
+  background: var(--club-accent, #0d9488);
   border-radius: 2px 2px 0 0;
   transform: scaleX(0);
   transition: transform .18s;
 }
-.club-tab.active       { color: #0d9488; }
+.club-tab.active       { color: var(--club-accent, #0d9488); }
 .club-tab.active::after { transform: scaleX(1); }
 .club-tab:hover:not(.active) { color: var(--text-secondary); }
 
@@ -7519,6 +7519,124 @@ select.club-input { cursor: pointer; }
 @media (max-width: 420px) {
   .club-member-grid { grid-template-columns: 1fr; }
   .club-stream-stats { gap: 0; }
+}
+
+
+
+/* ══════════════════════════════════════════
+   CLUB BANNER + THEME SYSTEM
+══════════════════════════════════════════ */
+
+/* Root wrapper — carries --club-accent for themed elements */
+.club-root {
+  --club-accent: #0d9488;
+}
+
+/* ── Banner ───────────────────────────── */
+.club-banner {
+  position: relative;
+  height: 96px;
+  border-radius: 14px;
+  overflow: hidden;
+  margin-bottom: 0;
+  transition: background 0.4s ease;
+  /* Subtle inner shadow at bottom for depth */
+  box-shadow: inset 0 -2px 0 rgba(0,0,0,.12);
+}
+
+/* Large decorative initial — background watermark */
+.club-banner-initial {
+  position: absolute;
+  right: -4px;
+  bottom: -18px;
+  font-size: 130px;
+  font-weight: 900;
+  color: rgba(255,255,255,.1);
+  line-height: 1;
+  letter-spacing: -0.05em;
+  pointer-events: none;
+  user-select: none;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* Club name + meta inside the banner */
+.club-banner-content {
+  position: absolute;
+  bottom: 14px;
+  left: 16px;
+}
+.club-banner-name {
+  font-size: 1.15rem;
+  font-weight: 800;
+  color: rgba(255,255,255,.95);
+  margin: 0 0 2px;
+  letter-spacing: -.025em;
+  line-height: 1.2;
+}
+.club-banner-meta {
+  font-size: .72rem;
+  color: rgba(255,255,255,.68);
+  font-weight: 500;
+}
+
+/* Gear button inside banner (top-right) */
+.club-banner-gear {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,.15);
+  border: 1px solid rgba(255,255,255,.28);
+  border-radius: 9px;
+  color: rgba(255,255,255,.9);
+  cursor: pointer;
+  transition: background .15s, transform .12s;
+}
+.club-banner-gear:hover  { background: rgba(255,255,255,.26); }
+.club-banner-gear:active { transform: scale(0.94); }
+
+/* ── Theme picker ─────────────────────── */
+.club-theme-grid {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.club-theme-swatch {
+  width: 42px; height: 42px;
+  border-radius: 12px;
+  border: 3px solid transparent;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: transform .18s cubic-bezier(0.34,1.56,0.64,1), border-color .15s;
+  position: relative;
+  outline: none;
+}
+.club-theme-swatch:hover  { transform: scale(1.12); }
+.club-theme-swatch.active {
+  border-color: var(--text-primary);
+  transform: scale(1.06);
+  box-shadow: 0 0 0 2px var(--bg-card), 0 0 0 4px var(--text-primary);
+}
+.club-swatch-check {
+  color: #fff;
+  font-size: .9rem;
+  font-weight: 800;
+  text-shadow: 0 1px 2px rgba(0,0,0,.4);
+  opacity: 0;
+  transition: opacity .18s;
+}
+.club-theme-swatch.active .club-swatch-check { opacity: 1; }
+
+/* Remove old standalone gear btn since it moved into the banner */
+.club-gear-btn { display: none; }
+
+/* ── Dark mode ────────────────────────── */
+.dark .club-theme-swatch.active {
+  border-color: #fff;
+  box-shadow: 0 0 0 2px var(--bg-card), 0 0 0 4px #fff;
 }
 
 
