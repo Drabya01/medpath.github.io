@@ -14073,8 +14073,8 @@ function _obStepHTML(step, idx) {
     h += '<p class="ob-sub">' + step.sub + '</p>';
     h += '<div class="ob-welcome-features">';
     h += '<div class="ob-feature"><span>📚</span><span>7,000+ medical flashcards with Anki SM-2</span></div>';
-    h += '<div class="ob-feature"><span>🏥</span><span>All HOSA Canada 2025–26 events covered</span></div>';
-    h += '<div class="ob-feature"><span>🧠</span><span>Clinical cases, anatomy explorer & quizzes</span></div>';
+    h += '<div class="ob-feature"><span>🏥</span><span>Clinical cases, anatomy, and competitive event prep</span></div>';
+    h += '<div class="ob-feature"><span>🧠</span><span>Quizzes, anatomy explorer & personalised review</span></div>';
     h += '<div class="ob-feature"><span>📶</span><span>Works offline — study anywhere</span></div>';
     h += '</div>';
     return h;
