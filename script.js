@@ -14848,7 +14848,7 @@ async function initClubScreen() {
 
 async function _clubSwitchTo(clubId) {
   _clubState.active = _clubState.clubs.find(function(c){return c.id===clubId;}) || _clubState.clubs[0];
-  _clubState.tab    = 'overview';
+  _clubState.tab    = 'stream';
   initClubScreen();
 }
 
@@ -14994,68 +14994,94 @@ function _clubRenderTeacher() {
 }
 
 function _clubTeacherTab(tab) {
-  if (tab==='overview')      return _clubTeacherOverview();
-  if (tab==='students')      return _clubTeacherStudents();
-  if (tab==='assignments')   return _clubTeacherAssignments();
-  if (tab==='announcements') return _clubTeacherAnnouncements();
-  if (tab==='settings')      return _clubTeacherSettings();
-  return '';
+  if (tab==='stream')    return _clubTeacherStream();
+  if (tab==='classwork') return _clubTeacherClasswork();
+  if (tab==='people')    return _clubTeacherPeople();
+  if (tab==='settings')  return _clubTeacherSettings();
+  /* legacy fallbacks */
+  if (tab==='overview')  return _clubTeacherStream();
+  if (tab==='students')  return _clubTeacherPeople();
+  if (tab==='assignments') return _clubTeacherClasswork();
+  return _clubTeacherStream();
 }
 
-// ── Overview + smart "Assign this" ───────────────────────────
+// ── Stream (activity feed + announcements) ───────────────────
 
-function _clubTeacherOverview() {
+function _clubTeacherStream() {
   var stats   = _clubState.stats;
   var members = _clubState.members;
-  var totalCards   = stats.reduce(function(s,r){return s+(r.cards_reviewed||0);},0);
-  var quizAvgs     = stats.filter(function(r){return r.quizzes_done>0;}).map(function(r){return r.quiz_avg;});
-  var avgQuiz      = quizAvgs.length ? Math.round(quizAvgs.reduce(function(a,b){return a+b;},0)/quizAvgs.length) : null;
+  var anns    = _clubState.announcements || [];
+  var assigns = _clubState.assignments   || [];
+
+  // Compact stats strip
+  var totalCards     = stats.reduce(function(s,r){return s+(r.cards_reviewed||0);},0);
   var activeThisWeek = stats.filter(function(r){return r.week_xp>0;}).length;
-
-  var catCount = {};
-  stats.forEach(function(r){ (r.weak_cats||[]).forEach(function(cat){ catCount[cat]=(catCount[cat]||0)+1; }); });
-  var weakList = Object.entries(catCount).sort(function(a,b){return b[1]-a[1];}).slice(0,8);
-
-  var html = '<div class="club-stats-grid">'
-    +_clubStatCard('👥', members.length, 'Members')
-    +_clubStatCard('⚡', activeThisWeek, 'Active this week')
-    +_clubStatCard('🃏', totalCards.toLocaleString(), 'Cards studied')
-    +(avgQuiz!==null ? _clubStatCard('📝', avgQuiz+'%', 'Avg quiz score') : '')
+  var html = '<div class="club-stream-stats">'
+    +'<div class="css-stat"><span class="css-val">'+members.length+'</span><span class="css-lbl">members</span></div>'
+    +'<div class="css-sep"></div>'
+    +'<div class="css-stat"><span class="css-val css-val--active">'+activeThisWeek+'</span><span class="css-lbl">active this week</span></div>'
+    +'<div class="css-sep"></div>'
+    +'<div class="css-stat"><span class="css-val">'+totalCards.toLocaleString()+'</span><span class="css-lbl">cards studied</span></div>'
     +'</div>';
 
-  if (weakList.length) {
-    var maxCount = weakList[0][1];
-    html += '<div class="club-section-title">Weak spots by category <span class="club-hint">— click Assign to create a targeted assignment</span></div>'
-      +'<div class="club-heatmap">';
-    weakList.forEach(function(e, i) {
-      var pct = Math.round((e[1]/(stats.length||1))*100);
-      var cls = pct>=60?'club-heat--danger':pct>=30?'club-heat--warn':'club-heat--ok';
-      html += '<div class="club-heat-row">'
-        +'<span class="club-heat-cat">'+_esc(e[0])+'</span>'
-        +'<div class="club-heat-bar-wrap"><div class="club-heat-bar '+cls+'" style="width:'+Math.round((e[1]/maxCount)*100)+'%"></div></div>'
-        +'<span class="club-heat-count">'+e[1]+'/'+stats.length+'</span>'
-        +(i===0
-          ? '<button class="club-smart-assign" onclick="_clubQuickAssign(\'flashcards\',\''+_esc(e[0])+'\',30)" title="Assign 30 cards on this topic">Assign →</button>'
-          : '<button class="club-smart-assign club-smart-assign--sm" onclick="_clubQuickAssign(\'flashcards\',\''+_esc(e[0])+'\',20)">Assign</button>')
-        +'</div>';
+  // Compose box (always visible — like Google Classroom)
+  html += '<div class="club-compose">'
+    +'<textarea class="club-compose-input" id="annInput" placeholder="Announce something to your class — meeting times, reminders, words of encouragement…" rows="2" maxlength="500"></textarea>'
+    +'<button class="club-compose-post" onclick="_clubPostAnnouncement()">Post</button>'
+    +'</div>';
+
+  // Unified chronological feed: announcements + assignment creation events
+  var feed = [];
+  anns.forEach(function(a){
+    feed.push({ kind:'ann', d:a, ts: new Date(a.created_at||0).getTime() });
+  });
+  assigns.forEach(function(a){
+    feed.push({ kind:'assign', d:a, ts: new Date(a.created_at||0).getTime() });
+  });
+  feed.sort(function(a,b){ return b.ts - a.ts; });
+
+  var typeColors = { flashcards:'#0d9488', cases:'#0284c7', quiz:'#7c3aed', hosa:'#d97706' };
+  var typeEmoji  = { flashcards:'🃏', cases:'🏥', quiz:'📝', hosa:'🏆' };
+
+  if (feed.length) {
+    html += '<div class="club-feed">';
+    feed.forEach(function(item) {
+      if (item.kind === 'ann') {
+        var a = item.d;
+        html += '<div class="club-feed-item club-feed-item--ann">'
+          +'<div class="club-feed-icon-wrap">📢</div>'
+          +'<div class="club-feed-body">'
+          +'<div class="club-feed-text">'+_esc(a.message)+'</div>'
+          +'<div class="club-feed-meta">'+_timeAgo(a.created_at)+'</div>'
+          +'</div>'
+          +'<button class="club-feed-del" onclick="_clubDeleteAnnouncement(\''+a.id+'\')">✕</button>'
+          +'</div>';
+      } else {
+        var a = item.d;
+        var color = typeColors[a.type] || '#0d9488';
+        var emoji = typeEmoji[a.type]  || '📋';
+        var due   = _daysUntil(a.due_date);
+        html += '<div class="club-feed-item club-feed-item--assign" style="--fi-color:'+color+'">'
+          +'<div class="club-feed-icon-wrap" style="background:'+color+'18;color:'+color+'">'+emoji+'</div>'
+          +'<div class="club-feed-body">'
+          +'<div class="club-feed-label">Assignment</div>'
+          +'<div class="club-feed-title">'+_esc(a.title)+'</div>'
+          +'<div class="club-feed-meta">'+_clubAssignTypeChip(a.type)+(due?' · '+due:'')+'</div>'
+          +'</div>'
+          +'<button class="club-feed-del" onclick="_clubDeleteAssignment(\''+a.id+'\')">✕</button>'
+          +'</div>';
+      }
     });
     html += '</div>';
-
-    // Smart recommendation card
-    var top = weakList[0];
-    html += '<div class="club-recommend">'
-      +'<div class="club-recommend-label">Recommended assignment</div>'
-      +'<div class="club-recommend-text">Your class is weakest in <strong>'+_esc(top[0])+'</strong> '
-      +'— '+top[1]+' of '+stats.length+' students flagged it as a weak spot.</div>'
-      +'<button class="club-recommend-btn" onclick="_clubQuickAssign(\'flashcards\',\''+_esc(top[0])+'\',30)">'
-      +'📋 Assign: Review '+_esc(top[0])+' (30 cards)'
-      +'</button>'
-      +'</div>';
   } else {
-    html += '<div class="club-empty-hint">No weak-spot data yet — students will appear here after they study flashcards.</div>';
+    html += '<div class="club-empty-hint">Nothing posted yet. Announce meeting times, upcoming assignments, or words of encouragement to your class.</div>';
   }
   return html;
 }
+
+// ── Overview kept as alias (used by legacy paths) ─────────────
+function _clubTeacherOverview() { return _clubTeacherStream(); }
+
 
 async function _clubQuickAssign(type, cat, count) {
   var title = 'Review: ' + cat;
@@ -15089,58 +15115,131 @@ function _clubStatCard(icon, val, label) {
     +'</div>';
 }
 
-// ── Students ──────────────────────────────────────────────────
+// ── People (card grid — Google Classroom-style) ──────────────
 
-function _clubTeacherStudents() {
+function _clubTeacherPeople() {
   var members  = _clubState.members.filter(function(m){return m.role!=='owner';});
   var statsMap = {};
   _clubState.stats.forEach(function(s){statsMap[s.user_id]=s;});
-  if (!members.length) return '<div class="club-empty-hint">No students yet. Share your join code: <strong>'+_esc(_clubState.active.join_code)+'</strong></div>';
-  var html = '<div class="club-student-table">'
-    +'<div class="club-table-head"><span>Student</span><span>XP</span><span>Cards</span><span>Streak</span><span>Quiz avg</span></div>';
-  members.sort(function(a,b){return ((statsMap[b.user_id]||{}).total_xp||0)-((statsMap[a.user_id]||{}).total_xp||0);})
-    .forEach(function(m) {
-      var s = statsMap[m.user_id]||{};
-      var status = (s.streak||0)>=5 ? '<span class="club-badge club-badge--strong">Strong</span>'
-        : (s.week_xp||0)>0 ? '<span class="club-badge club-badge--ok">Active</span>'
-        : '<span class="club-badge club-badge--warn">Inactive</span>';
-      html += '<div class="club-student-row">'
-        +'<div class="club-student-info">'+_lbAvatar(m,'club-s-avatar')+'<span>'+_esc(m.display_name||'Student')+'</span>'+status+'</div>'
-        +'<span class="club-td">'+((s.total_xp||0).toLocaleString())+' XP</span>'
-        +'<span class="club-td">'+(s.cards_reviewed||0)+'</span>'
-        +'<span class="club-td">'+(s.streak?'🔥 '+s.streak+'d':'—')+'</span>'
-        +'<span class="club-td">'+(s.quizzes_done>0?(s.quiz_avg||0)+'%':'—')+'</span>'
-        +'</div>';
-    });
-  return html + '</div>';
+  var club = _clubState.active;
+
+  // Invite section — always at top
+  var html = '<div class="club-invite-section">'
+    +'<div class="club-invite-lbl">Invite students to your class</div>'
+    +'<div class="club-invite-row">'
+    +'<div class="club-code-display">'+_esc(club.join_code)+'</div>'
+    +'<button class="club-setup-btn club-setup-btn--primary" onclick="_clubCopyCode(\''+club.join_code+'\')">Copy code</button>'
+    +'</div>'
+    +'<div class="club-hint-text">Share this code. Students enter it in the Club Dashboard to join.</div>'
+    +'</div>';
+
+  if (!members.length) {
+    html += '<div class="club-empty-hint">No students yet — share your join code above to get started.</div>';
+    return html;
+  }
+
+  html += '<div class="club-section-title">'+members.length+' student'+(members.length!==1?'s':'')+'</div>';
+  html += '<div class="club-member-grid">';
+
+  members.sort(function(a,b){
+    return ((statsMap[b.user_id]||{}).total_xp||0)-((statsMap[a.user_id]||{}).total_xp||0);
+  }).forEach(function(m) {
+    var s          = statsMap[m.user_id]||{};
+    var isStrong   = (s.streak||0)>=5;
+    var isActive   = (s.week_xp||0)>0;
+    var badgeClass = isStrong?'club-badge--strong':isActive?'club-badge--ok':'club-badge--warn';
+    var badgeText  = isStrong?'🔥 Strong':isActive?'Active':'Inactive';
+    html += '<div class="club-member-card">'
+      +'<div class="club-mc-top">'
+      +_lbAvatar(m,'club-mc-avatar')
+      +'<div class="club-mc-info">'
+      +'<div class="club-mc-name">'+_esc(m.display_name||'Student')+'</div>'
+      +'<span class="club-badge '+badgeClass+'">'+badgeText+'</span>'
+      +'</div>'
+      +'</div>'
+      +'<div class="club-mc-stats">'
+      +'<div class="club-mc-stat"><span class="club-mc-val">'+((s.total_xp||0).toLocaleString())+'</span><span class="club-mc-lbl">XP</span></div>'
+      +'<div class="club-mc-stat"><span class="club-mc-val">'+(s.streak?s.streak+'d':'—')+'</span><span class="club-mc-lbl">streak</span></div>'
+      +'<div class="club-mc-stat"><span class="club-mc-val">'+(s.cards_reviewed||0)+'</span><span class="club-mc-lbl">cards</span></div>'
+      +'</div>'
+      +'</div>';
+  });
+  html += '</div>';
+  return html;
 }
 
-// ── Assignments (now with HOSA type) ─────────────────────────
+// ── Students kept as alias ────────────────────────────────────
+function _clubTeacherStudents() { return _clubTeacherPeople(); }
 
-function _clubTeacherAssignments() {
+
+// ── Classwork (assignments + weak spots) ─────────────────────
+
+function _clubTeacherClasswork() {
   var assignments = _clubState.assignments;
-  var html = '<button class="club-new-btn" onclick="_clubShowAssignForm()">+ New Assignment</button>'
+  var stats       = _clubState.stats;
+  var typeColors  = { flashcards:'#0d9488', cases:'#0284c7', quiz:'#7c3aed', hosa:'#d97706' };
+
+  var html = '<div class="club-classwork-header">'
+    +'<span class="club-classwork-title">Assignments</span>'
+    +'<button class="club-new-btn" onclick="_clubShowAssignForm()">+ Create</button>'
+    +'</div>'
     +'<div class="club-assign-form hidden" id="clubAssignForm">'+_clubAssignFormHTML()+'</div>';
+
   if (!assignments.length) {
-    html += '<div class="club-empty-hint">No assignments yet. Create one above.</div>';
+    html += '<div class="club-empty-state">'
+      +'<div class="club-empty-icon">📋</div>'
+      +'<div class="club-empty-title">No assignments yet</div>'
+      +'<div class="club-empty-desc">Create targeted practice for your class. Students see new assignments instantly on their Stream.</div>'
+      +'</div>';
   } else {
     html += '<div class="club-assign-list">';
     assignments.forEach(function(a) {
-      var due = _daysUntil(a.due_date);
-      var dueClass = _isDue(a.due_date)?'club-due--overdue':'club-due--ok';
-      html += '<div class="club-assign-card">'
+      var due     = _daysUntil(a.due_date);
+      var overdue = _isDue(a.due_date);
+      var color   = typeColors[a.type] || '#0d9488';
+      html += '<div class="club-assign-card club-assign-card--v2" style="--a-color:'+color+'">'
+        +'<div class="club-assign-stripe"></div>'
+        +'<div class="club-assign-content">'
         +'<div class="club-assign-top">'
         +'<span class="club-assign-title">'+_esc(a.title)+'</span>'
-        +'<button class="club-assign-delete" onclick="_clubDeleteAssignment(\''+a.id+'\')" title="Delete">✕</button>'
+        +'<button class="club-assign-delete" onclick="_clubDeleteAssignment(\''+a.id+'\')">✕</button>'
         +'</div>'
         +'<div class="club-assign-meta">'+_clubAssignTypeChip(a.type)+(a.target_cat?' · '+_esc(a.type==='hosa'?_hosaName(a.target_cat):a.target_cat):'')+'</div>'
-        +(due?'<div class="club-assign-due '+dueClass+'">'+due+'</div>':'')
+        +(due?'<div class="club-assign-due '+(overdue?'club-due--overdue':'club-due--ok')+'">'+due+'</div>':'')
+        +'</div>'
+        +'</div>';
+    });
+    html += '</div>';
+  }
+
+  // Weak spots section at bottom
+  var catCount = {};
+  stats.forEach(function(r){ (r.weak_cats||[]).forEach(function(cat){ catCount[cat]=(catCount[cat]||0)+1; }); });
+  var weakList = Object.entries(catCount).sort(function(a,b){return b[1]-a[1];}).slice(0,8);
+  if (weakList.length) {
+    var maxCount = weakList[0][1];
+    html += '<div class="club-section-title" style="margin-top:28px">Class weak spots <span class="club-hint">— click Assign to target these topics</span></div>'
+      +'<div class="club-heatmap">';
+    weakList.forEach(function(e, i) {
+      var pct = Math.round((e[1]/(stats.length||1))*100);
+      var cls = pct>=60?'club-heat--danger':pct>=30?'club-heat--warn':'club-heat--ok';
+      html += '<div class="club-heat-row">'
+        +'<span class="club-heat-cat">'+_esc(e[0])+'</span>'
+        +'<div class="club-heat-bar-wrap"><div class="club-heat-bar '+cls+'" style="width:'+Math.round((e[1]/maxCount)*100)+'%"></div></div>'
+        +'<span class="club-heat-count">'+e[1]+'/'+stats.length+'</span>'
+        +(i===0
+          ? '<button class="club-smart-assign" onclick="_clubQuickAssign(\'flashcards\',\''+_esc(e[0])+'\',30)">Assign →</button>'
+          : '<button class="club-smart-assign club-smart-assign--sm" onclick="_clubQuickAssign(\'flashcards\',\''+_esc(e[0])+'\',20)">Assign</button>')
         +'</div>';
     });
     html += '</div>';
   }
   return html;
 }
+
+// ── _clubTeacherAssignments kept as alias ─────────────────────
+function _clubTeacherAssignments() { return _clubTeacherClasswork(); }
+
 
 function _clubAssignTypeChip(type) {
   return {flashcards:'🃏 Flashcards', cases:'🩺 Cases', quiz:'📝 Quiz', hosa:'🏆 HOSA Event'}[type] || type;
@@ -15220,34 +15319,10 @@ async function _clubDeleteAssignment(id) {
   switchClubTab('assignments');
 }
 
-// ── Announcements ─────────────────────────────────────────────
+// ── Announcements (now integrated into Stream tab) ───────────
+// legacy alias kept for safety
+function _clubTeacherAnnouncements() { return _clubTeacherStream(); }
 
-function _clubTeacherAnnouncements() {
-  var anns = _clubState.announcements;
-  var html = '<div class="club-ann-compose">'
-    +'<textarea class="club-ann-input" id="annInput" placeholder="Post an announcement to your club… (meeting times, reminders, encouragement)" rows="3" maxlength="500"></textarea>'
-    +'<div class="club-form-row">'
-    +'<button class="club-setup-btn club-setup-btn--primary" onclick="_clubPostAnnouncement()">Post</button>'
-    +'</div>'
-    +'</div>';
-  if (!anns.length) {
-    html += '<div class="club-empty-hint">No announcements yet. Post one above — students will see it at the top of their club view.</div>';
-  } else {
-    html += '<div class="club-ann-list">';
-    anns.forEach(function(a) {
-      var ago = _timeAgo(a.created_at);
-      html += '<div class="club-ann-card">'
-        +'<div class="club-ann-body">'+_esc(a.message)+'</div>'
-        +'<div class="club-ann-footer">'
-        +'<span class="club-ann-time">'+ago+'</span>'
-        +'<button class="club-assign-delete" onclick="_clubDeleteAnnouncement(\''+a.id+'\')" title="Delete">✕</button>'
-        +'</div>'
-        +'</div>';
-    });
-    html += '</div>';
-  }
-  return html;
-}
 
 async function _clubPostAnnouncement() {
   var input = document.getElementById('annInput');

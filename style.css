@@ -7269,6 +7269,259 @@ select.club-input { cursor: pointer; }
 .club-header-right { flex-shrink: 0; }
 
 
+
+/* ══════════════════════════════════════════
+   CLUB v2 — Google Classroom-inspired layout
+   Stream · Classwork · People
+══════════════════════════════════════════ */
+
+/* ── Gear / settings button ──────────── */
+.club-gear-btn {
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent; border: 1px solid var(--border);
+  border-radius: 8px; cursor: pointer;
+  color: var(--text-muted);
+  transition: color .15s, border-color .15s, background .15s;
+  flex-shrink: 0;
+}
+.club-gear-btn:hover { color: var(--text-secondary); border-color: var(--border-strong); background: var(--bg-subtle); }
+
+/* ── Stream: compact stats strip ─────── */
+.club-stream-stats {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 12px 0;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.css-stat {
+  display: flex; align-items: baseline; gap: 5px; flex: 1; justify-content: center;
+}
+.css-val {
+  font-size: 1.2rem; font-weight: 800;
+  color: var(--text-primary); letter-spacing: -.03em;
+}
+.css-val--active { color: #d97706; }
+.css-lbl {
+  font-size: .7rem; color: var(--text-muted); font-weight: 500;
+}
+.css-sep {
+  width: 1px; height: 28px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
+/* ── Stream: compose box (Google Classroom style) ── */
+.club-compose {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 14px;
+  margin-bottom: 18px;
+  transition: border-color .15s, box-shadow .15s;
+}
+.club-compose:focus-within {
+  border-color: #0d9488;
+  box-shadow: 0 0 0 3px rgba(13,148,136,.08);
+}
+.club-compose-input {
+  flex: 1; border: none; background: transparent;
+  font-size: .84rem; color: var(--text-primary);
+  resize: none; outline: none; line-height: 1.5;
+  font-family: inherit; min-height: 36px;
+}
+.club-compose-input::placeholder { color: var(--text-muted); }
+.club-compose-post {
+  height: 34px; padding: 0 16px;
+  background: #0d9488; color: #fff;
+  border: none; border-radius: 8px;
+  font-size: .8rem; font-weight: 700;
+  cursor: pointer; flex-shrink: 0;
+  transition: background .18s;
+}
+.club-compose-post:hover { background: #0f766e; }
+
+/* ── Stream: unified feed ─────────────── */
+.club-feed { display: flex; flex-direction: column; gap: 8px; }
+
+.club-feed-item {
+  display: flex; align-items: flex-start; gap: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  transition: border-color .15s;
+}
+.club-feed-item:hover { border-color: var(--border-strong); }
+
+.club-feed-item--assign {
+  border-left: 3px solid var(--fi-color, #0d9488);
+}
+
+.club-feed-icon-wrap {
+  width: 34px; height: 34px;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1rem; flex-shrink: 0;
+  background: var(--bg-subtle);
+}
+
+.club-feed-body { flex: 1; min-width: 0; }
+.club-feed-label {
+  font-size: .65rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--text-muted); margin-bottom: 2px;
+}
+.club-feed-title {
+  font-size: .88rem; font-weight: 700;
+  color: var(--text-primary); margin-bottom: 3px; line-height: 1.3;
+}
+.club-feed-text {
+  font-size: .84rem; color: var(--text-primary);
+  line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+}
+.club-feed-meta {
+  font-size: .7rem; color: var(--text-muted);
+  margin-top: 4px; font-weight: 500;
+}
+.club-feed-del {
+  background: transparent; border: none; padding: 2px 4px;
+  font-size: .8rem; color: var(--text-muted);
+  cursor: pointer; flex-shrink: 0;
+  transition: color .12s; margin-top: 1px;
+}
+.club-feed-del:hover { color: #dc2626; }
+
+/* ── Classwork: header row ───────────── */
+.club-classwork-header {
+  display: flex; align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.club-classwork-title {
+  font-size: .9rem; font-weight: 700;
+  color: var(--text-primary);
+}
+/* Override club-new-btn to be compact in classwork */
+.club-classwork-header .club-new-btn {
+  margin-bottom: 0;
+  background: #0d9488; border-style: solid;
+  border-color: #0d9488; color: #fff;
+  font-weight: 700;
+}
+.club-classwork-header .club-new-btn:hover {
+  background: #0f766e; border-color: #0f766e; color: #fff;
+}
+
+/* ── Classwork: assignment card v2 ────── */
+.club-assign-card--v2 {
+  display: flex; align-items: stretch;
+  padding: 0; overflow: hidden;
+}
+.club-assign-stripe {
+  width: 4px; background: var(--a-color, #0d9488);
+  flex-shrink: 0;
+}
+.club-assign-content {
+  flex: 1; padding: 12px 14px;
+}
+.club-assign-card--v2 .club-assign-top { margin-bottom: 4px; }
+.club-assign-card--v2 .club-assign-meta { margin-bottom: 4px; }
+
+/* ── Empty state (Classwork) ─────────── */
+.club-empty-state {
+  text-align: center; padding: 40px 20px;
+}
+.club-empty-icon  { font-size: 2.5rem; margin-bottom: 12px; }
+.club-empty-title { font-size: 1rem; font-weight: 700; color: var(--text-primary); margin-bottom: 6px; }
+.club-empty-desc  { font-size: .82rem; color: var(--text-muted); line-height: 1.55; }
+
+/* ── People: invite section ──────────── */
+.club-invite-section {
+  background: rgba(13,148,136,.05);
+  border: 1px solid rgba(13,148,136,.18);
+  border-radius: 14px;
+  padding: 14px 16px;
+  margin-bottom: 20px;
+}
+.club-invite-lbl {
+  font-size: .8rem; font-weight: 700;
+  color: var(--text-primary); margin-bottom: 10px;
+}
+.club-invite-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.dark .club-invite-section {
+  background: rgba(13,148,136,.08);
+  border-color: rgba(13,148,136,.22);
+}
+
+/* ── People: member card grid ────────── */
+.club-member-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.club-member-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  transition: border-color .15s;
+}
+.club-member-card:hover { border-color: var(--border-strong); }
+
+.club-mc-top {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+}
+.club-mc-avatar, .club-mc-info { flex-shrink: 0; }
+.club-mc-avatar { width: 36px !important; height: 36px !important; border-radius: 50%; }
+.club-mc-info { flex: 1; min-width: 0; }
+.club-mc-name {
+  font-size: .82rem; font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin-bottom: 3px;
+}
+
+.club-mc-stats {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  gap: 4px; padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.club-mc-stat { text-align: center; }
+.club-mc-val  {
+  display: block; font-size: .82rem; font-weight: 800;
+  color: var(--text-primary); letter-spacing: -.02em;
+}
+.club-mc-lbl  {
+  display: block; font-size: .6rem; color: var(--text-muted);
+  font-weight: 500; margin-top: 1px;
+}
+
+/* ── Settings tab: back arrow ────────── */
+.club-settings-back {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: .78rem; font-weight: 600;
+  color: var(--text-muted); background: none; border: none;
+  cursor: pointer; padding: 0; margin-bottom: 16px;
+  transition: color .15s;
+}
+.club-settings-back:hover { color: var(--text-secondary); }
+
+/* ── Responsive: 1-col member grid on small screens ── */
+@media (max-width: 420px) {
+  .club-member-grid { grid-template-columns: 1fr; }
+  .club-stream-stats { gap: 0; }
+}
+
+
 /* ══════════════════════════════════════════
    ADMIN PANEL
 ══════════════════════════════════════════ */

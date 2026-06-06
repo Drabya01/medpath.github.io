@@ -10,15 +10,15 @@
  * The old cache is deleted automatically on activate.
  */
 
-const CACHE_VERSION  = 'medpath-v8';
+const CACHE_VERSION  = 'medpath-v9';
 const FONT_CACHE     = 'medpath-fonts-v1';
 const DYNAMIC_CACHE  = 'medpath-dynamic-v1';
 
 // Files to pre-cache on install — the complete offline shell
 const PRECACHE_URLS = [
   './index.html',
-  './script.js?v=3',
-  './style.css?v=6',
+  './script.js?v=4',
+  './style.css?v=7',
   './manifest.json',
   './tour.js?v=3',
   './icons/icon-192.png',
