@@ -14477,6 +14477,8 @@ function obFinish() {
     if (obProfile.goal === 'hosa' && obProfile.events && obProfile.events.length) {
       showScreen('hosa');
     }
+    // Launch premium feature tour (runs once, after onboarding)
+    if (typeof tourStart === 'function') tourStart(obProfile);
   }, 450);
 }
 
@@ -14513,6 +14515,7 @@ function _applyProfile(profile) {
 function resetOnboarding() {
   if (!confirm('Reset your onboarding profile? Your study progress is not affected.')) return;
   localStorage.removeItem(OB_KEY);
+  try { localStorage.removeItem(TOUR_KEY); } catch(e) {}
   obProfile = null;
   obData = {};
   obStep = 0;
