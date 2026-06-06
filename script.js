@@ -14970,6 +14970,11 @@ function _clubSelectorHTML() {
 
 function _clubRenderTeacher() {
   var club = _clubState.active;
+  var tab  = _clubState.tab;
+  if (tab==='overview'||tab==='announcements') tab='stream';
+  if (tab==='students')   tab='people';
+  if (tab==='assignments') tab='classwork';
+  var gearSVG = '<svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="2.5"/><path d="M10 1.5v2m0 13v2M1.5 10h2m13 0h2m-3.4-5.1-1.4 1.4M5.8 14.2l-1.4 1.4m0-11.2 1.4 1.4m8.4 8.4 1.4 1.4"/></svg>';
   return _clubSelectorHTML()
     +'<div class="club-header">'
     +'<div class="club-header-left">'
@@ -14977,20 +14982,15 @@ function _clubRenderTeacher() {
     +'<div class="club-meta">'+_clubState.members.length+' member'+(_clubState.members.length!==1?'s':'')+'</div>'
     +'</div>'
     +'<div class="club-header-right">'
-    +'<div class="club-code-box" onclick="_clubCopyCode(\''+club.join_code+'\')" title="Click to copy">'
-    +'<span class="club-code-label">Join Code</span>'
-    +'<span class="club-code-val">'+club.join_code+'</span>'
-    +'</div>'
+    +'<button class="club-gear-btn" onclick="switchClubTab(\'settings\')" title="Settings">'+gearSVG+'</button>'
     +'</div>'
     +'</div>'
     +'<div class="club-tabs">'
-    +'<button class="club-tab'+(_clubState.tab==='overview'?' active':'')+'" data-tab="overview" onclick="switchClubTab(\'overview\')">Overview</button>'
-    +'<button class="club-tab'+(_clubState.tab==='students'?' active':'')+'" data-tab="students" onclick="switchClubTab(\'students\')">Students</button>'
-    +'<button class="club-tab'+(_clubState.tab==='assignments'?' active':'')+'" data-tab="assignments" onclick="switchClubTab(\'assignments\')">Assignments</button>'
-    +'<button class="club-tab'+(_clubState.tab==='announcements'?' active':'')+'" data-tab="announcements" onclick="switchClubTab(\'announcements\')">Announce</button>'
-    +'<button class="club-tab'+(_clubState.tab==='settings'?' active':'')+'" data-tab="settings" onclick="switchClubTab(\'settings\')">Settings</button>'
+    +'<button class="club-tab'+(tab==='stream'?' active':'')+' " data-tab="stream" onclick="switchClubTab(\'stream\')">Stream</button>'
+    +'<button class="club-tab'+(tab==='classwork'?' active':'')+' " data-tab="classwork" onclick="switchClubTab(\'classwork\')">Classwork</button>'
+    +'<button class="club-tab'+(tab==='people'?' active':'')+' " data-tab="people" onclick="switchClubTab(\'people\')">People</button>'
     +'</div>'
-    +'<div id="clubTabContent">'+_clubTeacherTab(_clubState.tab)+'</div>';
+    +'<div id="clubTabContent">'+_clubTeacherTab(tab)+'</div>';
 }
 
 function _clubTeacherTab(tab) {
@@ -15013,15 +15013,16 @@ function _clubTeacherStream() {
   var anns    = _clubState.announcements || [];
   var assigns = _clubState.assignments   || [];
 
-  // Compact stats strip
+  // Icon stat cards (same style user liked on old Overview)
   var totalCards     = stats.reduce(function(s,r){return s+(r.cards_reviewed||0);},0);
+  var quizAvgs       = stats.filter(function(r){return r.quizzes_done>0;}).map(function(r){return r.quiz_avg;});
+  var avgQuiz        = quizAvgs.length ? Math.round(quizAvgs.reduce(function(a,b){return a+b;},0)/quizAvgs.length) : null;
   var activeThisWeek = stats.filter(function(r){return r.week_xp>0;}).length;
-  var html = '<div class="club-stream-stats">'
-    +'<div class="css-stat"><span class="css-val">'+members.length+'</span><span class="css-lbl">members</span></div>'
-    +'<div class="css-sep"></div>'
-    +'<div class="css-stat"><span class="css-val css-val--active">'+activeThisWeek+'</span><span class="css-lbl">active this week</span></div>'
-    +'<div class="css-sep"></div>'
-    +'<div class="css-stat"><span class="css-val">'+totalCards.toLocaleString()+'</span><span class="css-lbl">cards studied</span></div>'
+  var html = '<div class="club-stats-grid">'
+    +_clubStatCard('👥', members.length, 'Members')
+    +_clubStatCard('⚡', activeThisWeek, 'Active this week')
+    +_clubStatCard('🃏', totalCards.toLocaleString(), 'Cards studied')
+    +(avgQuiz!==null ? _clubStatCard('📝', avgQuiz+'%', 'Avg quiz score') : '')
     +'</div>';
 
   // Compose box (always visible — like Google Classroom)
