@@ -8197,338 +8197,250 @@ body.no-case-bg #case-bg { display: none !important; }
 
 
 /* ══════════════════════════════════════════
-   MEDPATH FEATURE TOUR  v3
-   Single-overlay clip-path spotlight system
-   Smooth spring morphing · heartbeat ring ·
-   card-settle tooltip · grand finish
+   MEDPATH FEATURE TOUR  v5
+   GPU-only · 4-panel transform · FAST
+   Zero clip-path · Zero backdrop-filter ·
+   Zero filter · Pure transform + opacity
 ══════════════════════════════════════════ */
 
-/* ── Root ─────────────────────────────── */
 .tour-root {
-  position: fixed;
-  inset: 0;
-  z-index: 9970;
-  pointer-events: none;
+  position: fixed; inset: 0;
+  z-index: 9970; pointer-events: none;
 }
 .t-root-exit {
-  animation: t-fade-out 0.4s ease forwards;
+  animation: t-fade-out 0.3s ease forwards;
   pointer-events: none !important;
 }
-@keyframes t-fade-out  { to   { opacity: 0; } }
-@keyframes t-fade-in   { from { opacity: 0; } to { opacity: 1; } }
+@keyframes t-fade-out { to { opacity: 0; } }
+@keyframes t-fade-in  { from { opacity: 0; } to { opacity: 1; } }
 
-/* ── Single overlay with clip-path hole ── */
-.t-overlay {
+/* ── 4 GPU-accelerated backdrop panels ── */
+/* Only transform + opacity animated — compositor thread only  */
+.t-panel {
   position: fixed;
-  inset: 0;
-  background: rgba(4, 11, 20, 0.84);
-  backdrop-filter: blur(1px);
-  -webkit-backdrop-filter: blur(1px);
+  left: 0; top: 0;
+  background: rgba(4, 10, 20, 0.80);
+  opacity: 0;
   pointer-events: all;
-  animation: t-fade-in 0.38s ease both;
-  /* clip-path set dynamically by JS */
-  transition: clip-path 0.58s cubic-bezier(0.34, 1.56, 0.64, 1);
-  will-change: clip-path;
+  transition:
+    transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1),
+    opacity   0.22s ease;
+  will-change: transform, opacity;
 }
+#tp-top { width: 100%; height: 100vh; transform-origin: 50% 0%;   transform: scaleY(0.5001); }
+#tp-bot { width: 100%; height: 100vh; transform-origin: 50% 100%; transform: scaleY(0.5001); top: auto; bottom: 0; }
+#tp-lft, #tp-rgt { width: 100vw; height: 100vh; transform-origin: 0 0; }
+#tp-lft { transform: translateY(50vh) scaleX(0)    scaleY(0.001); }
+#tp-rgt { transform: translateX(100vw) translateY(50vh) scaleX(0) scaleY(0.001); }
 
 /* ── Spotlight ring ───────────────────── */
 .t-ring {
   position: fixed;
-  border-radius: 16px;
+  border-radius: 14px;
   border: 2px solid #0d9488;
   pointer-events: none;
   opacity: 0;
   z-index: 9971;
-  will-change: transform, left, top, width, height;
-  /* Spring transition for position/size */
+  will-change: transform;
   transition:
-    left         0.58s cubic-bezier(0.34, 1.56, 0.64, 1),
-    top          0.58s cubic-bezier(0.34, 1.56, 0.64, 1),
-    width        0.58s cubic-bezier(0.34, 1.56, 0.64, 1),
-    height       0.58s cubic-bezier(0.34, 1.56, 0.64, 1),
-    border-color 0.32s ease,
-    opacity      0.28s ease;
-  /* Heartbeat glow — double pulse like a real heart */
-  animation: t-heartbeat 2.8s ease-in-out infinite;
+    left         0.28s cubic-bezier(0.34, 1.56, 0.64, 1),
+    top          0.28s cubic-bezier(0.34, 1.56, 0.64, 1),
+    width        0.28s cubic-bezier(0.34, 1.56, 0.64, 1),
+    height       0.28s cubic-bezier(0.34, 1.56, 0.64, 1),
+    border-color 0.2s ease,
+    opacity      0.18s ease;
+  animation: t-ring-pulse 2.2s ease-in-out infinite;
 }
-@keyframes t-heartbeat {
-  0%        { transform: scale(1);     filter: drop-shadow(0 0 3px currentColor); }
-  12%       { transform: scale(1.015); filter: drop-shadow(0 0 9px currentColor); }
-  24%       { transform: scale(1);     filter: drop-shadow(0 0 3px currentColor); }
-  36%       { transform: scale(1.009); filter: drop-shadow(0 0 6px currentColor); }
-  50%, 100% { transform: scale(1);     filter: drop-shadow(0 0 3px currentColor); }
-}
-/* Second outer ring — fades at opposite phase */
-.t-ring::before {
-  content: '';
-  position: absolute;
-  inset: -8px;
-  border-radius: 22px;
-  border: 1px solid currentColor;
-  opacity: 0;
-  animation: t-ring-outer 2.8s ease-in-out infinite;
-}
-@keyframes t-ring-outer {
-  0%        { opacity: 0;    transform: scale(1); }
-  12%       { opacity: 0.22; transform: scale(1.01); }
-  30%, 100% { opacity: 0;    transform: scale(1); }
+@keyframes t-ring-pulse {
+  0%, 100% { transform: scale(1);     opacity: 1; }
+  50%       { transform: scale(1.012); opacity: 0.85; }
 }
 
-/* ── Tooltip card ─────────────────────── */
+/* ── Tooltip ──────────────────────────── */
 .t-tip {
   position: fixed;
-  width: 308px;
+  width: 306px;
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-top: 3.5px solid var(--t-accent, #0d9488);
-  border-radius: 20px;
-  padding: 15px 17px 14px;
+  border-top: 3px solid var(--t-accent, #0d9488);
+  border-radius: 18px;
+  padding: 14px 16px 13px;
   z-index: 9972;
   pointer-events: all;
-  box-shadow:
-    0 1px 3px rgba(0,0,0,.04),
-    0 8px 24px rgba(0,0,0,.12),
-    0 28px 56px rgba(0,0,0,.11);
-  /* Smooth color change for accent border */
-  transition: border-top-color 0.32s ease, opacity 0.2s ease, transform 0.2s ease;
+  box-shadow: 0 2px 4px rgba(0,0,0,.05), 0 10px 28px rgba(0,0,0,.12), 0 28px 56px rgba(0,0,0,.10);
+  transition: border-top-color 0.2s ease, opacity 0.14s ease, transform 0.14s ease;
   will-change: transform, opacity;
 }
-
-/* Arrow caret */
+/* Caret arrow */
 .t-tip::before {
   content: '';
   position: absolute;
-  width: 11px; height: 11px;
+  width: 10px; height: 10px;
   background: var(--bg-card);
-  border-top: 3.5px solid var(--t-accent, #0d9488);
+  border-top: 3px solid var(--t-accent, #0d9488);
   border-left: 1px solid var(--border);
   transform: rotate(45deg);
-  left: 50%; margin-left: -6px;
-  transition: border-top-color 0.32s ease;
+  left: 50%; margin-left: -5px;
+  transition: border-top-color 0.2s ease;
 }
-.t-tip[data-arrow="up"]::before {
-  top: -7px;
-  border-right: none; border-bottom: none;
-}
-.t-tip[data-arrow="down"]::before {
-  bottom: -7px;
-  border-top: 1px solid var(--border); border-left: none;
-  border-right: none; border-bottom: none;
-  transform: rotate(225deg);
-}
+.t-tip[data-arrow="up"]::before   { top: -6px; border-right: none; border-bottom: none; }
+.t-tip[data-arrow="down"]::before { bottom: -6px; transform: rotate(225deg); border-top: 1px solid var(--border); border-left: none; border-right: none; border-bottom: none; }
 .t-tip[data-arrow="none"]::before { display: none; }
 
-/* Exit state — used during step transitions */
+/* Exit — fast out */
 .t-tip-exit {
   opacity: 0 !important;
-  transform: scale(0.91) translateY(-10px) !important;
+  transform: scale(0.93) translateY(-8px) !important;
 }
 
-/* Entrance — card settles onto screen */
+/* Entrance — spring in */
 .t-tip-enter {
-  animation: t-card-settle 0.52s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation: t-tip-spring 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
-@keyframes t-card-settle {
-  0%   { opacity: 0; transform: scale(0.8)  translateY(22px) rotate(-1.5deg); }
-  60%  { opacity: 1; transform: scale(1.02) translateY(-3px) rotate(0.4deg);  }
-  100% { opacity: 1; transform: scale(1)    translateY(0)    rotate(0deg);    }
+@keyframes t-tip-spring {
+  0%   { opacity: 0; transform: scale(0.82) translateY(16px) rotate(-1deg); }
+  100% { opacity: 1; transform: scale(1)    translateY(0)    rotate(0);     }
 }
 
-/* ── Progress dots + step counter ─────── */
+/* ── Progress dots ────────────────────── */
 .t-tip-top {
-  display: flex;
-  align-items: center;
+  display: flex; align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
-  gap: 8px;
+  margin-bottom: 11px; gap: 8px;
 }
-.t-tip-left {
-  display: flex; align-items: center; gap: 7px; flex: 1; min-width: 0;
-}
+.t-tip-left  { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
 .t-tip-progress { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
 .t-dot {
-  height: 4px; width: 14px;
-  border-radius: 2px;
+  height: 4px; width: 13px; border-radius: 2px;
   background: var(--border);
-  transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: all 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 .t-dot.done   { background: var(--t-accent, #0d9488); opacity: .4; }
-.t-dot.active {
-  background: var(--t-accent, #0d9488); width: 26px;
-  animation: t-dot-bounce 0.42s cubic-bezier(0.34, 1.56, 0.64, 1) both;
-}
-@keyframes t-dot-bounce {
+.t-dot.active { background: var(--t-accent, #0d9488); width: 24px;
+  animation: t-dot-pop 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+@keyframes t-dot-pop {
   0%   { transform: scaleY(1.8) scaleX(0.7); }
   100% { transform: scaleY(1)   scaleX(1); }
 }
 .t-step-count {
-  font-size: .63rem; font-weight: 700;
-  color: var(--text-muted); letter-spacing: .05em;
-  white-space: nowrap; flex-shrink: 0;
+  font-size: .62rem; font-weight: 700; color: var(--text-muted);
+  letter-spacing: .05em; white-space: nowrap; flex-shrink: 0;
 }
 .t-skip {
-  background: none; border: none;
-  font-size: .7rem; font-weight: 600;
-  color: var(--text-muted);
-  cursor: pointer; padding: 3px 6px; border-radius: 6px;
-  transition: color .15s, background .15s; flex-shrink: 0;
+  background: none; border: none; font-size: .7rem; font-weight: 600;
+  color: var(--text-muted); cursor: pointer; padding: 3px 5px; border-radius: 5px;
+  transition: color .12s, background .12s; flex-shrink: 0;
 }
 .t-skip:hover { color: var(--text-secondary); background: var(--bg-subtle); }
 
 /* ── Emoji ────────────────────────────── */
-.t-emoji { display: block; font-size: 2rem; line-height: 1; margin-bottom: 9px; }
-.t-emoji-pop {
-  animation: t-emoji-land 0.58s cubic-bezier(0.34, 1.56, 0.64, 1) both;
-}
+.t-emoji { display: block; font-size: 1.9rem; line-height: 1; margin-bottom: 8px; }
+.t-emoji-pop { animation: t-emoji-land 0.32s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
 @keyframes t-emoji-land {
-  0%   { transform: scale(0.1) translateY(-16px) rotate(-30deg); }
-  55%  { transform: scale(1.22) translateY(4px)  rotate(6deg); }
-  78%  { transform: scale(0.94) translateY(-1px) rotate(-1.5deg); }
-  100% { transform: scale(1)    translateY(0)    rotate(0deg); }
+  0%   { transform: scale(0.1) rotate(-25deg); }
+  60%  { transform: scale(1.18) rotate(4deg);  }
+  100% { transform: scale(1)   rotate(0);       }
 }
 
-/* ── Text content ─────────────────────── */
+/* ── Text ─────────────────────────────── */
 .t-title {
-  font-size: .9rem; font-weight: 800;
-  color: var(--text-primary);
-  letter-spacing: -.022em; margin-bottom: 5px; line-height: 1.28;
+  font-size: .88rem; font-weight: 800; color: var(--text-primary);
+  letter-spacing: -.02em; margin-bottom: 4px; line-height: 1.28;
 }
 .t-body {
-  font-size: .77rem; color: var(--text-secondary);
-  line-height: 1.6; margin-bottom: 13px;
+  font-size: .76rem; color: var(--text-secondary);
+  line-height: 1.58; margin-bottom: 12px;
 }
 
 /* ── Buttons ──────────────────────────── */
-.t-footer { display: flex; gap: 8px; align-items: center; }
+.t-footer { display: flex; gap: 7px; align-items: center; }
 .t-btn-next {
-  flex: 1; height: 40px;
-  background: var(--t-accent, #0d9488); color: #fff;
-  border: none; border-radius: 11px;
-  font-size: .84rem; font-weight: 700; cursor: pointer;
-  transition: filter .18s, transform .1s, background .32s ease;
-  letter-spacing: -.01em; position: relative; overflow: hidden;
+  flex: 1; height: 38px; background: var(--t-accent, #0d9488); color: #fff;
+  border: none; border-radius: 10px; font-size: .82rem; font-weight: 700;
+  cursor: pointer; transition: opacity .14s, transform .1s, background .2s ease;
+  letter-spacing: -.01em; will-change: transform;
 }
-/* Shine sweep on Next button */
-.t-btn-next::after {
-  content: '';
-  position: absolute; inset: 0;
-  background: linear-gradient(100deg, transparent 20%, rgba(255,255,255,.22) 50%, transparent 80%);
-  transform: translateX(-100%);
-  animation: t-shine 3s ease 1.5s infinite;
-}
-@keyframes t-shine {
-  0%   { transform: translateX(-100%); }
-  30%  { transform: translateX(100%);  }
-  100% { transform: translateX(100%);  }
-}
-.t-btn-next:hover  { filter: brightness(1.1); }
+.t-btn-next:hover  { opacity: 0.88; }
 .t-btn-next:active { transform: scale(0.96); }
 .t-btn-back {
-  height: 40px; padding: 0 13px;
-  background: transparent; color: var(--text-muted);
-  border: 1px solid var(--border); border-radius: 11px;
-  font-size: .78rem; font-weight: 600; cursor: pointer;
-  transition: color .15s, border-color .15s, background .15s;
+  height: 38px; padding: 0 12px; background: transparent;
+  color: var(--text-muted); border: 1px solid var(--border);
+  border-radius: 10px; font-size: .77rem; font-weight: 600; cursor: pointer;
+  transition: color .12s, border-color .12s, background .12s;
 }
 .t-btn-back:hover { color: var(--text-secondary); border-color: var(--border-strong); background: var(--bg-subtle); }
 
-/* ── Highlighted target ───────────────── */
+/* ── Highlighted element ─────────────── */
 [data-tour-active] {
-  transform: scale(1.024) !important;
-  transition: transform 0.52s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+  transform: scale(1.02) !important;
+  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
   position: relative; z-index: 1;
 }
 
 /* ── Finish overlay ───────────────────── */
 .t-finish {
   position: fixed; inset: 0; z-index: 9975;
-  background: rgba(4,11,20,.86);
+  background: rgba(4,10,20,.82);
   display: flex; align-items: center; justify-content: center; padding: 24px;
-  animation: t-fade-in .32s ease both;
+  animation: t-fade-in 0.24s ease both;
   pointer-events: all;
-  backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
 }
 .t-finish.hidden { display: none; }
-
 .t-finish-card {
-  background: var(--bg-card);
-  border-radius: 28px;
+  background: var(--bg-card); border-radius: 24px;
   border-top: 4px solid #0d9488;
-  padding: 44px 32px 36px;
-  text-align: center;
-  max-width: 340px; width: 100%;
+  padding: 40px 28px 32px; text-align: center;
+  max-width: 330px; width: 100%;
   position: relative; overflow: visible;
-  box-shadow: 0 4px 12px rgba(0,0,0,.1), 0 24px 64px rgba(0,0,0,.32);
-  animation: t-card-grand 0.68s cubic-bezier(0.34, 1.56, 0.64, 1) 0.1s both;
+  box-shadow: 0 4px 10px rgba(0,0,0,.1), 0 20px 56px rgba(0,0,0,.28);
+  animation: t-finish-spring 0.48s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  will-change: transform;
 }
-@keyframes t-card-grand {
-  0%   { opacity: 0; transform: scale(0.58) translateY(64px) rotate(-3.5deg); }
-  60%  { opacity: 1; transform: scale(1.04) translateY(-8px) rotate(0.6deg);  }
-  82%  { transform: scale(0.98) translateY(2px) rotate(-0.2deg); }
-  100% { opacity: 1; transform: scale(1)    translateY(0)    rotate(0deg);    }
+@keyframes t-finish-spring {
+  0%   { opacity: 0; transform: scale(0.68) translateY(48px) rotate(-2deg); }
+  65%  { opacity: 1; transform: scale(1.03) translateY(-6px) rotate(0.4deg); }
+  100% { opacity: 1; transform: scale(1)    translateY(0)    rotate(0); }
 }
-
 .t-confetti-wrap {
   position: absolute; left: 50%; top: 38%;
   width: 1px; height: 1px; pointer-events: none; overflow: visible;
 }
-
 .t-finish-emoji {
-  font-size: 3.8rem; line-height: 1; display: block; margin-bottom: 18px;
-  animation: t-emoji-land 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) 0.22s both;
+  font-size: 3.4rem; line-height: 1; display: block; margin-bottom: 14px;
+  animation: t-emoji-land 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) 0.14s both;
 }
-.t-finish-h {
-  font-size: 1.55rem; font-weight: 800;
-  color: var(--text-primary); letter-spacing: -.04em; margin-bottom: 10px;
-}
-.t-finish-p {
-  font-size: .84rem; color: var(--text-secondary);
-  line-height: 1.62; margin-bottom: 28px;
-}
+.t-finish-h { font-size: 1.45rem; font-weight: 800; color: var(--text-primary); letter-spacing: -.035em; margin-bottom: 8px; }
+.t-finish-p { font-size: .82rem; color: var(--text-secondary); line-height: 1.6; margin-bottom: 24px; }
 .t-finish-btn {
-  display: block; width: 100%; height: 52px;
-  background: #0d9488; color: #fff;
-  border: none; border-radius: 16px;
-  font-size: 1rem; font-weight: 800; cursor: pointer;
-  transition: filter .18s, transform .12s; letter-spacing: -.015em;
-  position: relative; overflow: hidden;
+  display: block; width: 100%; height: 48px; background: #0d9488; color: #fff;
+  border: none; border-radius: 14px; font-size: .95rem; font-weight: 800;
+  cursor: pointer; transition: opacity .14s, transform .1s; letter-spacing: -.01em; will-change: transform;
 }
-.t-finish-btn::after {
-  content: '';
-  position: absolute; inset: 0;
-  background: linear-gradient(105deg, transparent 30%, rgba(255,255,255,.2) 50%, transparent 70%);
-  transform: translateX(-100%);
-  animation: t-shine 2.6s ease 1s infinite;
-}
-.t-finish-btn:hover  { filter: brightness(1.1); }
+.t-finish-btn:hover  { opacity: 0.88; }
 .t-finish-btn:active { transform: scale(0.97); }
 
-/* ── Confetti particles ───────────────── */
+/* ── Confetti ─────────────────────────── */
 .t-conf {
   position: absolute; background: var(--c, #0d9488);
-  left: 0; bottom: 0; transform-origin: center;
-  animation: t-conf-arc 1.15s cubic-bezier(.18,.89,.32,1.28) var(--d,0s) both;
+  left: 0; bottom: 0; transform-origin: center; will-change: transform, opacity;
+  animation: t-conf-arc 0.95s cubic-bezier(.22,.61,.36,1) var(--d,0s) both;
 }
 @keyframes t-conf-arc {
-  0%   { opacity: 1; transform: translate(0,0) rotate(0deg) scale(1); }
-  65%  { opacity: 1; }
-  100% { opacity: 0; transform: translate(var(--dx,0px), var(--dy,-100px)) rotate(var(--r,180deg)) scale(0.25); }
+  0%   { opacity: 1; transform: translate(0,0) rotate(0) scale(1); }
+  60%  { opacity: 1; }
+  100% { opacity: 0; transform: translate(var(--dx,0px),var(--dy,-100px)) rotate(var(--r,180deg)) scale(0.25); }
 }
 
 /* ── Dark mode ────────────────────────── */
-.dark .t-tip {
-  box-shadow: 0 1px 3px rgba(0,0,0,.2), 0 8px 24px rgba(0,0,0,.44), 0 28px 56px rgba(0,0,0,.36);
-}
-.dark .t-finish-card {
-  box-shadow: 0 4px 12px rgba(0,0,0,.28), 0 24px 64px rgba(0,0,0,.55);
-}
+.dark .t-tip { box-shadow: 0 2px 4px rgba(0,0,0,.2), 0 10px 28px rgba(0,0,0,.42), 0 28px 56px rgba(0,0,0,.35); }
+.dark .t-finish-card { box-shadow: 0 4px 10px rgba(0,0,0,.25), 0 20px 56px rgba(0,0,0,.55); }
 
 /* ── Mobile ───────────────────────────── */
 @media (max-width: 520px) {
   .t-tip {
     position: fixed !important;
-    left: 12px !important; right: 12px !important;
-    bottom: 18px !important; top: auto !important;
-    width: auto !important; border-radius: 18px;
+    left: 10px !important; right: 10px !important;
+    bottom: 16px !important; top: auto !important;
+    width: auto !important; border-radius: 16px;
   }
 }
