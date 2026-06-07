@@ -501,19 +501,80 @@ var SupabaseSync = (function () {
   //  NEW BACKEND HELPERS
   // ════════════════════════════════════════════════════════════════
 
-  /** Flush the batched card review queue to Supabase */
+  /**
+   * Merge two SM-2 card states — the heart of conflict resolution.
+   *
+   * Rules (all designed to be conservative for retention):
+   *  1. More reps → that device studied the card more recently, use its full state.
+   *  2. Equal reps (concurrent study on two devices) → take the harder result:
+   *       ease     = min  (lower ease = card feels harder = review more often)
+   *       interval = min  (shorter interval = return sooner)
+   *       lapses   = max  (more failures on record)
+   *       due      = min  (review the earlier scheduled date)
+   *       step     = max  (further back in the learning steps)
+   *  3. Fewer reps → keep the existing state, only update lapses upward.
+   */
+  function _mergeCardState(existing, incoming) {
+    if (!existing) return incoming;
+    if (!incoming) return existing;
+    var eReps = _n(existing.reps), iReps = _n(incoming.reps);
+    if (iReps > eReps) {
+      // Incoming has more study history — use it, but never forget lapses
+      return Object.assign({}, incoming, {
+        lapses: Math.max(_n(existing.lapses), _n(incoming.lapses))
+      });
+    }
+    if (eReps > iReps) {
+      // Existing has more study history — keep it, but never forget lapses
+      return Object.assign({}, existing, {
+        lapses: Math.max(_n(existing.lapses), _n(incoming.lapses))
+      });
+    }
+    // Equal reps: concurrent study. Choose conservatively.
+    var useDueFrom = _n(incoming.due) < _n(existing.due) ? incoming : existing;
+    return {
+      reps:     eReps,
+      state:    useDueFrom.state    || existing.state,
+      ease:     Math.min(_n(existing.ease,     2.5), _n(incoming.ease,     2.5)),
+      interval: Math.min(_n(existing.interval, 0),   _n(incoming.interval, 0)),
+      step:     Math.max(_n(existing.step,     0),   _n(incoming.step,     0)),
+      lapses:   Math.max(_n(existing.lapses,   0),   _n(incoming.lapses,   0)),
+      due:      Math.min(
+        _n(existing.due) || Number.MAX_SAFE_INTEGER,
+        _n(incoming.due) || Number.MAX_SAFE_INTEGER
+      ),
+      category: existing.category || incoming.category || ''
+    };
+  }
+
+  /**
+   * Flush the batched card review queue to Supabase.
+   * Uses a Postgres RPC that does server-side atomic merge (prevents
+   * concurrent writes from clobbering each other between flush and upsert).
+   * Falls back to a simple upsert if the function isn't deployed yet.
+   */
   async function _flushCardReviews() {
     if (!_uid || !_ready || !Object.keys(_cardReviewQueue).length) return;
     var rows = Object.entries(_cardReviewQueue).map(function(e) {
       return Object.assign({ user_id: _uid, card_key: e[0], updated_at: new Date().toISOString() }, e[1]);
     });
-    _cardReviewQueue = {}; // clear before await to avoid duplicates
+    _cardReviewQueue = {}; // clear before await so a card rated mid-flush re-queues cleanly
     try {
-      await _db.from('card_reviews').upsert(rows, { onConflict: 'user_id,card_key' });
-    } catch(e) { console.warn('[Sync] card_reviews flush:', e.message); }
+      // Preferred path: atomic server-side merge (see migrations.sql)
+      var r = await _db.rpc('batch_upsert_card_reviews_merge', { p_reviews: rows });
+      if (r.error) throw r.error;
+    } catch(e) {
+      // Fallback: simple upsert (last-write-wins — acceptable as a safety net)
+      try {
+        await _db.from('card_reviews').upsert(rows, { onConflict: 'user_id,card_key' });
+      } catch(e2) { console.warn('[Sync] card_reviews flush fallback:', e2.message); }
+    }
   }
 
-  /** Queue a single card state for batch upsert */
+  /**
+   * Queue one card's SM-2 state for batch upsert.
+   * Now stores category so the class mastery heatmap can work without a join.
+   */
   function _queueCardReview(cardKey, state) {
     if (!_uid || !_ready) return;
     _cardReviewQueue[cardKey] = {
@@ -523,13 +584,17 @@ var SupabaseSync = (function () {
       step:     state.step     || 0,
       lapses:   state.lapses   || 0,
       due:      state.due      || 0,
-      reps:     state.reps     || 0
+      reps:     state.reps     || 0,
+      category: state.category || ''   // ← new: enables class mastery heatmap
     };
     clearTimeout(_cardReviewTimer);
     _cardReviewTimer = setTimeout(_flushCardReviews, _CARD_BATCH_MS);
   }
 
-  /** Pull card_reviews from DB and merge into local sm2Data */
+  /**
+   * Pull card_reviews from DB and merge into local sm2Data.
+   * Uses _mergeCardState so concurrent device edits are resolved correctly.
+   */
   async function _syncCardReviewsFromDB() {
     if (!_uid || !_ready) return;
     try {
@@ -537,23 +602,20 @@ var SupabaseSync = (function () {
       var rows = r.data || [];
       if (!rows.length) return;
       var local = {};
-      try { var raw = localStorage.getItem('medpath_sm2'); if(raw) local = JSON.parse(raw); } catch(e) {}
+      try { var raw = localStorage.getItem('medpath_sm2'); if (raw) local = JSON.parse(raw); } catch(e) {}
       var changed = false;
       rows.forEach(function(row) {
-        var l = local[row.card_key];
-        // Take DB state if it has more reps, or same reps but later due date
-        if (!l || row.reps > (l.reps||0) || (row.reps === (l.reps||0) && row.due > (l.due||0))) {
-          local[row.card_key] = {
-            state: row.state, ease: row.ease, interval: row.interval,
-            step: row.step, lapses: row.lapses, due: row.due, reps: row.reps
-          };
+        var merged = _mergeCardState(local[row.card_key], row);
+        // Only write if the merge changed anything
+        if (JSON.stringify(merged) !== JSON.stringify(local[row.card_key])) {
+          local[row.card_key] = merged;
           changed = true;
         }
       });
       if (changed) {
         try { localStorage.setItem('medpath_sm2', JSON.stringify(local)); } catch(e) {}
         if (typeof sm2Data !== 'undefined') Object.assign(sm2Data, local);
-        console.log('[Sync] Merged ' + rows.length + ' card reviews from cloud');
+        console.log('[Sync] Merged ' + rows.length + ' card states from cloud (conflict-resolved)');
       }
     } catch(e) { console.warn('[Sync] card_reviews pull:', e.message); }
   }
@@ -1056,44 +1118,28 @@ var SupabaseSync = (function () {
     exportClassCSV: async function(clubId, clubName) {
       if (!_ready || !_uid) return false;
       try {
-        // Fetch all data in parallel
         var [membersR, statsR, assignR, completionsR] = await Promise.all([
           _db.from('club_members').select('user_id,display_name,avatar_url').eq('club_id', clubId),
           _db.from('club_member_stats').select('*').eq('club_id', clubId),
           _db.from('assignments').select('*').eq('club_id', clubId),
           _db.from('assignment_completions').select('*').eq('club_id', clubId)
         ]);
-
-        var members     = membersR.data     || [];
-        var stats       = statsR.data       || [];
-        var assignments = assignR.data      || [];
-        var completions = completionsR.data || [];
-
-        // Build lookup maps
-        var statsMap = {};
-        stats.forEach(function(s){ statsMap[s.user_id] = s; });
-
-        var compMap = {}; // { userId: { assignId: completion } }
-        completions.forEach(function(c){
+        var members = membersR.data || [], stats = statsR.data || [];
+        var assignments = assignR.data || [], completions = completionsR.data || [];
+        var statsMap = {}; stats.forEach(function(s){ statsMap[s.user_id] = s; });
+        var compMap  = {}; completions.forEach(function(c){
           if (!compMap[c.user_id]) compMap[c.user_id] = {};
           compMap[c.user_id][c.assignment_id] = c;
         });
-
-        // Build CSV header
         var assignCols = assignments.map(function(a){ return '"' + a.title.replace(/"/g,'""') + '"'; });
         var header = ['Name','Total XP','Week XP','Cards Reviewed','Streak','Quiz Avg','Active This Week'].concat(assignCols);
-
-        // Build rows
         var rows = members.filter(function(m){ return m.user_id !== _uid; }).map(function(m){
-          var s   = statsMap[m.user_id] || {};
+          var s = statsMap[m.user_id] || {};
           var row = [
             '"' + (m.display_name||'').replace(/"/g,'""') + '"',
-            s.total_xp     || 0,
-            s.week_xp      || 0,
-            s.cards_reviewed || 0,
-            s.streak       || 0,
-            s.quizzes_done > 0 ? (s.quiz_avg||0)+'%' : '—',
-            (s.week_xp||0) > 0 ? 'Yes' : 'No'
+            s.total_xp||0, s.week_xp||0, s.cards_reviewed||0, s.streak||0,
+            s.quizzes_done>0 ? (s.quiz_avg||0)+'%' : '—',
+            (s.week_xp||0)>0 ? 'Yes' : 'No'
           ];
           assignments.forEach(function(a){
             var c = (compMap[m.user_id]||{})[a.id];
@@ -1101,17 +1147,89 @@ var SupabaseSync = (function () {
           });
           return row.join(',');
         });
-
-        var csv = [header.join(',')].concat(rows).join('\n');
+        var csv  = [header.join(',')].concat(rows).join('\n');
         var blob = new Blob([csv], { type: 'text/csv' });
         var url  = URL.createObjectURL(blob);
         var a    = document.createElement('a');
-        a.href     = url;
-        a.download = (clubName||'class').replace(/[^a-z0-9]/gi,'_') + '_export_' + new Date().toISOString().split('T')[0] + '.csv';
-        a.click();
-        URL.revokeObjectURL(url);
+        a.href = url;
+        a.download = (clubName||'class').replace(/[^a-z0-9]/gi,'_')+'_export_'+new Date().toISOString().split('T')[0]+'.csv';
+        a.click(); URL.revokeObjectURL(url);
         return true;
       } catch(e) { console.warn('[Sync] export:', e.message); return false; }
+    },
+
+    // ════════════════════════════════════════════════════════════════
+    //  8. CLASS MASTERY HEATMAP — club_category_mastery view
+    // ════════════════════════════════════════════════════════════════
+
+    /**
+     * Fetch per-category mastery percentages for all members of a club.
+     * Powered by the club_category_mastery view in migrations.sql.
+     * Returns rows sorted weakest-first so the teacher sees problems immediately.
+     */
+    fetchClubCategoryMastery: async function(clubId) {
+      if (!_ready || !clubId) return [];
+      try {
+        var r = await _db
+          .from('club_category_mastery')
+          .select('category,total_cards,mastered_cards,mastery_pct,avg_ease,students_with_data')
+          .eq('club_id', clubId)
+          .gt('total_cards', 0)
+          .order('mastery_pct', { ascending: true });
+        return r.data || [];
+      } catch(e) { console.warn('[Sync] categoryMastery:', e.message); return []; }
+    },
+
+    // ════════════════════════════════════════════════════════════════
+    //  9. AT-RISK STUDENTS — for teacher alerts
+    // ════════════════════════════════════════════════════════════════
+
+    /**
+     * Return members of a club who haven't studied in daysInactive days
+     * AND haven't completed a given assignment (or any assignment if null).
+     * Called by the frontend and by the at-risk-alerts Edge Function.
+     *
+     * @param {string}  clubId       Club to query
+     * @param {number}  daysInactive Days of inactivity threshold (default 3)
+     * @param {string=} assignmentId Optional — filter to a specific assignment
+     */
+    fetchAtRiskStudents: async function(clubId, daysInactive, assignmentId) {
+      if (!_ready || !clubId) return [];
+      daysInactive = daysInactive || 3;
+      var cutoff = new Date(Date.now() - daysInactive * 86400000).toISOString().split('T')[0];
+      try {
+        // Get all members
+        var membersR = await _db.from('club_members')
+          .select('user_id,display_name,avatar_url')
+          .eq('club_id', clubId);
+        var members = membersR.data || [];
+        if (!members.length) return [];
+        var ids = members.map(function(m) { return m.user_id; });
+
+        // Who studied recently?
+        var activeR = await _db.from('daily_activity')
+          .select('user_id')
+          .in('user_id', ids)
+          .gte('activity_date', cutoff);
+        var activeIds = new Set((activeR.data || []).map(function(r) { return r.user_id; }));
+
+        // Who completed the assignment (if specified)?
+        var completedIds = new Set();
+        if (assignmentId) {
+          var compR = await _db.from('assignment_completions')
+            .select('user_id')
+            .eq('assignment_id', assignmentId)
+            .eq('is_complete', true);
+          (compR.data || []).forEach(function(r) { completedIds.add(r.user_id); });
+        }
+
+        // At-risk: inactive AND (no assignment specified OR assignment incomplete)
+        return members.filter(function(m) {
+          var inactive = !activeIds.has(m.user_id);
+          var incomplete = assignmentId ? !completedIds.has(m.user_id) : true;
+          return inactive && incomplete;
+        });
+      } catch(e) { console.warn('[Sync] atRisk:', e.message); return []; }
     }
 
   };

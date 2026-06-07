@@ -21,6 +21,7 @@ const PRECACHE_URLS = [
   './style.css?v=11',
   './retention.js',
   './retention.css',
+  './backend-features.js',
   './manifest.json',
   './tour.js?v=5',
   './icons/icon-192.png',
