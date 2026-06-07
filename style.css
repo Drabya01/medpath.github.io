@@ -8444,3 +8444,161 @@ body.no-case-bg #case-bg { display: none !important; }
     width: auto !important; border-radius: 16px;
   }
 }
+
+/* ══════════════════════════════════════════
+   FLASHCARD STUDY MODE — Anki-style
+══════════════════════════════════════════ */
+
+/* Study mode bar */
+.fc-study-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  gap: 12px;
+}
+.fc-study-back {
+  display: flex; align-items: center; gap: 6px;
+  background: none; border: none;
+  font-size: .8rem; font-weight: 600;
+  color: var(--text-secondary); cursor: pointer;
+  padding: 6px 10px; border-radius: 8px;
+  transition: background .12s, color .12s;
+  white-space: nowrap; flex-shrink: 0;
+  min-width: 80px;
+}
+.fc-study-back:hover { background: var(--bg-subtle); color: var(--text-primary); }
+.fc-study-cat-name {
+  font-size: .9rem; font-weight: 800;
+  color: var(--text-primary); letter-spacing: -.02em;
+  text-align: center; flex: 1;
+}
+
+/* Hide distracting elements in study mode */
+.study-mode .screen-header    { display: none !important; }
+.study-mode .fc-search-wrapper { display: none !important; }
+.study-mode .fc-deck-counts   { display: none !important; }
+.study-mode .fc-category-row  { display: none !important; }
+.study-mode .fc-kbd-hint      { display: none !important; }
+
+/* Give the card more room in study mode */
+.study-mode .fc-wrapper {
+  padding-top: 8px;
+  min-height: calc(100vh - 160px);
+}
+.study-mode .fc-card {
+  min-height: 240px;
+}
+
+/* ══════════════════════════════════════════
+   CLUB ANALYTICS — This Week chart
+══════════════════════════════════════════ */
+
+.club-analytics {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.ca-header {
+  display: flex; align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px; gap: 8px;
+}
+.ca-title {
+  font-size: .72rem; font-weight: 800;
+  text-transform: uppercase; letter-spacing: .07em;
+  color: var(--text-muted);
+}
+.ca-top-badge {
+  font-size: .72rem; font-weight: 700;
+  color: #d97706; background: #d9770612;
+  padding: 3px 8px; border-radius: 20px;
+  border: 1px solid #d9770628;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+/* Engagement progress bar */
+.ca-eng-row {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 12px;
+}
+.ca-eng-lbl {
+  font-size: .7rem; font-weight: 600; color: var(--text-muted);
+  white-space: nowrap; flex-shrink: 0;
+}
+.ca-eng-bar-wrap {
+  flex: 1; height: 6px; background: var(--bg-subtle);
+  border-radius: 3px; overflow: hidden;
+}
+.ca-eng-bar {
+  height: 100%; border-radius: 3px;
+  transition: width .6s ease;
+}
+.ca-eng-bar--high { background: #10b981; }
+.ca-eng-bar--mid  { background: #f59e0b; }
+.ca-eng-bar--low  { background: #ef4444; }
+.ca-eng-pct {
+  font-size: .7rem; font-weight: 700;
+  color: var(--text-muted); flex-shrink: 0;
+  min-width: 28px; text-align: right;
+}
+
+/* Per-member activity bars */
+.ca-bars { display: flex; flex-direction: column; gap: 6px; }
+.ca-bar-row {
+  display: flex; align-items: center; gap: 8px;
+}
+.ca-bar-name {
+  font-size: .72rem; font-weight: 600;
+  color: var(--text-secondary);
+  width: 52px; flex-shrink: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ca-bar-track {
+  flex: 1; height: 7px;
+  background: var(--bg-subtle); border-radius: 4px;
+  overflow: hidden;
+}
+.ca-bar-fill {
+  height: 100%; border-radius: 4px;
+  background: var(--club-accent, #0d9488);
+  transition: width .5s ease;
+}
+.ca-bar-xp {
+  font-size: .66rem; font-weight: 700;
+  color: var(--text-muted); flex-shrink: 0;
+  min-width: 46px; text-align: right;
+}
+
+/* ══════════════════════════════════════════
+   BETTER EMPTY STATES
+══════════════════════════════════════════ */
+
+/* Stream empty state */
+.club-empty-stream {
+  text-align: center; padding: 28px 16px 20px;
+}
+.ces-icon  { font-size: 2.4rem; margin-bottom: 10px; }
+.ces-title { font-size: 1rem; font-weight: 800; color: var(--text-primary); margin-bottom: 6px; }
+.ces-desc  { font-size: .8rem; color: var(--text-muted); line-height: 1.55; margin-bottom: 16px; }
+.ces-templates {
+  display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;
+}
+.ces-tpl {
+  font-size: .76rem; font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 20px; padding: 6px 14px;
+  cursor: pointer; transition: background .12s, border-color .12s;
+}
+.ces-tpl:hover { background: var(--bg-card-hover, var(--bg-subtle)); border-color: var(--border-strong); color: var(--text-primary); }
+

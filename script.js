@@ -7956,7 +7956,7 @@ function updateStatsStrip() {
 function renderFCCategories() {
   const row = document.getElementById('fcCategories');
   row.innerHTML = allCategories.map(cat => `
-    <button class="fc-cat-btn ${cat === fcActiveCategory ? 'active' : ''}" onclick="filterFC('${cat.replace(/'/g, "\\'")}')">${cat}</button>
+    <button class="fc-cat-btn ${cat === fcActiveCategory ? 'active' : ''}" onclick="selectCategory('${cat.replace(/'/g, "\\'")}')">${cat}</button>
   `).join('');
 }
 
@@ -8022,7 +8022,9 @@ function filterFC(cat) {
     fcFiltered = flashcards.filter(f => f.cat === cat);
   }
 
-  fcIndex = 0;
+  /* Restore saved position for specific categories — skip for All (dynamic SM-2 order) */
+  var _savedPos = _fcLoadPos(cat);
+  fcIndex = (_savedPos > 0 && _savedPos < fcFiltered.length) ? _savedPos : 0;
   fcFlipped = false;
   renderFCCategories();
   updateFC();
@@ -8031,6 +8033,7 @@ function filterFC(cat) {
 function updateFC() {
   const card = fcFiltered[fcIndex];
   if (!card) return;
+  _fcSavePos(); /* persist position for this category */
 
   document.getElementById('fcTerm').textContent = card.term;
   document.getElementById('fcDef').textContent = card.def;
@@ -8068,6 +8071,45 @@ function updateFC() {
 
   updateSaveBtnUI();
   updateStatsStrip();
+}
+
+
+/* ── Position Persistence ────────────────────────────────────── */
+var _FC_POS_PREFIX = 'medpath_fc_pos:';
+
+function _fcSavePos() {
+  if (!fcActiveCategory || fcActiveCategory === 'All') return;
+  try { localStorage.setItem(_FC_POS_PREFIX + fcActiveCategory, String(fcIndex)); } catch(e) {}
+}
+
+function _fcLoadPos(cat) {
+  if (!cat || cat === 'All') return 0;
+  try {
+    var v = localStorage.getItem(_FC_POS_PREFIX + cat);
+    return (v !== null && !isNaN(parseInt(v, 10))) ? parseInt(v, 10) : 0;
+  } catch(e) { return 0; }
+}
+
+/* ── Study Mode (Anki-style focused view) ─────────────────────── */
+function selectCategory(cat) {
+  filterFC(cat);
+  _fcEnterStudyMode();
+}
+
+function _fcEnterStudyMode() {
+  var screen = document.getElementById('screen-flashcards');
+  var bar    = document.getElementById('fcStudyBar');
+  var name   = document.getElementById('fcStudyCatName');
+  if (screen) screen.classList.add('study-mode');
+  if (bar)    bar.classList.remove('hidden');
+  if (name)   name.textContent = fcActiveCategory === 'Saved ⭐' ? '⭐ Saved Cards' : fcActiveCategory;
+}
+
+function exitStudyMode() {
+  var screen = document.getElementById('screen-flashcards');
+  var bar    = document.getElementById('fcStudyBar');
+  if (screen) screen.classList.remove('study-mode');
+  if (bar)    bar.classList.add('hidden');
 }
 
 function flipCard() {
@@ -15026,7 +15068,7 @@ function _clubTeacherStream() {
   var anns    = _clubState.announcements || [];
   var assigns = _clubState.assignments   || [];
 
-  // Icon stat cards (same style user liked on old Overview)
+  // Icon stat cards
   var totalCards     = stats.reduce(function(s,r){return s+(r.cards_reviewed||0);},0);
   var quizAvgs       = stats.filter(function(r){return r.quizzes_done>0;}).map(function(r){return r.quiz_avg;});
   var avgQuiz        = quizAvgs.length ? Math.round(quizAvgs.reduce(function(a,b){return a+b;},0)/quizAvgs.length) : null;
@@ -15038,13 +15080,53 @@ function _clubTeacherStream() {
     +(avgQuiz!==null ? _clubStatCard('📝', avgQuiz+'%', 'Avg quiz score') : '')
     +'</div>';
 
-  // Compose box (always visible — like Google Classroom)
+  // ── Analytics: class activity chart ───────────────────────────
+  if (stats.length > 0) {
+    var active = stats.filter(function(s){ return (s.week_xp||0) > 0; })
+      .sort(function(a,b){ return (b.week_xp||0)-(a.week_xp||0); });
+    var engPct = members.length > 0 ? Math.round((activeThisWeek/members.length)*100) : 0;
+    var engClass = engPct >= 60 ? 'ca-eng--high' : engPct >= 30 ? 'ca-eng--mid' : 'ca-eng--low';
+    var topStudent = active.length ? active[0] : null;
+
+    // Find member display names
+    var memberMap = {};
+    members.forEach(function(m){ memberMap[m.user_id] = m.display_name || 'Student'; });
+
+    html += '<div class="club-analytics">'
+      +'<div class="ca-header">'
+      +'<span class="ca-title">This Week</span>'
+      +(topStudent ? '<span class="ca-top-badge">🏆 '+_esc(memberMap[topStudent.user_id]||'Top student')+' — '+(topStudent.week_xp||0).toLocaleString()+' XP</span>' : '')
+      +'</div>'
+      +'<div class="ca-eng-row">'
+      +'<span class="ca-eng-lbl">Engagement</span>'
+      +'<div class="ca-eng-bar-wrap"><div class="ca-eng-bar '+engClass+'" style="width:'+engPct+'%"></div></div>'
+      +'<span class="ca-eng-pct">'+activeThisWeek+'/'+members.length+'</span>'
+      +'</div>';
+
+    if (active.length) {
+      var maxXP = active[0].week_xp || 1;
+      html += '<div class="ca-bars">';
+      active.slice(0, 8).forEach(function(s) {
+        var pct  = Math.max(4, Math.round(((s.week_xp||0)/maxXP)*100));
+        var name = (memberMap[s.user_id]||'Student').split(' ')[0]; // first name only
+        html += '<div class="ca-bar-row">'
+          +'<span class="ca-bar-name">'+_esc(name)+'</span>'
+          +'<div class="ca-bar-track"><div class="ca-bar-fill" style="width:'+pct+'%"></div></div>'
+          +'<span class="ca-bar-xp">'+((s.week_xp||0).toLocaleString())+' XP</span>'
+          +'</div>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  // Compose box
   html += '<div class="club-compose">'
     +'<textarea class="club-compose-input" id="annInput" placeholder="Announce something to your class — meeting times, reminders, words of encouragement…" rows="2" maxlength="500"></textarea>'
     +'<button class="club-compose-post" onclick="_clubPostAnnouncement()">Post</button>'
     +'</div>';
 
-  // Unified chronological feed: announcements + assignment creation events
+  // Unified chronological feed
   var feed = [];
   anns.forEach(function(a){
     feed.push({ kind:'ann', d:a, ts: new Date(a.created_at||0).getTime() });
@@ -15088,10 +15170,21 @@ function _clubTeacherStream() {
     });
     html += '</div>';
   } else {
-    html += '<div class="club-empty-hint">Nothing posted yet. Announce meeting times, upcoming assignments, or words of encouragement to your class.</div>';
+    /* Better empty state — suggested first posts */
+    html += '<div class="club-empty-stream">'
+      +'<div class="ces-icon">📣</div>'
+      +'<div class="ces-title">Welcome your class</div>'
+      +'<div class="ces-desc">Your stream is empty. Post a welcome message or create your first assignment to get started.</div>'
+      +'<div class="ces-templates">'
+      +'<button class="ces-tpl" onclick="document.getElementById(\'annInput\').value=\'👋 Welcome to '+_esc(_clubState.active.name||'the class')+'! Start your first flashcard session today.\';document.getElementById(\'annInput\').focus();">👋 Welcome</button>'
+      +'<button class="ces-tpl" onclick="document.getElementById(\'annInput\').value=\'📅 Next meeting: \';document.getElementById(\'annInput\').focus();">📅 Meeting</button>'
+      +'<button class="ces-tpl" onclick="switchClubTab(\'classwork\')">📋 Create assignment</button>'
+      +'</div>'
+      +'</div>';
   }
   return html;
 }
+
 
 // ── Overview kept as alias (used by legacy paths) ─────────────
 function _clubTeacherOverview() { return _clubTeacherStream(); }

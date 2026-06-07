@@ -65,6 +65,7 @@
 
 
 
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -95,7 +96,7 @@
   <link rel="apple-touch-icon" sizes="192x192" href="icons/icon-192.png" />
 
   <!-- ── Styles ── -->
-  <link rel="stylesheet" href="style.css?v=9" />
+  <link rel="stylesheet" href="style.css?v=10" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=DM+Serif+Display:ital@0;1&display=swap" rel="stylesheet" />
 
@@ -722,6 +723,16 @@
     <div class="screen-header">
       <h2>🗂️ Flashcards</h2>
       <p>Click a card to reveal the answer. Rate your confidence to personalise which cards come back most often.</p>
+    </div>
+
+    <!-- Study mode bar — shown instead of header when a category is selected -->
+    <div class="fc-study-bar hidden" id="fcStudyBar">
+      <button class="fc-study-back" onclick="exitStudyMode()">
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 4L6 10l6 6"/></svg>
+        Categories
+      </button>
+      <span class="fc-study-cat-name" id="fcStudyCatName"></span>
+      <span style="width:80px"></span>
     </div>
 
     <div class="fc-search-wrapper">
@@ -5359,7 +5370,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="supabase-sync.js"></script>
   <script src="content-loader.js"></script>
-  <script src="script.js?v=7"></script>
+  <script src="script.js?v=8"></script>
   <script src="tour.js?v=5"></script>
 
   <!-- ── PWA: Service Worker + Install Prompt + Update Banner ── -->
