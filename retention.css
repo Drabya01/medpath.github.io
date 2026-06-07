@@ -1,0 +1,629 @@
+/* ═══════════════════════════════════════════════════════════════
+   MedPath — Retention Features  v1
+   Append this entire file to style.css
+   (or <link> it as a separate sheet after style.css)
+═══════════════════════════════════════════════════════════════ */
+
+/* ─────────────────────────────────────────────────────────────
+   1. DAILY GOAL RING
+   Replaces the flat .xp-bar-section in the home hero.
+───────────────────────────────────────────────────────────── */
+
+/*
+  HTML structure (replaces the old .xp-bar-section div):
+
+  <div class="goal-ring-section" id="xpBarSection">
+    <div class="goal-ring-wrap" id="goalRingWrap">
+      <svg class="grsvg" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+        <circle class="grsvg-bg"   cx="50" cy="50" r="46"/>
+        <circle class="grsvg-ring" id="goalRingCircle" cx="50" cy="50" r="46"
+                transform="rotate(-90 50 50)"
+                stroke-dasharray="289.03"
+                stroke-dashoffset="289.03"/>
+      </svg>
+      <div class="grc">
+        <div class="grc-count" id="goalRingCount">0</div>
+        <div class="grc-slash">/</div>
+        <div class="grc-goal"  id="goalRingGoal">20</div>
+        <div class="grc-lbl">cards today</div>
+      </div>
+    </div>
+    <div class="goal-ring-meta">
+      <div class="xp-bar-top">
+        <span class="xp-level-badge" id="xpLevelBadge">Lv. 1</span>
+        <span class="xp-level-name"  id="xpLevelName">Pre-Med</span>
+      </div>
+      <span class="xp-label" id="xpLabel">0 XP</span>
+      <div class="xp-bar-track">
+        <div class="xp-bar-fill" id="xpBarFill" style="width:0%"></div>
+      </div>
+      <div class="sfr-row">
+        <span class="sfr-icon">🔥</span>
+        <span class="sfr-streak" id="goalStreakNum">0</span>
+        <span class="sfr-sep">·</span>
+        <span class="sfr-pips" id="homeFreezePips"></span>
+      </div>
+    </div>
+  </div>
+*/
+
+/* ── Goal ring section (row layout inside hero) ──────────── */
+.goal-ring-section {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255,255,255,.1);
+}
+
+/* ── Ring wrapper: SVG + centered text overlay ─────────────── */
+.goal-ring-wrap {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  flex-shrink: 0;
+  will-change: transform;
+  transition: transform .3s var(--smooth);
+}
+@media (max-width: 360px) {
+  .goal-ring-wrap { width: 80px; height: 80px; }
+}
+
+/* ── SVG ring ───────────────────────────────────────────────── */
+.grsvg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.grsvg-bg {
+  fill: none;
+  stroke: rgba(255,255,255,.12);
+  stroke-width: 8;
+}
+.grsvg-ring {
+  fill: none;
+  stroke: rgba(255,255,255,.65);
+  stroke-width: 8;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.8s var(--smooth), stroke 0.5s ease;
+  filter: drop-shadow(0 0 6px currentColor);
+}
+
+/* ── Center text ────────────────────────────────────────────── */
+.grc {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  pointer-events: none;
+}
+.grc-count {
+  font-size: 1.6rem;
+  font-weight: 900;
+  color: #fff;
+  font-family: var(--font-display);
+  line-height: 1;
+}
+.grc-slash { font-size: .7rem; color: rgba(255,255,255,.45); margin: 1px 0; }
+.grc-goal  { font-size: .8rem; font-weight: 700; color: rgba(255,255,255,.7); }
+.grc-lbl   { font-size: .55rem; color: rgba(255,255,255,.5); margin-top: 3px; letter-spacing: .04em; text-transform: uppercase; }
+
+/* ── Completion states ──────────────────────────────────────── */
+.grw--done .grsvg-ring {
+  filter: drop-shadow(0 0 12px #10b981) drop-shadow(0 0 4px #10b981);
+}
+.grw--done .grc-count { color: #10b981; }
+.grw--done .grc-lbl   { color: rgba(16,185,129,.7); }
+
+@keyframes goal-burst {
+  0%   { transform: scale(1); }
+  30%  { transform: scale(1.12); }
+  60%  { transform: scale(.97); }
+  100% { transform: scale(1); }
+}
+.grw--burst { animation: goal-burst .5s var(--spring) both; }
+
+/* ── Meta column (XP bar + streak row) ─────────────────────── */
+.goal-ring-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* ── Streak + freeze pips row on home ──────────────────────── */
+.sfr-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+}
+.sfr-icon   { font-size: 13px; }
+.sfr-streak {
+  font-size: 13px;
+  font-weight: 800;
+  color: #f59e0b;
+  min-width: 18px;
+}
+.sfr-sep  { color: rgba(255,255,255,.3); font-size: 11px; }
+.sfr-pips { display: flex; gap: 3px; align-items: center; }
+
+/* Shared freeze pip style (used in home + progress) */
+.freeze-pip {
+  font-size: 14px;
+  filter: grayscale(1) opacity(.35);
+  transition: filter .3s, transform .2s;
+}
+.freeze-pip--lit {
+  filter: grayscale(0) opacity(1);
+  animation: freeze-bounce .4s var(--spring);
+}
+@keyframes freeze-bounce {
+  from { transform: scale(.6); opacity: .3; }
+  to   { transform: scale(1);  opacity: 1;  }
+}
+
+/* ─────────────────────────────────────────────────────────────
+   STREAK EXTRAS ROW  (progress page — injected by JS)
+───────────────────────────────────────────────────────────── */
+
+.srx-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  background: rgba(13,148,136,.08);
+  border: 1px solid rgba(13,148,136,.2);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin-top: 10px;
+}
+.srx-freeze {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.srx-freeze-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+.srx-freeze-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.srx-repair-btn {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--teal);
+  background: rgba(13,148,136,.12);
+  border: 1px solid rgba(13,148,136,.3);
+  border-radius: 20px;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: background .15s, transform .1s;
+}
+.srx-repair-btn:hover { background: rgba(13,148,136,.22); transform: translateY(-1px); }
+.dark .srx-row { background: rgba(13,148,136,.1); border-color: rgba(13,148,136,.25); }
+
+
+/* ─────────────────────────────────────────────────────────────
+   2. STREAK REPAIR OVERLAY
+───────────────────────────────────────────────────────────── */
+
+.srp-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.65);
+  backdrop-filter: blur(4px);
+  z-index: 9998;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 20px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .35s ease;
+}
+.srp-overlay.srp--in {
+  opacity: 1;
+  pointer-events: auto;
+}
+.srp-card {
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  padding: 32px 28px 24px;
+  text-align: center;
+  max-width: 340px;
+  width: 100%;
+  box-shadow: var(--shadow-lg);
+  transform: translateY(60px);
+  transition: transform .42s var(--spring);
+}
+.srp-overlay.srp--in .srp-card { transform: translateY(0); }
+
+.srp-icon  { font-size: 3rem; margin-bottom: 10px; }
+.srp-title {
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  font-family: var(--font-display);
+}
+.srp-msg {
+  font-size: .9rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 20px;
+}
+.srp-noxp {
+  font-size: .85rem;
+  color: var(--text-muted);
+  background: var(--grey-100);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin-bottom: 12px;
+}
+.srp-btn {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  font-size: .95rem;
+  font-weight: 700;
+  cursor: pointer;
+  border: none;
+  transition: transform .12s, opacity .12s;
+  margin-bottom: 8px;
+}
+.srp-btn:last-child { margin-bottom: 0; }
+.srp-btn:active { transform: scale(.97); }
+.srp-btn--repair {
+  background: var(--teal);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(13,148,136,.35);
+}
+.srp-btn--repair:hover { opacity: .9; }
+.srp-btn--skip {
+  background: var(--grey-100);
+  color: var(--text-secondary);
+}
+.dark .srp-btn--skip { background: var(--bg-subtle); color: var(--text-secondary); }
+
+
+/* ─────────────────────────────────────────────────────────────
+   3. STREAK MILESTONE POPUP
+───────────────────────────────────────────────────────────── */
+
+.smo-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.75);
+  backdrop-filter: blur(6px);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .4s ease;
+}
+.smo-overlay.smo--in {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.smo-card {
+  position: relative;
+  background: var(--navy);
+  border: 1.5px solid rgba(255,255,255,.1);
+  border-radius: 24px;
+  padding: 40px 32px 32px;
+  text-align: center;
+  max-width: 360px;
+  width: 100%;
+  overflow: hidden;
+  box-shadow: 0 24px 60px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,.06);
+  transform: scale(.88) translateY(20px);
+  transition: transform .55s var(--spring);
+  /* Top glow bar in rarity colour */
+}
+.smo-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 4px;
+  background: var(--smo-clr, var(--teal));
+  border-radius: 24px 24px 0 0;
+}
+.smo-overlay.smo--in .smo-card {
+  transform: scale(1) translateY(0);
+}
+
+.smo-confetti-stage {
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 0; height: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+.smo-conf {
+  position: absolute;
+  background: var(--c, #0d9488);
+  top: 0; left: 0;
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  animation: conf-fly 1.1s var(--del, 0s) cubic-bezier(.2,.8,.4,.9) forwards;
+  will-change: transform, opacity;
+}
+@keyframes conf-fly {
+  0%  { transform: translate(-50%,-50%) rotate(0deg); opacity:1; }
+  80% { opacity: 1; }
+  100%{ transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) rotate(var(--rot)); opacity:0; }
+}
+
+.smo-emoji    { font-size: 3.2rem; margin-bottom: 4px; position: relative; z-index: 2; animation: smo-pop .6s .3s var(--spring) both; }
+.smo-count    { font-size: 5rem; font-weight: 900; color: var(--smo-clr, var(--teal)); font-family: var(--font-display); line-height: 1; position: relative; z-index: 2; }
+.smo-count-lbl{ font-size: .8rem; text-transform: uppercase; letter-spacing: .12em; color: rgba(255,255,255,.45); margin-bottom: 14px; position: relative; z-index: 2; }
+.smo-title    { font-size: 1.5rem; font-weight: 800; color: #fff; font-family: var(--font-display); margin-bottom: 8px; position: relative; z-index: 2; }
+.smo-sub      { font-size: .9rem; color: rgba(255,255,255,.6); line-height: 1.5; margin-bottom: 16px; position: relative; z-index: 2; }
+.smo-xp       {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(16,185,129,.18);
+  color: #10b981;
+  font-size: .85rem;
+  font-weight: 800;
+  padding: 5px 14px;
+  border-radius: 20px;
+  margin-bottom: 20px;
+  border: 1px solid rgba(16,185,129,.3);
+  position: relative; z-index: 2;
+}
+.smo-btn {
+  display: block;
+  width: 100%;
+  padding: 14px;
+  background: var(--smo-clr, var(--teal));
+  color: #fff;
+  font-size: .95rem;
+  font-weight: 800;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: opacity .15s, transform .12s;
+  position: relative; z-index: 2;
+}
+.smo-btn:hover  { opacity: .9; }
+.smo-btn:active { transform: scale(.97); }
+
+@keyframes smo-pop {
+  0%   { transform: scale(.5) rotate(-15deg); }
+  60%  { transform: scale(1.15) rotate(5deg);  }
+  100% { transform: scale(1) rotate(0deg);    }
+}
+
+
+/* ─────────────────────────────────────────────────────────────
+   4. ACHIEVEMENT BADGES v2 — 4-tier rarity grid
+───────────────────────────────────────────────────────────── */
+
+/* ── Header row ─────────────────────────────────────────────── */
+.ach2-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.ach2-progress-row {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+.ach2-tally {
+  font-size: 1.5rem;
+  font-weight: 900;
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  line-height: 1;
+}
+.ach2-tally-sep { font-size: 1rem; color: var(--text-muted); }
+.ach2-tally-lbl { font-size: .8rem; color: var(--text-muted); }
+
+/* ── Rarity legend pills ────────────────────────────────────── */
+.ach2-legend {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.ach2-gem {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 2px 8px;
+  border-radius: 20px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  border: 1.5px solid transparent;
+}
+.ach2-gem--bronze  { color: #cd7f32; border-color: #cd7f32; background: rgba(205,127,50,.1); }
+.ach2-gem--silver  { color: #9ca3af; border-color: #9ca3af; background: rgba(156,163,175,.1); }
+.ach2-gem--gold    { color: #f59e0b; border-color: #f59e0b; background: rgba(245,158,11,.1); }
+.ach2-gem--diamond { color: #0d9488; border-color: #0d9488; background: rgba(13,148,136,.1); }
+
+/* ── Grid container ─────────────────────────────────────────── */
+.ach2-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 10px;
+}
+@media (max-width: 420px) {
+  .ach2-grid { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+}
+
+/* ── Base badge ─────────────────────────────────────────────── */
+.ach2-badge {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 14px 8px 10px;
+  border-radius: 14px;
+  border: 1.5px solid var(--border);
+  background: var(--bg-card);
+  text-align: center;
+  overflow: hidden;
+  transition: transform .18s var(--smooth), border-color .2s, box-shadow .2s;
+  cursor: default;
+}
+.ach2-badge:hover { transform: translateY(-2px); }
+
+/* ── Glow layer (grows on hover when unlocked) ──────────────── */
+.ach2-glow {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .3s;
+}
+.ach2-lit:hover .ach2-glow { opacity: 1; }
+
+/* ── Badge body (emoji container) ──────────────────────────── */
+.ach2-body {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--grey-100);
+  transition: background .2s;
+}
+.ach2-emoji { font-size: 22px; line-height: 1; }
+
+.ach2-check {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #10b981;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--bg-card);
+}
+
+.ach2-name {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--text-primary);
+  line-height: 1.2;
+  max-width: 90px;
+}
+.ach2-desc {
+  font-size: 9px;
+  color: var(--text-muted);
+  line-height: 1.3;
+}
+.ach2-locked { opacity: .7; }
+
+/* ─── Locked badge ─────────────────────────────────────────── */
+.ach2-badge:not(.ach2-lit) {
+  opacity: .48;
+  filter: saturate(0);
+}
+
+/* ─────── Bronze (warm copper) ─────────────────────────────── */
+.ach2-lit.ach2-bronze {
+  border-color: rgba(205,127,50,.6);
+  background: rgba(205,127,50,.05);
+}
+.ach2-lit.ach2-bronze .ach2-body { background: rgba(205,127,50,.12); }
+.ach2-lit.ach2-bronze .ach2-glow {
+  background: radial-gradient(circle at 50% 0%, rgba(205,127,50,.18) 0%, transparent 70%);
+}
+
+/* ─────── Silver ───────────────────────────────────────────── */
+.ach2-lit.ach2-silver {
+  border-color: rgba(156,163,175,.7);
+  background: rgba(156,163,175,.06);
+}
+.ach2-lit.ach2-silver .ach2-body { background: rgba(156,163,175,.15); }
+.ach2-lit.ach2-silver .ach2-glow {
+  background: radial-gradient(circle at 50% 0%, rgba(200,210,220,.2) 0%, transparent 70%);
+}
+
+/* ─────── Gold ─────────────────────────────────────────────── */
+.ach2-lit.ach2-gold {
+  border-color: rgba(245,158,11,.6);
+  background: rgba(245,158,11,.06);
+  box-shadow: 0 0 0 1px rgba(245,158,11,.15), 0 4px 16px rgba(245,158,11,.12);
+}
+.ach2-lit.ach2-gold .ach2-body { background: rgba(245,158,11,.14); }
+.ach2-lit.ach2-gold .ach2-glow {
+  background: radial-gradient(circle at 50% 0%, rgba(245,158,11,.22) 0%, transparent 65%);
+}
+.ach2-lit.ach2-gold .ach2-name { color: #d97706; }
+
+/* ─────── Diamond (elite — teal/cyan sparkle) ──────────────── */
+.ach2-lit.ach2-diamond {
+  border-color: var(--teal);
+  background: rgba(13,148,136,.07);
+  box-shadow:
+    0 0 0 1px rgba(13,148,136,.3),
+    0 0 20px rgba(13,148,136,.2),
+    0 4px 18px rgba(13,148,136,.15);
+  animation: diamond-pulse 2.5s ease-in-out infinite;
+}
+.ach2-lit.ach2-diamond .ach2-body {
+  background: rgba(13,148,136,.16);
+}
+.ach2-lit.ach2-diamond .ach2-glow {
+  background: radial-gradient(circle at 50% 0%, rgba(13,148,136,.28) 0%, transparent 60%);
+}
+.ach2-lit.ach2-diamond .ach2-name { color: var(--teal); }
+@keyframes diamond-pulse {
+  0%,100% { box-shadow: 0 0 0 1px rgba(13,148,136,.3), 0 0 18px rgba(13,148,136,.18), 0 4px 18px rgba(13,148,136,.12); }
+  50%      { box-shadow: 0 0 0 1px rgba(13,148,136,.5), 0 0 28px rgba(13,148,136,.3),  0 4px 18px rgba(13,148,136,.2);  }
+}
+
+/* Pop animation when newly unlocked */
+.ach2-lit {
+  animation: ach2-unlock .5s var(--spring) both;
+}
+@keyframes ach2-unlock {
+  0%   { transform: scale(.8) translateY(4px); opacity: .4; }
+  60%  { transform: scale(1.06); opacity: 1; }
+  100% { transform: scale(1);    opacity: 1; }
+}
+
+/* ── Dark mode adjustments ──────────────────────────────────── */
+.dark .ach2-badge                { background: var(--bg-card); border-color: var(--border); }
+.dark .ach2-body                 { background: var(--bg-subtle); }
+.dark .ach2-lit.ach2-bronze      { background: rgba(205,127,50,.08); }
+.dark .ach2-lit.ach2-silver      { background: rgba(156,163,175,.08); }
+.dark .ach2-lit.ach2-gold        { background: rgba(245,158,11,.08); }
+.dark .ach2-lit.ach2-diamond     { background: rgba(13,148,136,.1); }
+.dark .ach2-lit.ach2-bronze .ach2-body { background: rgba(205,127,50,.15); }
+.dark .ach2-lit.ach2-silver .ach2-body { background: rgba(156,163,175,.15); }
+.dark .ach2-lit.ach2-gold   .ach2-body { background: rgba(245,158,11,.15); }
+.dark .ach2-lit.ach2-diamond .ach2-body{ background: rgba(13,148,136,.2); }
+.dark .ach2-check                { border-color: var(--bg-card); }

@@ -67,6 +67,7 @@
 
 
 
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -98,6 +99,7 @@
 
   <!-- ── Styles ── -->
   <link rel="stylesheet" href="style.css?v=11" />
+  <link rel="stylesheet" href="retention.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=DM+Serif+Display:ital@0;1&display=swap" rel="stylesheet" />
 
@@ -343,16 +345,47 @@
       <div class="hero-badge" id="heroBadge">v1.0 · Free &amp; Open</div>
       <h1 class="hero-title" id="heroTitle">Learn Healthcare<br/><em>the interactive way.</em></h1>
       <p class="hero-sub" id="heroSub">Built for future healthcare professionals.</p>
-      <!-- XP bar — updated by JS -->
-      <div class="xp-bar-section" id="xpBarSection">
-        <div class="xp-bar-top">
-          <span class="xp-level-badge" id="xpLevelBadge">Lv. 1</span>
-          <span class="xp-level-name"  id="xpLevelName">Pre-Med</span>
-          <span class="xp-label"       id="xpLabel">0 XP</span>
+      <!-- Daily Goal Ring + XP — updated by JS (retention.js) -->
+      <div class="goal-ring-section" id="xpBarSection">
+
+        <!-- Circular progress ring -->
+        <div class="goal-ring-wrap" id="goalRingWrap">
+          <svg class="grsvg" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+            <!-- Background track -->
+            <circle class="grsvg-bg" cx="50" cy="50" r="46"/>
+            <!-- Progress arc — driven by JS via stroke-dashoffset -->
+            <circle class="grsvg-ring" id="goalRingCircle"
+                    cx="50" cy="50" r="46"
+                    transform="rotate(-90 50 50)"
+                    stroke-dasharray="289.03"
+                    stroke-dashoffset="289.03"/>
+          </svg>
+          <div class="grc">
+            <div class="grc-count" id="goalRingCount">0</div>
+            <div class="grc-slash">/</div>
+            <div class="grc-goal"  id="goalRingGoal">20</div>
+            <div class="grc-lbl">cards today</div>
+          </div>
         </div>
-        <div class="xp-bar-track">
-          <div class="xp-bar-fill" id="xpBarFill" style="width:0%"></div>
+
+        <!-- XP level + bar + streak/freeze row -->
+        <div class="goal-ring-meta">
+          <div class="xp-bar-top">
+            <span class="xp-level-badge" id="xpLevelBadge">Lv. 1</span>
+            <span class="xp-level-name"  id="xpLevelName">Pre-Med</span>
+          </div>
+          <span class="xp-label" id="xpLabel">0 XP</span>
+          <div class="xp-bar-track">
+            <div class="xp-bar-fill" id="xpBarFill" style="width:0%"></div>
+          </div>
+          <div class="sfr-row">
+            <span class="sfr-icon">🔥</span>
+            <span class="sfr-streak" id="goalStreakNum">0</span>
+            <span class="sfr-sep">·</span>
+            <span class="sfr-pips" id="homeFreezePips"></span>
+          </div>
         </div>
+
       </div>
     </div>
 
@@ -4752,6 +4785,15 @@
         <div class="pd-streak-best-val"><span id="pdLongestStreak">0</span> days</div>
       </div>
     </div>
+    <!-- Streak freeze pips + repair — populated by retention.js -->
+    <div class="srx-row" id="streakExtrasRow">
+      <div class="srx-freeze">
+        <span class="srx-freeze-label">Freezes:</span>
+        <span class="sfr-pips" id="streakFreezePips"></span>
+        <span class="srx-freeze-hint">earn one every 7 days · max 3</span>
+      </div>
+      <button id="streakRepairBtn" class="srx-repair-btn hidden" onclick="streakRepair()">🔧 Repair streak</button>
+    </div>
     <div class="pd-section">
       <div class="pd-section-header"><span class="pd-section-icon">🩺</span><span class="pd-section-title">Clinical Cases</span></div>
       <div class="pd-stat-row">
@@ -5373,6 +5415,7 @@
   <script src="content-loader.js"></script>
   <script src="script.js?v=9"></script>
   <script src="tour.js?v=5"></script>
+  <script src="retention.js"></script>
 
   <!-- ── PWA: Service Worker + Install Prompt + Update Banner ── -->
   <script>
