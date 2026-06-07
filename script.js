@@ -7757,6 +7757,8 @@ function sm2Schedule(id, rating) {
 
   sm2Data[id] = c;
   sm2Save();
+  /* Queue this card's new state for cross-device sync */
+  SupabaseSync.queueCardReview(id, c);
   return c;
 }
 
@@ -7860,6 +7862,10 @@ function rateCard(rating) {
   } else {
     if (srsRow) { srsRow.classList.add('fc-srs-rated'); setTimeout(function() { srsRow.classList.remove('fc-srs-rated'); nextCard(); }, 350); }
   }
+
+  /* Session tracking + backend activity logging */
+  _studySessionCardRated();
+  _syncAssignmentCompletion(card.cat);
 }
 
 // ── Saved Cards (unchanged) ───────────────────────────────────
@@ -15304,6 +15310,13 @@ function _clubTeacherClasswork() {
       var due     = _daysUntil(a.due_date);
       var overdue = _isDue(a.due_date);
       var color   = typeColors[a.type] || '#0d9488';
+      /* Completion data from Realtime-synced state */
+      var completions  = _clubState.completions || [];
+      var memberCount  = (_clubState.members||[]).filter(function(m){return m.role!=='owner';}).length;
+      var doneCount    = completions.filter(function(c){return c.assignment_id===a.id&&c.is_complete;}).length;
+      var startedCount = completions.filter(function(c){return c.assignment_id===a.id&&c.cards_done>0;}).length;
+      var compPct      = memberCount>0 ? Math.round((doneCount/memberCount)*100) : 0;
+
       html += '<div class="club-assign-card club-assign-card--v2" style="--a-color:'+color+'">'
         +'<div class="club-assign-stripe"></div>'
         +'<div class="club-assign-content">'
@@ -15313,6 +15326,12 @@ function _clubTeacherClasswork() {
         +'</div>'
         +'<div class="club-assign-meta">'+_clubAssignTypeChip(a.type)+(a.target_cat?' · '+_esc(a.type==='hosa'?_hosaName(a.target_cat):a.target_cat):'')+'</div>'
         +(due?'<div class="club-assign-due '+(overdue?'club-due--overdue':'club-due--ok')+'">'+due+'</div>':'')
+        +(memberCount>0
+          ? '<div class="club-completion-row">'
+            +'<div class="club-completion-bar-wrap"><div class="club-completion-bar" style="width:'+compPct+'%;background:'+color+'"></div></div>'
+            +'<span class="club-completion-lbl">'+doneCount+'/'+memberCount+' complete</span>'
+            +'</div>'
+          : '')
         +'</div>'
         +'</div>';
     });
@@ -15483,6 +15502,8 @@ function _clubTeacherSettings() {
     +'<button class="club-setup-btn" onclick="_clubRegenCode()">🔄 Regenerate</button>'
     +'</div>'
     +'<div class="club-hint-text">Regenerate if the code was shared with unintended people. Old code immediately stops working.</div>'
+
+    +'<button class="club-export-btn" onclick="_clubExportCSV()">📥 Export class data (CSV)</button>'
 
     +'<div class="club-danger-zone">'
     +'<div class="club-section-title club-section-title--danger">⚠ Danger Zone</div>'
@@ -16749,5 +16770,311 @@ document.addEventListener('DOMContentLoaded', function() {
     document.addEventListener('DOMContentLoaded', init);
   } else {
     init();
+  }
+})();
+
+/* ══════════════════════════════════════════════════════════════
+   MEDPATH BACKEND FEATURES v2
+   Study Session Logging · Push Notifications ·
+   Assignment Completion Tracking · Club Realtime
+══════════════════════════════════════════════════════════════ */
+
+// ── 1. Study Session Tracking ─────────────────────────────────
+
+var _studySession = {
+  active:        false,
+  startTime:     null,
+  cardsReviewed: 0,
+  category:      'All',
+  screen:        'flashcards',
+  xpEarned:      0,
+  inactivityTimer: null,
+  dailyFlushTimer: null,
+  lastDailyFlush: null  // date string of last daily_activity upsert
+};
+
+function _studySessionStart(screen, category) {
+  if (_studySession.active) return;
+  _studySession.active        = true;
+  _studySession.startTime     = Date.now();
+  _studySession.cardsReviewed = 0;
+  _studySession.xpEarned      = 0;
+  _studySession.screen        = screen   || 'flashcards';
+  _studySession.category      = category || (typeof fcActiveCategory !== 'undefined' ? fcActiveCategory : 'All');
+  clearTimeout(_studySession.inactivityTimer);
+}
+
+function _studySessionCardRated() {
+  if (!_studySession.active) _studySessionStart('flashcards');
+  _studySession.cardsReviewed++;
+  _studySessionResetInactivity();
+  _studySessionFlushDailyActivity();
+}
+
+function _studySessionResetInactivity() {
+  clearTimeout(_studySession.inactivityTimer);
+  _studySession.inactivityTimer = setTimeout(_studySessionEnd, 5 * 60 * 1000); // 5 min idle
+}
+
+function _studySessionFlushDailyActivity() {
+  // Upsert daily_activity at most once per minute to avoid hammering the DB
+  var today = new Date().toISOString().split('T')[0];
+  if (_studySession.lastDailyFlush === today) return;
+  clearTimeout(_studySession.dailyFlushTimer);
+  _studySession.dailyFlushTimer = setTimeout(function() {
+    _studySession.lastDailyFlush = today;
+    var xp = typeof xpData !== 'undefined' ? (xpData.weekXP || 0) : 0;
+    SupabaseSync.upsertDailyActivity(_studySession.cardsReviewed, xp);
+  }, 3000);
+}
+
+function _studySessionEnd() {
+  if (!_studySession.active) return;
+  clearTimeout(_studySession.inactivityTimer);
+  clearTimeout(_studySession.dailyFlushTimer);
+  var duration = Math.round((Date.now() - _studySession.startTime) / 1000);
+  if (_studySession.cardsReviewed > 0) {
+    var xp = typeof xpData !== 'undefined' ? (xpData.weekXP || 0) : 0;
+    SupabaseSync.logStudySession({
+      cards_reviewed:   _studySession.cardsReviewed,
+      xp_earned:        xp,
+      category:         _studySession.category,
+      screen:           _studySession.screen,
+      duration_seconds: duration
+    });
+    SupabaseSync.upsertDailyActivity(_studySession.cardsReviewed, xp);
+  }
+  _studySession.active        = false;
+  _studySession.startTime     = null;
+  _studySession.cardsReviewed = 0;
+}
+
+// End session when the user navigates away from the flashcard screen
+(function() {
+  var origShowScreen = typeof showScreen === 'function' ? showScreen : null;
+  if (origShowScreen) {
+    window.showScreen = function(id) {
+      if (id !== 'flashcards' && _studySession.active) _studySessionEnd();
+      if (id === 'flashcards') _studySessionStart('flashcards');
+      return origShowScreen.apply(this, arguments);
+    };
+  }
+})();
+
+// ── 2. Push Notifications ─────────────────────────────────────
+
+/* VAPID public key — generate with: npx web-push generate-vapid-keys
+   Then paste the PUBLIC key here, and set the PRIVATE key in your Edge Function. */
+var PUSH_PUBLIC_KEY = 'REPLACE_WITH_YOUR_VAPID_PUBLIC_KEY';
+
+var _pushPermissionAsked = false;
+
+async function _initPushNotifications() {
+  if (_pushPermissionAsked) return;
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+  if (PUSH_PUBLIC_KEY === 'REPLACE_WITH_YOUR_VAPID_PUBLIC_KEY') return; // not configured
+  _pushPermissionAsked = true;
+
+  // Don't ask immediately — wait until after the user's first card session
+  // (called from _studySessionEnd when cardsReviewed > 0 for the first time)
+  var already = await SupabaseSync.hasPushSubscription();
+  if (already) return; // already subscribed
+
+  // Show a soft in-app prompt instead of the raw browser permission dialog
+  _showPushPrompt();
+}
+
+function _showPushPrompt() {
+  if (document.getElementById('push-prompt')) return;
+  var el = document.createElement('div');
+  el.id = 'push-prompt';
+  el.className = 'push-prompt';
+  el.innerHTML =
+    '<div class="push-prompt-icon">🔔</div>'
+    +'<div class="push-prompt-body">'
+    +'<div class="push-prompt-title">Never miss a study day</div>'
+    +'<div class="push-prompt-desc">Get a reminder at 7pm if you haven\'t studied. Keeps your streak alive.</div>'
+    +'</div>'
+    +'<div class="push-prompt-actions">'
+    +'<button class="push-prompt-allow" onclick="_subscribeToPush()">Enable</button>'
+    +'<button class="push-prompt-deny" onclick="_dismissPushPrompt()">Not now</button>'
+    +'</div>';
+  document.body.appendChild(el);
+  setTimeout(function() { el.classList.add('push-prompt--visible'); }, 100);
+}
+
+function _dismissPushPrompt() {
+  var el = document.getElementById('push-prompt');
+  if (el) {
+    el.classList.remove('push-prompt--visible');
+    setTimeout(function() { if (el.parentNode) el.remove(); }, 300);
+  }
+}
+
+async function _subscribeToPush() {
+  _dismissPushPrompt();
+  try {
+    var permission = await Notification.requestPermission();
+    if (permission !== 'granted') return;
+    var reg = await navigator.serviceWorker.ready;
+    var sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: _urlBase64ToUint8Array(PUSH_PUBLIC_KEY)
+    });
+    var ok = await SupabaseSync.savePushSubscription(sub.toJSON());
+    if (ok && typeof showSettingsToast === 'function')
+      showSettingsToast('🔔 Study reminders enabled');
+  } catch(e) {
+    console.warn('[Push] Subscribe error:', e.message);
+  }
+}
+
+function _urlBase64ToUint8Array(base64String) {
+  var padding = '='.repeat((4 - base64String.length % 4) % 4);
+  var base64  = (base64String + padding).replace(/-/g,'+').replace(/_/g,'/');
+  var raw     = atob(base64);
+  var arr     = new Uint8Array(raw.length);
+  for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+// ── 3. Assignment Completion Sync ─────────────────────────────
+
+var _lastCompletionSync = {}; // { assignmentId: lastCheckedIndex }
+
+function _syncAssignmentCompletion(cat) {
+  if (!cat || !_clubState || !_clubState.assignments || !_clubState.assignments.length) return;
+  // Find any flashcard assignments matching this category
+  _clubState.assignments.forEach(function(a) {
+    if (a.type !== 'flashcards' || a.target_cat !== cat) return;
+    var prog = typeof _assignmentProgress === 'function' ? _assignmentProgress(a) : null;
+    if (!prog || !prog.total) return;
+    var isComplete = prog.done >= prog.total;
+    SupabaseSync.upsertAssignmentCompletion({
+      assignment_id: a.id,
+      club_id:       a.club_id || (_clubState.active && _clubState.active.id) || '',
+      cards_done:    prog.done,
+      total_cards:   prog.total,
+      is_complete:   isComplete,
+      completed_at:  isComplete ? new Date().toISOString() : null
+    });
+  });
+}
+
+// ── 4. Club Realtime ──────────────────────────────────────────
+
+var _clubRealtimeCallbacks = {
+  onAnnouncement: function(newAnn) {
+    if (!_clubState || !_clubState.active) return;
+    // Prepend to state and re-render if Stream tab is active
+    _clubState.announcements = _clubState.announcements || [];
+    var exists = _clubState.announcements.some(function(a){ return a.id === newAnn.id; });
+    if (!exists) {
+      _clubState.announcements.unshift(newAnn);
+      if (_clubState.tab === 'stream') {
+        var content = document.getElementById('clubTabContent');
+        if (content) content.innerHTML = _clubTeacherTab('stream');
+      }
+      if (typeof showSettingsToast === 'function') showSettingsToast('📢 New announcement');
+    }
+  },
+  onAssignment: function(newAssign) {
+    if (!_clubState || !_clubState.active) return;
+    _clubState.assignments = _clubState.assignments || [];
+    var exists = _clubState.assignments.some(function(a){ return a.id === newAssign.id; });
+    if (!exists) {
+      _clubState.assignments.unshift(newAssign);
+      if (_clubState.tab === 'classwork' || _clubState.tab === 'stream') {
+        var content = document.getElementById('clubTabContent');
+        if (content) content.innerHTML = _clubTeacherTab(_clubState.tab);
+      }
+      if (typeof showSettingsToast === 'function') showSettingsToast('📋 New assignment posted');
+    }
+  },
+  onCompletion: function(payload) {
+    // Re-render classwork if the teacher is viewing it to update completion bars
+    if (_clubState && _clubState.tab === 'classwork') {
+      var content = document.getElementById('clubTabContent');
+      if (content) {
+        // Re-fetch completions silently then refresh
+        SupabaseSync.fetchAssignmentCompletions(_clubState.active.id).then(function(data) {
+          _clubState.completions = data;
+          content.innerHTML = _clubTeacherTab('classwork');
+        });
+      }
+    }
+  },
+  onStats: function(newStats) {
+    if (!_clubState) return;
+    var idx = _clubState.stats.findIndex(function(s){ return s.user_id === newStats.user_id; });
+    if (idx >= 0) _clubState.stats[idx] = newStats;
+    else          _clubState.stats.push(newStats);
+    // Re-render stream analytics silently
+    if (_clubState.tab === 'stream') {
+      var content = document.getElementById('clubTabContent');
+      if (content) content.innerHTML = _clubTeacherTab('stream');
+    }
+  }
+};
+
+// Hook into initClubScreen to start/stop Realtime subscription
+(function() {
+  var _origInitClubScreen = typeof initClubScreen === 'function' ? initClubScreen : null;
+  if (_origInitClubScreen) {
+    window.initClubScreen = async function() {
+      // Unsubscribe before reinitialising
+      SupabaseSync.unsubscribeFromClub();
+      var result = await _origInitClubScreen.apply(this, arguments);
+      // Subscribe after load if a club is active
+      if (_clubState && _clubState.active) {
+        SupabaseSync.subscribeToClub(_clubState.active.id, _clubRealtimeCallbacks);
+      }
+      return result;
+    };
+  }
+})();
+
+// ── 5. Trigger push prompt after first good session ───────────
+(function() {
+  var _origStudySessionEnd = _studySessionEnd;
+  window._studySessionEndWithPush = function() {
+    _origStudySessionEnd.apply(this, arguments);
+    // After a real session ends, maybe ask for notifications
+    if (_studySession.cardsReviewed > 0) {
+      setTimeout(_initPushNotifications, 2000);
+    }
+  };
+})();
+
+/* ── Export helper (called from Settings tab) ─────────────────── */
+async function _clubExportCSV() {
+  if (!_clubState || !_clubState.active) return;
+  var btn = document.querySelector('.club-export-btn');
+  if (btn) { btn.textContent = '⏳ Generating…'; btn.disabled = true; }
+  var ok = await SupabaseSync.exportClassCSV(_clubState.active.id, _clubState.active.name);
+  if (btn) { btn.textContent = ok ? '✓ Downloaded' : '✗ Failed'; btn.disabled = false; }
+  setTimeout(function() {
+    if (btn) btn.textContent = '📥 Export class data (CSV)';
+  }, 3000);
+}
+
+/* ── Fetch assignment completions when club loads ─────────────── */
+(function() {
+  var _origInitClubScreen2 = typeof initClubScreen === 'function' ? initClubScreen : null;
+  if (_origInitClubScreen2) {
+    var _alreadyWrapped = initClubScreen._completionWrapped;
+    if (!_alreadyWrapped) {
+      var _prev = initClubScreen;
+      window.initClubScreen = async function() {
+        var result = await _prev.apply(this, arguments);
+        if (_clubState && _clubState.active) {
+          SupabaseSync.fetchAssignmentCompletions(_clubState.active.id).then(function(data) {
+            _clubState.completions = data;
+          });
+        }
+        return result;
+      };
+      initClubScreen._completionWrapped = true;
+    }
   }
 })();

@@ -53,6 +53,12 @@ var SupabaseSync = (function () {
   var _timers = {};     // debounce timer per data-type key
   var _authError = null; // stores last Supabase auth error for diagnostics
 
+  // New backend feature internals
+  var _realtimeChannel  = null;   // active Supabase Realtime channel
+  var _cardReviewQueue  = {};     // { cardKey: stateObj } pending upsert
+  var _cardReviewTimer  = null;   // debounce timer for card review batch
+  var _CARD_BATCH_MS    = 4000;   // flush card review queue every 4s
+
   // ════════════════════════════════════════════════════════════════
   //  INIT
   // ════════════════════════════════════════════════════════════════
@@ -185,6 +191,12 @@ var SupabaseSync = (function () {
 
     // Push the merged result back so cloud and local are identical
     await _pushAll();
+
+    // Pull granular card reviews and verify server streak in parallel
+    await Promise.all([
+      _syncCardReviewsFromDB(),
+      _verifyServerStreak()
+    ]);
 
     // Refresh any visible UI that depends on synced data
     _refreshUI();
@@ -486,6 +498,103 @@ var SupabaseSync = (function () {
   }
 
   // ════════════════════════════════════════════════════════════════
+  //  NEW BACKEND HELPERS
+  // ════════════════════════════════════════════════════════════════
+
+  /** Flush the batched card review queue to Supabase */
+  async function _flushCardReviews() {
+    if (!_uid || !_ready || !Object.keys(_cardReviewQueue).length) return;
+    var rows = Object.entries(_cardReviewQueue).map(function(e) {
+      return Object.assign({ user_id: _uid, card_key: e[0], updated_at: new Date().toISOString() }, e[1]);
+    });
+    _cardReviewQueue = {}; // clear before await to avoid duplicates
+    try {
+      await _db.from('card_reviews').upsert(rows, { onConflict: 'user_id,card_key' });
+    } catch(e) { console.warn('[Sync] card_reviews flush:', e.message); }
+  }
+
+  /** Queue a single card state for batch upsert */
+  function _queueCardReview(cardKey, state) {
+    if (!_uid || !_ready) return;
+    _cardReviewQueue[cardKey] = {
+      state:    state.state    || 'new',
+      ease:     state.ease     || 2.5,
+      interval: state.interval || 0,
+      step:     state.step     || 0,
+      lapses:   state.lapses   || 0,
+      due:      state.due      || 0,
+      reps:     state.reps     || 0
+    };
+    clearTimeout(_cardReviewTimer);
+    _cardReviewTimer = setTimeout(_flushCardReviews, _CARD_BATCH_MS);
+  }
+
+  /** Pull card_reviews from DB and merge into local sm2Data */
+  async function _syncCardReviewsFromDB() {
+    if (!_uid || !_ready) return;
+    try {
+      var r = await _db.from('card_reviews').select('*').eq('user_id', _uid);
+      var rows = r.data || [];
+      if (!rows.length) return;
+      var local = {};
+      try { var raw = localStorage.getItem('medpath_sm2'); if(raw) local = JSON.parse(raw); } catch(e) {}
+      var changed = false;
+      rows.forEach(function(row) {
+        var l = local[row.card_key];
+        // Take DB state if it has more reps, or same reps but later due date
+        if (!l || row.reps > (l.reps||0) || (row.reps === (l.reps||0) && row.due > (l.due||0))) {
+          local[row.card_key] = {
+            state: row.state, ease: row.ease, interval: row.interval,
+            step: row.step, lapses: row.lapses, due: row.due, reps: row.reps
+          };
+          changed = true;
+        }
+      });
+      if (changed) {
+        try { localStorage.setItem('medpath_sm2', JSON.stringify(local)); } catch(e) {}
+        if (typeof sm2Data !== 'undefined') Object.assign(sm2Data, local);
+        console.log('[Sync] Merged ' + rows.length + ' card reviews from cloud');
+      }
+    } catch(e) { console.warn('[Sync] card_reviews pull:', e.message); }
+  }
+
+  /** Verify streak from daily_activity table (server of truth) */
+  async function _verifyServerStreak() {
+    if (!_uid || !_ready) return;
+    try {
+      var r = await _db
+        .from('daily_activity')
+        .select('activity_date')
+        .eq('user_id', _uid)
+        .gte('activity_date', new Date(Date.now() - 120*86400000).toISOString().split('T')[0])
+        .order('activity_date', { ascending: false });
+      var days = (r.data || []).map(function(d){ return d.activity_date; });
+      if (!days.length) return;
+      // Calculate streak from continuous days
+      var daySet = new Set(days);
+      var today = new Date().toISOString().split('T')[0];
+      var yest  = new Date(Date.now()-86400000).toISOString().split('T')[0];
+      var start = daySet.has(today) ? today : (daySet.has(yest) ? yest : null);
+      if (!start) return;
+      var streak = 0, cur = new Date(start);
+      while (daySet.has(cur.toISOString().split('T')[0])) {
+        streak++;
+        cur.setDate(cur.getDate()-1);
+      }
+      // Update localStorage if server streak is higher (server wins as it's tamper-proof)
+      var lsk = {};
+      try { var raw=localStorage.getItem('medpath_streak'); if(raw) lsk=JSON.parse(raw); } catch(e){}
+      if (streak > (lsk.currentStreak||0)) {
+        lsk.currentStreak = streak;
+        lsk.longestStreak = Math.max(streak, lsk.longestStreak||0);
+        lsk.lastVisit = today;
+        try { localStorage.setItem('medpath_streak', JSON.stringify(lsk)); } catch(e){}
+        if (typeof progressStreak !== 'undefined') Object.assign(progressStreak, lsk);
+      }
+    } catch(e) { console.warn('[Sync] streak verify:', e.message); }
+  }
+
+  // ════════════════════════════════════════════════════════════════
   //  PUBLIC API
   // ════════════════════════════════════════════════════════════════
 
@@ -725,7 +834,286 @@ var SupabaseSync = (function () {
     deleteAnnouncement: async function(id) {
       if (!_ready) return;
       try { await _db.from('announcements').delete().eq('id', id); } catch(e) { console.warn('[Clubs] delAnn:', e.message); }
+    },
+
+    // ════════════════════════════════════════════════════════════════
+    //  1. CROSS-DEVICE SYNC — card_reviews table
+    // ════════════════════════════════════════════════════════════════
+
+    /** Queue one card's SM-2 state for batch upsert (call after sm2Schedule) */
+    queueCardReview: function(cardKey, state) {
+      _queueCardReview(cardKey, state);
+    },
+
+    /** On login: pull card_reviews and merge into local sm2Data */
+    syncCardReviews: async function() {
+      await _syncCardReviewsFromDB();
+    },
+
+    // ════════════════════════════════════════════════════════════════
+    //  2. STUDY SESSION LOGGING — study_sessions table
+    // ════════════════════════════════════════════════════════════════
+
+    /** Insert a completed study session record */
+    logStudySession: async function(data) {
+      if (!_ready || !_uid) return null;
+      try {
+        var r = await _db.from('study_sessions').insert(Object.assign({
+          user_id: _uid,
+          started_at: new Date(Date.now() - (data.duration_seconds||0)*1000).toISOString(),
+          ended_at:   new Date().toISOString()
+        }, data)).select().single();
+        return r.error ? null : r.data;
+      } catch(e) { console.warn('[Sync] logSession:', e.message); return null; }
+    },
+
+    /** Fetch session history for a user (last N days) — for analytics */
+    fetchSessionHistory: async function(days) {
+      if (!_ready || !_uid) return [];
+      try {
+        var since = new Date(Date.now() - (days||7)*86400000).toISOString();
+        var r = await _db.from('study_sessions')
+          .select('started_at,cards_reviewed,xp_earned,category,screen,duration_seconds')
+          .eq('user_id', _uid)
+          .gte('started_at', since)
+          .order('started_at', { ascending: false });
+        return r.data || [];
+      } catch(e) { return []; }
+    },
+
+    // ════════════════════════════════════════════════════════════════
+    //  3. ASSIGNMENT COMPLETIONS
+    // ════════════════════════════════════════════════════════════════
+
+    /** Student: upsert their progress on a specific assignment */
+    upsertAssignmentCompletion: async function(data) {
+      if (!_ready || !_uid) return;
+      try {
+        await _db.from('assignment_completions').upsert(
+          Object.assign({ user_id: _uid, updated_at: new Date().toISOString() }, data),
+          { onConflict: 'assignment_id,user_id' }
+        );
+      } catch(e) { console.warn('[Sync] completion upsert:', e.message); }
+    },
+
+    /** Teacher: fetch all completions for all assignments in a club */
+    fetchAssignmentCompletions: async function(clubId) {
+      if (!_ready) return [];
+      try {
+        var r = await _db.from('assignment_completions')
+          .select('assignment_id,user_id,cards_done,total_cards,is_complete,completed_at')
+          .eq('club_id', clubId);
+        return r.data || [];
+      } catch(e) { return []; }
+    },
+
+    // ════════════════════════════════════════════════════════════════
+    //  4. PUSH NOTIFICATIONS — push_subscriptions table
+    // ════════════════════════════════════════════════════════════════
+
+    /** Save a Web Push subscription for this user */
+    savePushSubscription: async function(sub) {
+      if (!_ready || !_uid) return false;
+      try {
+        var r = await _db.from('push_subscriptions').upsert({
+          user_id:  _uid,
+          endpoint: sub.endpoint,
+          p256dh:   sub.keys.p256dh,
+          auth_key: sub.keys.auth,
+        }, { onConflict: 'user_id,endpoint' });
+        return !r.error;
+      } catch(e) { console.warn('[Sync] savePush:', e.message); return false; }
+    },
+
+    /** Remove a push subscription (user unsubscribed) */
+    deletePushSubscription: async function(endpoint) {
+      if (!_ready || !_uid) return;
+      try {
+        await _db.from('push_subscriptions').delete()
+          .eq('user_id', _uid).eq('endpoint', endpoint);
+      } catch(e) { console.warn('[Sync] deletePush:', e.message); }
+    },
+
+    /** Check if this user already has a push subscription */
+    hasPushSubscription: async function() {
+      if (!_ready || !_uid) return false;
+      try {
+        var r = await _db.from('push_subscriptions')
+          .select('endpoint', { count: 'exact', head: true })
+          .eq('user_id', _uid);
+        return (r.count || 0) > 0;
+      } catch(e) { return false; }
+    },
+
+    // ════════════════════════════════════════════════════════════════
+    //  5. STREAK VERIFICATION — daily_activity table
+    // ════════════════════════════════════════════════════════════════
+
+    /** Record today's study activity (call after every card rating) */
+    upsertDailyActivity: async function(cardsReviewed, xpEarned) {
+      if (!_ready || !_uid) return;
+      var today = new Date().toISOString().split('T')[0];
+      try {
+        // Use Postgres upsert to increment atomically
+        await _db.rpc('increment_daily_activity', {
+          p_user_id:      _uid,
+          p_date:         today,
+          p_cards:        cardsReviewed || 0,
+          p_xp:           xpEarned     || 0
+        });
+      } catch(e) {
+        // Fallback if RPC not yet deployed: simple upsert with max()
+        try {
+          await _db.from('daily_activity').upsert({
+            user_id:       _uid,
+            activity_date: today,
+            cards_reviewed: cardsReviewed || 0,
+            xp_earned:      xpEarned     || 0,
+            sessions_count: 1
+          }, { onConflict: 'user_id,activity_date' });
+        } catch(e2) { console.warn('[Sync] dailyActivity:', e2.message); }
+      }
+    },
+
+    /** Verify streak from server and update local if server is higher */
+    verifyStreak: async function() {
+      await _verifyServerStreak();
+    },
+
+    /** Fetch last N days of activity (for analytics charts) */
+    fetchDailyActivity: async function(days) {
+      if (!_ready || !_uid) return [];
+      var since = new Date(Date.now() - (days||30)*86400000).toISOString().split('T')[0];
+      try {
+        var r = await _db.from('daily_activity')
+          .select('activity_date,cards_reviewed,xp_earned,sessions_count')
+          .eq('user_id', _uid)
+          .gte('activity_date', since)
+          .order('activity_date', { ascending: true });
+        return r.data || [];
+      } catch(e) { return []; }
+    },
+
+    // ════════════════════════════════════════════════════════════════
+    //  6. REALTIME CLUB UPDATES — Supabase Realtime channels
+    // ════════════════════════════════════════════════════════════════
+
+    /** Subscribe to live club changes. callbacks: { onAnnouncement, onAssignment, onCompletion, onStats } */
+    subscribeToClub: function(clubId, callbacks) {
+      if (!_ready || !clubId) return;
+      // Remove any existing subscription first
+      if (_realtimeChannel) {
+        try { _db.removeChannel(_realtimeChannel); } catch(e) {}
+        _realtimeChannel = null;
+      }
+      _realtimeChannel = _db.channel('club:' + clubId)
+        .on('postgres_changes',
+          { event: 'INSERT', schema: 'public', table: 'announcements',
+            filter: 'club_id=eq.' + clubId },
+          function(payload) {
+            if (typeof callbacks.onAnnouncement === 'function')
+              callbacks.onAnnouncement(payload.new);
+          })
+        .on('postgres_changes',
+          { event: 'INSERT', schema: 'public', table: 'assignments',
+            filter: 'club_id=eq.' + clubId },
+          function(payload) {
+            if (typeof callbacks.onAssignment === 'function')
+              callbacks.onAssignment(payload.new);
+          })
+        .on('postgres_changes',
+          { event: '*', schema: 'public', table: 'assignment_completions',
+            filter: 'club_id=eq.' + clubId },
+          function(payload) {
+            if (typeof callbacks.onCompletion === 'function')
+              callbacks.onCompletion(payload);
+          })
+        .on('postgres_changes',
+          { event: 'UPDATE', schema: 'public', table: 'club_member_stats',
+            filter: 'club_id=eq.' + clubId },
+          function(payload) {
+            if (typeof callbacks.onStats === 'function')
+              callbacks.onStats(payload.new);
+          })
+        .subscribe(function(status) {
+          console.log('[Realtime] club:' + clubId + ' →', status);
+        });
+    },
+
+    /** Unsubscribe from all club Realtime channels */
+    unsubscribeFromClub: function() {
+      if (_realtimeChannel) {
+        try { _db.removeChannel(_realtimeChannel); } catch(e) {}
+        _realtimeChannel = null;
+      }
+    },
+
+    // ════════════════════════════════════════════════════════════════
+    //  7. DATA EXPORT — CSV for teachers
+    // ════════════════════════════════════════════════════════════════
+
+    /** Generate and download a CSV of all class data for a club */
+    exportClassCSV: async function(clubId, clubName) {
+      if (!_ready || !_uid) return false;
+      try {
+        // Fetch all data in parallel
+        var [membersR, statsR, assignR, completionsR] = await Promise.all([
+          _db.from('club_members').select('user_id,display_name,avatar_url').eq('club_id', clubId),
+          _db.from('club_member_stats').select('*').eq('club_id', clubId),
+          _db.from('assignments').select('*').eq('club_id', clubId),
+          _db.from('assignment_completions').select('*').eq('club_id', clubId)
+        ]);
+
+        var members     = membersR.data     || [];
+        var stats       = statsR.data       || [];
+        var assignments = assignR.data      || [];
+        var completions = completionsR.data || [];
+
+        // Build lookup maps
+        var statsMap = {};
+        stats.forEach(function(s){ statsMap[s.user_id] = s; });
+
+        var compMap = {}; // { userId: { assignId: completion } }
+        completions.forEach(function(c){
+          if (!compMap[c.user_id]) compMap[c.user_id] = {};
+          compMap[c.user_id][c.assignment_id] = c;
+        });
+
+        // Build CSV header
+        var assignCols = assignments.map(function(a){ return '"' + a.title.replace(/"/g,'""') + '"'; });
+        var header = ['Name','Total XP','Week XP','Cards Reviewed','Streak','Quiz Avg','Active This Week'].concat(assignCols);
+
+        // Build rows
+        var rows = members.filter(function(m){ return m.user_id !== _uid; }).map(function(m){
+          var s   = statsMap[m.user_id] || {};
+          var row = [
+            '"' + (m.display_name||'').replace(/"/g,'""') + '"',
+            s.total_xp     || 0,
+            s.week_xp      || 0,
+            s.cards_reviewed || 0,
+            s.streak       || 0,
+            s.quizzes_done > 0 ? (s.quiz_avg||0)+'%' : '—',
+            (s.week_xp||0) > 0 ? 'Yes' : 'No'
+          ];
+          assignments.forEach(function(a){
+            var c = (compMap[m.user_id]||{})[a.id];
+            row.push(c ? (c.is_complete ? '✓ Done' : c.cards_done+'/'+c.total_cards) : '—');
+          });
+          return row.join(',');
+        });
+
+        var csv = [header.join(',')].concat(rows).join('\n');
+        var blob = new Blob([csv], { type: 'text/csv' });
+        var url  = URL.createObjectURL(blob);
+        var a    = document.createElement('a');
+        a.href     = url;
+        a.download = (clubName||'class').replace(/[^a-z0-9]/gi,'_') + '_export_' + new Date().toISOString().split('T')[0] + '.csv';
+        a.click();
+        URL.revokeObjectURL(url);
+        return true;
+      } catch(e) { console.warn('[Sync] export:', e.message); return false; }
     }
+
   };
 
 })();

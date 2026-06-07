@@ -10,15 +10,15 @@
  * The old cache is deleted automatically on activate.
  */
 
-const CACHE_VERSION  = 'medpath-v14';
+const CACHE_VERSION  = 'medpath-v15';
 const FONT_CACHE     = 'medpath-fonts-v1';
 const DYNAMIC_CACHE  = 'medpath-dynamic-v1';
 
 // Files to pre-cache on install — the complete offline shell
 const PRECACHE_URLS = [
   './index.html',
-  './script.js?v=8',
-  './style.css?v=10',
+  './script.js?v=9',
+  './style.css?v=11',
   './manifest.json',
   './tour.js?v=5',
   './icons/icon-192.png',
@@ -197,6 +197,47 @@ function offlineFallback(request) {
   }
   return new Response('', { status: 503, statusText: 'Offline' });
 }
+
+// ── PUSH NOTIFICATIONS ─────────────────────────────────────────
+// Handle incoming push messages from the Edge Function
+self.addEventListener('push', function(event) {
+  var data = {};
+  try { data = event.data ? event.data.json() : {}; } catch(e) {}
+
+  var title   = data.title || 'MedPath';
+  var options = {
+    body:    data.body  || "Time to study! Keep your streak alive. 🔥",
+    icon:    data.icon  || './icons/icon-192.png',
+    badge:   data.badge || './icons/icon-96.png',
+    tag:     'medpath-study-reminder',   // replaces any previous notification
+    renotify: false,
+    data:    { url: data.url || './' }
+  };
+
+  event.waitUntil(
+    self.registration.showNotification(title, options)
+  );
+});
+
+// Open or focus the app when a notification is clicked
+self.addEventListener('notificationclick', function(event) {
+  event.notification.close();
+  var targetUrl = (event.notification.data && event.notification.data.url) || './';
+
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true })
+      .then(function(clientList) {
+        // If app is already open, focus it
+        for (var i = 0; i < clientList.length; i++) {
+          if (clientList[i].url.includes(self.location.origin)) {
+            return clientList[i].focus();
+          }
+        }
+        // Otherwise open a new window
+        return clients.openWindow(targetUrl);
+      })
+  );
+});
 
 // ── UPDATE NOTIFICATION ─────────────────────────────────────────
 // Tell all open clients when a new version is ready
