@@ -68,6 +68,7 @@
 
 
 
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -100,6 +101,7 @@
   <!-- ── Styles ── -->
   <link rel="stylesheet" href="style.css?v=11" />
   <link rel="stylesheet" href="retention.css" />
+  <link rel="stylesheet" href="study-modes.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=DM+Serif+Display:ital@0;1&display=swap" rel="stylesheet" />
 
@@ -525,6 +527,26 @@
         </div>
         <div class="mc-arrow">→</div>
       </button>
+      <!-- Leaderboard — full width -->
+      <button class="mode-card mc--leaderboard-card mode-card--wide" id="mc--leaderboard-card" onclick="showScreen('leaderboard')">
+        <div class="mc-accent"></div>
+        <div class="mc-icon-wrap">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 21h8M12 17v4"/>
+            <path d="M7 4H4a1 1 0 0 0-1 1v3c0 2.2 1.8 4 4 4"/>
+            <path d="M17 4h3a1 1 0 0 1 1 1v3c0 2.2-1.8 4-4 4"/>
+            <path d="M12 15c-3.3 0-6-2.7-6-6V4h12v5c0 3.3-2.7 6-6 6z"/>
+          </svg>
+        </div>
+        <div class="mc-body">
+          <div class="mc-label">Weekly League</div>
+          <div id="lbTeaser" class="hidden">
+            <div class="mc-desc" id="lbTeaserSub">Compete in your division · resets Monday</div>
+          </div>
+          <div class="mc-desc" id="lbTeaserDefault">Compete in weekly divisions · top 10 promote</div>
+        </div>
+        <div class="mc-arrow">→</div>
+      </button>
     </div>
 
     <div class="home-footer">
@@ -766,7 +788,15 @@
         Categories
       </button>
       <span class="fc-study-cat-name" id="fcStudyCatName"></span>
-      <span style="width:80px"></span>
+      <button class="feynman-toggle-btn" id="feynmanToggleBtn"
+              onclick="toggleFeynmanMode()"
+              title="Feynman mode — explain aloud before flipping"
+              aria-pressed="false">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/>
+          <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M19 10a7 7 0 0 1-14 0M12 19v3M8 22h8"/>
+        </svg>
+      </button>
     </div>
 
     <div class="fc-search-wrapper">
@@ -5187,6 +5217,50 @@
   </section>
 
   <!-- ═══════════════════════════════════════════ -->
+  <!--  LEADERBOARD / WEEKLY LEAGUES              -->
+  <!-- ═══════════════════════════════════════════ -->
+  <section class="screen" id="screen-leaderboard">
+    <div class="screen-header">
+      <h2>🏆 Weekly League</h2>
+      <p>Compete in your division. Top 10 promote, bottom 10 demote. Resets every Monday.</p>
+    </div>
+
+    <!-- Sign-in prompt (shown when not signed in) -->
+    <div class="lb-signin-prompt hidden" id="lbSigninPrompt">
+      <div class="lb-signin-icon">🏆</div>
+      <p>Sign in to join the leaderboard and compete in weekly leagues.</p>
+    </div>
+
+    <!-- Loading state -->
+    <div class="lb-loading hidden" id="lbLoading">
+      <div class="lb-loading-dots"><span></span><span></span><span></span></div>
+      <p>Loading your division...</p>
+    </div>
+
+    <!-- League banner — tier + rank + days left -->
+    <div id="leagueBanner"></div>
+
+    <!-- Tabs -->
+    <div class="lb-tabs">
+      <button class="lb-tab active" data-tab="week"  onclick="switchLbTab('week')">⚔️ This Week</button>
+      <button class="lb-tab"        data-tab="all"   onclick="switchLbTab('all')">🌟 All Time</button>
+    </div>
+
+    <!-- League content populated by leagues.js -->
+    <div class="lb-content" id="lbContent"></div>
+
+    <!-- Tier legend -->
+    <div class="lb-tier-legend">
+      <div class="lb-tier-legend-title">League Tiers</div>
+      <div class="lb-tier-row"><span>💎</span><span>Diamond</span><span class="lb-tier-req">50,000+ XP</span></div>
+      <div class="lb-tier-row"><span>⚡</span><span>Platinum</span><span class="lb-tier-req">20,000+ XP</span></div>
+      <div class="lb-tier-row"><span>🥇</span><span>Gold</span><span class="lb-tier-req">8,000+ XP</span></div>
+      <div class="lb-tier-row"><span>🥈</span><span>Silver</span><span class="lb-tier-req">2,000+ XP</span></div>
+      <div class="lb-tier-row"><span>🥉</span><span>Bronze</span><span class="lb-tier-req">Starting tier</span></div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════ -->
   <!--  ABOUT                                      -->
   <!-- ═══════════════════════════════════════════ -->
   <section class="screen" id="screen-about">
@@ -5417,6 +5491,8 @@
   <script src="tour.js?v=5"></script>
   <script src="retention.js"></script>
   <script src="backend-features.js"></script>
+  <script src="leagues.js"></script>
+  <script src="study-modes.js"></script>
 
   <!-- ── PWA: Service Worker + Install Prompt + Update Banner ── -->
   <script>
