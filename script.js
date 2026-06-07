@@ -15416,25 +15416,25 @@ async function _clubSaveName() {
   } else {
     if(errEl){errEl.textContent='Failed — try again';errEl.classList.remove('hidden');}
   }
+}
 
 async function _clubSetTheme(theme) {
   if (!_CLUB_THEMES[theme] || !_clubState.active) return;
-  var ok = await SupabaseSync.updateClub(_clubState.active.id, { theme:theme });
-  if (ok) {
-    _clubState.active.theme = theme;
-    var c = _clubState.clubs.find(function(c){return c.id===_clubState.active.id;});
-    if (c) c.theme = theme;
-    var ct     = _CLUB_THEMES[theme];
-    var banner = document.getElementById('clubBanner');
-    var root   = document.getElementById('clubRoot');
-    if (banner) { banner.style.background = ct.grad; }
-    if (root)   { root.style.setProperty('--club-accent', ct.accent); }
-    document.querySelectorAll('.club-theme-swatch').forEach(function(s){
-      s.classList.toggle('active', s.dataset.theme===theme);
-    });
-    showSettingsToast(theme.charAt(0).toUpperCase()+theme.slice(1)+' theme applied ✓');
-  }
-}
+  var ct = _CLUB_THEMES[theme];
+  /* ── Update UI immediately (optimistic) ── */
+  _clubState.active.theme = theme;
+  var cl = _clubState.clubs.find(function(x){return x.id===_clubState.active.id;});
+  if (cl) cl.theme = theme;
+  var banner = document.getElementById('clubBanner');
+  var root   = document.getElementById('clubRoot');
+  if (banner) banner.style.background = ct.grad;
+  if (root)   root.style.setProperty('--club-accent', ct.accent);
+  document.querySelectorAll('.club-theme-swatch').forEach(function(s){
+    s.classList.toggle('active', s.dataset.theme === theme);
+  });
+  showSettingsToast(theme.charAt(0).toUpperCase()+theme.slice(1)+' theme applied ✓');
+  /* ── Persist to DB in background (no column = silent fail) ── */
+  SupabaseSync.updateClub(_clubState.active.id, { theme: theme });
 }
 
 async function _clubRegenCode() {
@@ -15511,6 +15511,9 @@ function _clubRenderStudent() {
         action = 'showScreen(\'case\')';
       } else if (a.type==='quiz') {
         action = 'showScreen(\'quiz\')';
+      } else if (a.target_cat) {
+        /* Go straight to the assigned category deck — not the full All deck */
+        action = 'showScreen(\'flashcards\');setTimeout(function(){filterFC(\''+_esc(a.target_cat)+'\');},320)';
       } else {
         action = 'showScreen(\'flashcards\')';
       }
