@@ -16865,7 +16865,7 @@ function _studySessionEnd() {
 
 /* VAPID public key — generate with: npx web-push generate-vapid-keys
    Then paste the PUBLIC key here, and set the PRIVATE key in your Edge Function. */
-var PUSH_PUBLIC_KEY = 'REPLACE_WITH_YOUR_VAPID_PUBLIC_KEY';
+var PUSH_PUBLIC_KEY = 'BFtaZh2zDMGsDLYsvrj663g7sQ6PxpzJRVFAPnsj641oE9IwV9xhkBeqXupLK1S3jg7VWUtw1oi7BtoyVTplqWQ';
 
 var _pushPermissionAsked = false;
 
