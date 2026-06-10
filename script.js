@@ -88,7 +88,7 @@ function updateLbTeaser() {
   SupabaseSync.fetchLeaderboard('week_xp').then(function(rows){
     if (!rows||!rows.length) { if(sub) sub.textContent='Be first on the board!'; return; }
     SupabaseSync.fetchMyRank('week_xp').then(function(rank){
-      var names=rows.slice(0,3).map(function(r,i){return ['🥇','🥈','🥉'][i]+' '+r.display_name.split(' ')[0];}).join('  ');
+      var names=rows.slice(0,3).map(function(r,i){return ['🥇','🥈','🥉'][i]+' '+(r.display_name||'Student').split(' ')[0];}).join('  ');
       if(sub) sub.textContent=(rank?'Your rank: #'+rank+'  ·  ':'')+names;
     });
   });
@@ -7625,13 +7625,30 @@ function sm2Load() {
   } catch(e) { sm2Data = {}; savedCards = new Set(); }
 }
 
+// Debounced sm2Save — sm2Data is always up to date in memory; only the
+// localStorage write is deferred. Coalesces rapid card ratings (e.g. 10 cards
+// in 3 seconds) from ~10 × 400 KB JSON.stringify calls down to 1–2.
+var _sm2SaveTimer = null;
 function sm2Save() {
+  SupabaseSync.schedulePush('srs');          // queue sync immediately (already debounced server-side)
+  clearTimeout(_sm2SaveTimer);
+  _sm2SaveTimer = setTimeout(_sm2WriteNow, 400);
+}
+
+function _sm2WriteNow() {
+  _sm2SaveTimer = null;
   try {
     localStorage.setItem(SM2_KEY, JSON.stringify(sm2Data));
     localStorage.setItem('medpath_saved', JSON.stringify([...savedCards]));
   } catch(e) {}
-  SupabaseSync.schedulePush('srs');
 }
+
+// Flush any deferred sm2 write before the page disappears.
+// localStorage is synchronous so these always complete before the browser kills the page.
+window.addEventListener('beforeunload', _sm2WriteNow);
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState === 'hidden') _sm2WriteNow();
+});
 
 // Backward-compat aliases used elsewhere in the code
 function loadSRS()  { sm2Load(); }
@@ -7935,7 +7952,13 @@ function getNextSRSIndex(currentIndex) {
 }
 
 // ── Stats Strip ───────────────────────────
+// Debounced: called up to 6× per card flip but the DOM only needs updating once.
+var _ussTimer = null;
 function updateStatsStrip() {
+  clearTimeout(_ussTimer);
+  _ussTimer = setTimeout(_updateStatsStripNow, 150);
+}
+function _updateStatsStripNow() {
   const now   = Date.now();
   const daily = _getDailyData();
   let review = 0, learning = 0, totalNew = 0;

@@ -249,7 +249,7 @@ function updateLbTeaser() {
     if (!rows || !rows.length) { if (sub) sub.textContent = 'Be first on the board this week!'; return; }
     SupabaseSync.fetchMyRank('week_xp').then(function(rank) {
       var names = rows.slice(0, 3)
-        .map(function(r, i) { return ['🥇','🥈','🥉'][i] + ' ' + (r.display_name || '').split(' ')[0]; })
+        .map(function(r, i) { return ['🥇','🥈','🥉'][i] + ' ' + (r.display_name || 'Student').split(' ')[0]; })
         .join('  ');
       var myRow  = rows.find(function(r) {
         var u = typeof getCurrentUser === 'function' ? getCurrentUser() : null;
